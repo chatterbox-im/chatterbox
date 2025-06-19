@@ -91,41 +91,59 @@ impl super::OmemoManager {
     /// compatible with the XMPP PubSub protocol and XEP-0384 (OMEMO Encryption).
     /// It ensures proper namespace handling to avoid "invalid item" errors.
     pub fn bundle_to_xml(&self, bundle: &OmemoBundle) -> Result<String> {
-        // Create the bundle element with the proper namespace
-        // The namespace must be explicitly set on the bundle element only
-        let mut xml = String::new();
-        xml.push_str(&format!("<bundle xmlns='{}'>", OMEMO_NAMESPACE));
+        use xmpp_parsers::Element;
         
-        // Add the identity key - no namespace needed for child elements
+        // Create the bundle element with the proper namespace
+        let mut bundle_elem = Element::builder("bundle", OMEMO_NAMESPACE).build();
+        
+        // Add the identity key (inherits namespace from parent)
         let identity_key_b64 = base64::engine::general_purpose::STANDARD.encode(&bundle.identity_key);
-        xml.push_str(&format!("<identityKey>{}</identityKey>", identity_key_b64));
+        let identity_key_elem = Element::builder("identityKey", OMEMO_NAMESPACE)
+            .append(identity_key_b64)
+            .build();
+        bundle_elem.append_child(identity_key_elem);
         
         // Add the signed pre-key with its ID as an attribute
         let signed_prekey_b64 = base64::engine::general_purpose::STANDARD.encode(&bundle.signed_pre_key);
-        xml.push_str(&format!("<signedPreKeyPublic signedPreKeyId='{}'>{}</signedPreKeyPublic>", bundle.signed_pre_key_id, signed_prekey_b64));
+        let signed_prekey_elem = Element::builder("signedPreKeyPublic", OMEMO_NAMESPACE)
+            .attr("signedPreKeyId", bundle.signed_pre_key_id.to_string())
+            .append(signed_prekey_b64)
+            .build();
+        bundle_elem.append_child(signed_prekey_elem);
         
         // Add the signature for the signed pre-key
         let signature_b64 = base64::engine::general_purpose::STANDARD.encode(&bundle.signed_pre_key_signature);
-        xml.push_str(&format!("<signedPreKeySignature>{}</signedPreKeySignature>", signature_b64));
+        let signature_elem = Element::builder("signedPreKeySignature", OMEMO_NAMESPACE)
+            .append(signature_b64)
+            .build();
+        bundle_elem.append_child(signature_elem);
         
         // Add the pre-keys container
-        xml.push_str("<prekeys>");
+        let mut prekeys_elem = Element::builder("prekeys", OMEMO_NAMESPACE).build();
         
         // Add each pre-key with its ID as an attribute
         for (id, key) in &bundle.pre_keys {
             let prekey_b64 = base64::engine::general_purpose::STANDARD.encode(key);
-            xml.push_str(&format!("<preKeyPublic preKeyId='{}'>{}</preKeyPublic>", id, prekey_b64));
+            let prekey_elem = Element::builder("preKeyPublic", OMEMO_NAMESPACE)
+                .attr("preKeyId", id.to_string())
+                .append(prekey_b64)
+                .build();
+            prekeys_elem.append_child(prekey_elem);
         }
         
-        // Close the pre-keys container
-        xml.push_str("</prekeys>");
+        bundle_elem.append_child(prekeys_elem);
         
-        // Close the bundle element
-        xml.push_str("</bundle>");
+        // Convert to string and validate
+        let xml = String::from(&bundle_elem);
         
         // Validate the XML structure before returning
         match roxmltree::Document::parse(&xml) {
-            Ok(_) => {
+            Ok(doc) => {
+                // Verify namespace is properly set
+                let root = doc.root_element();
+                if root.attribute("xmlns") != Some(OMEMO_NAMESPACE) {
+                    warn!("Bundle XML missing proper namespace declaration");
+                }
                 debug!("Generated valid bundle XML: {}", xml);
                 Ok(xml)
             },
@@ -284,41 +302,59 @@ impl super::OmemoManager {
     /// compatible with the XMPP PubSub protocol and XEP-0384 (OMEMO Encryption).
     /// It ensures proper namespace handling to avoid "invalid item" errors.
     pub fn convert_x3dh_bundle_to_xml(&self, bundle: &protocol::X3DHKeyBundle) -> Result<String> {
+        use xmpp_parsers::Element;
+        
         // Create the bundle element with the proper namespace
-        let mut xml = String::new();
-        xml.push_str(&format!("<bundle xmlns='{}'>", OMEMO_NAMESPACE));
+        let mut bundle_elem = Element::builder("bundle", OMEMO_NAMESPACE).build();
         
         // Add the identity key
         let identity_key_b64 = base64::engine::general_purpose::STANDARD.encode(&bundle.identity_key_pair.public_key);
-        xml.push_str(&format!("<identityKey>{}</identityKey>", identity_key_b64));
+        let identity_key_elem = Element::builder("identityKey", OMEMO_NAMESPACE)
+            .append(identity_key_b64)
+            .build();
+        bundle_elem.append_child(identity_key_elem);
         
         // Add the signed pre-key with its ID as an attribute
         let signed_prekey_b64 = base64::engine::general_purpose::STANDARD.encode(&bundle.signed_pre_key_pair.public_key);
-        xml.push_str(&format!("<signedPreKeyPublic signedPreKeyId='{}'>{}</signedPreKeyPublic>", 
-                             bundle.signed_pre_key_id, signed_prekey_b64));
+        let signed_prekey_elem = Element::builder("signedPreKeyPublic", OMEMO_NAMESPACE)
+            .attr("signedPreKeyId", bundle.signed_pre_key_id.to_string())
+            .append(signed_prekey_b64)
+            .build();
+        bundle_elem.append_child(signed_prekey_elem);
         
         // Add the signature for the signed pre-key
         let signature_b64 = base64::engine::general_purpose::STANDARD.encode(&bundle.signed_pre_key_signature);
-        xml.push_str(&format!("<signedPreKeySignature>{}</signedPreKeySignature>", signature_b64));
+        let signature_elem = Element::builder("signedPreKeySignature", OMEMO_NAMESPACE)
+            .append(signature_b64)
+            .build();
+        bundle_elem.append_child(signature_elem);
         
         // Add the pre-keys container
-        xml.push_str("<prekeys>");
+        let mut prekeys_elem = Element::builder("prekeys", OMEMO_NAMESPACE).build();
         
         // Add each pre-key with its ID as an attribute
         for (id, key_pair) in &bundle.one_time_pre_key_pairs {
             let prekey_b64 = base64::engine::general_purpose::STANDARD.encode(&key_pair.public_key);
-            xml.push_str(&format!("<preKeyPublic preKeyId='{}'>{}</preKeyPublic>", id, prekey_b64));
+            let prekey_elem = Element::builder("preKeyPublic", OMEMO_NAMESPACE)
+                .attr("preKeyId", id.to_string())
+                .append(prekey_b64)
+                .build();
+            prekeys_elem.append_child(prekey_elem);
         }
         
-        // Close the pre-keys container
-        xml.push_str("</prekeys>");
+        bundle_elem.append_child(prekeys_elem);
         
-        // Close the bundle element
-        xml.push_str("</bundle>");
+        // Convert to string and validate
+        let xml = String::from(&bundle_elem);
         
         // Validate the XML structure before returning
         match roxmltree::Document::parse(&xml) {
-            Ok(_) => {
+            Ok(doc) => {
+                // Verify namespace is properly set
+                let root = doc.root_element();
+                if root.attribute("xmlns") != Some(OMEMO_NAMESPACE) {
+                    warn!("X3DH Bundle XML missing proper namespace declaration");
+                }
                 debug!("Generated valid X3DH bundle XML: {}", xml);
                 Ok(xml)
             },
@@ -448,6 +484,102 @@ impl super::OmemoManager {
                     return Ok(());
                 }
                 Err(anyhow::anyhow!("Failed to make PubSub request: {}", e))
+            }
+        }
+    }
+
+    /// Validate bundle XML structure and namespace
+    pub fn validate_bundle_xml(xml: &str) -> Result<()> {
+        // Parse the XML
+        let doc = roxmltree::Document::parse(xml)
+            .map_err(|e| anyhow!("Invalid XML structure: {}", e))?;
+        
+        let root = doc.root_element();
+        
+        // Check if root is bundle element
+        if root.tag_name().name() != "bundle" {
+            return Err(anyhow!("Root element must be 'bundle', found '{}'", root.tag_name().name()));
+        }
+        
+        // Check namespace
+        let namespace = root.attribute("xmlns");
+        if namespace != Some(OMEMO_NAMESPACE) {
+            return Err(anyhow!("Invalid namespace: expected '{}', found '{:?}'", 
+                OMEMO_NAMESPACE, namespace));
+        }
+        
+        // Check required child elements
+        let required_children = ["identityKey", "signedPreKeyPublic", "signedPreKeySignature", "prekeys"];
+        for child_name in &required_children {
+            if !root.children().any(|child| child.is_element() && child.tag_name().name() == *child_name) {
+                return Err(anyhow!("Missing required child element: {}", child_name));
+            }
+        }
+        
+        // Check for problematic namespace declarations
+        for child in root.descendants() {
+            if child.is_element() {
+                if let Some(xmlns) = child.attribute("xmlns") {
+                    if xmlns.is_empty() {
+                        warn!("Found empty xmlns attribute in element '{}' - this may cause server issues", 
+                              child.tag_name().name());
+                    }
+                }
+            }
+        }
+        
+        debug!("Bundle XML validation passed");
+        Ok(())
+    }
+
+    /// Add bundle validation to the existing publish method
+    pub async fn publish_bundle_validated(&self, bundle: OmemoBundle) -> Result<()> {
+        debug!("Publishing bundle for device {} with validation", self.device_id);
+        let node_name = format!("{}:bundles:{}", OMEMO_NAMESPACE, self.device_id);
+        let bundle_xml = self.bundle_to_xml(&bundle)?;
+        
+        // Validate the XML before publishing
+        if let Err(e) = Self::validate_bundle_xml(&bundle_xml) {
+            error!("Bundle XML validation failed: {}", e);
+            return Err(anyhow!("Bundle XML validation failed: {}", e));
+        }
+        
+        info!("Bundle XML validated successfully, proceeding with publication");
+        let item_id = "current";
+        
+        // First try the standard publication method
+        match self.publish_pubsub_item(None, &node_name, item_id, &bundle_xml).await {
+            Ok(_) => {
+                info!("Bundle published successfully for device {}", self.device_id);
+                return Ok(());
+            },
+            Err(e) => {
+                warn!("Standard bundle publication failed: {}", e);
+                
+                // If the error contains "invalid-item" or "bad-request", try the alternative format
+                if e.to_string().contains("invalid-item") || e.to_string().contains("bad-request") {
+                    debug!("Attempting alternative bundle publication format");
+                    
+                    // Try using the alternative format method from omemo_integration
+                    match crate::xmpp::omemo_integration::publish_bundle_alternative_format(
+                        None, &node_name, item_id, &bundle_xml
+                    ).await {
+                        Ok(_) => {
+                            info!("Bundle published successfully using alternative format for device {}", self.device_id);
+                            return Ok(());
+                        },
+                        Err(alt_err) => {
+                            error!("Alternative bundle publication also failed: {}", alt_err);
+                            println!("[OMEMO ERROR] Failed to publish bundle (both methods): {}", alt_err);
+                            return Err(anyhow!("Failed to publish bundle (both methods): {}", alt_err));
+                        }
+                    }
+                }
+                
+                // If we get here, the error wasn't related to format issues or the alternative method failed
+                error!("Failed to publish bundle: {}", e);
+                println!("[OMEMO ERROR] Failed to publish bundle: {}", e);
+                return Err(anyhow!("Failed to publish bundle: {}", e));
             }
         }
     }

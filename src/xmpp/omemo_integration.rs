@@ -1324,9 +1324,8 @@ pub async fn publish_pubsub_item(
                 // Function to recursively add child elements
                 fn add_child_elements(parent: &mut xmpp_parsers::Element, node: roxmltree::Node) {
                     for child in node.children().filter(|n| n.is_element()) {
-                        // Don't set namespace for child elements - they inherit from parent
-                        // Use empty string for namespace to avoid adding xmlns='' attributes
-                        let mut child_elem = xmpp_parsers::Element::builder(child.tag_name().name(), "")
+                        // Use the OMEMO namespace for all child elements to maintain consistency
+                        let mut child_elem = xmpp_parsers::Element::builder(child.tag_name().name(), "eu.siacs.conversations.axolotl")
                             .build();
                         
                         // Copy attributes
