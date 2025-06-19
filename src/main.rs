@@ -212,7 +212,23 @@ async fn main() -> Result<()> {
     info!("Waiting for OMEMO initialization to complete...");
     
     // Set up the contact list (but don't wait for message history)
-    setup_contacts(&mut chat_ui, &mut xmpp_client).await;
+    // Add timeout to prevent hanging during contact setup
+    match tokio::time::timeout(
+        tokio::time::Duration::from_secs(5),
+        setup_contacts(&mut chat_ui, &mut xmpp_client)
+    ).await {
+        Ok(_) => {
+            info!("Contact setup completed successfully");
+        },
+        Err(_) => {
+            error!("Contact setup timed out after 5 seconds");
+            chat_ui.add_contact("[Error: Contact setup timed out]");
+            chat_ui.add_message(create_system_message(
+                "me",
+                "Contact setup timed out. You can still chat by entering complete JIDs manually."
+            ));
+        }
+    }
     
     // --- Show OMEMO fingerprints for each contact as system messages ---
     if xmpp_client.is_omemo_enabled().await {
@@ -224,8 +240,12 @@ async fn main() -> Result<()> {
             }
             let bare_jid = contact.split('/').next().unwrap_or(contact.as_str());
             // Always refresh the device list from the server before showing fingerprints
-            match xmpp_client.force_refresh_device_list(bare_jid).await {
-                Ok(device_ids) if !device_ids.is_empty() => {
+            // Add timeout to prevent hanging on device discovery
+            match tokio::time::timeout(
+                tokio::time::Duration::from_secs(5),
+                xmpp_client.force_refresh_device_list(bare_jid)
+            ).await {
+                Ok(Ok(device_ids)) if !device_ids.is_empty() => {
                     for device_id in device_ids {
                         match xmpp_client.get_device_fingerprint(bare_jid, device_id).await {
                             Ok(fingerprint) => {
@@ -251,17 +271,27 @@ async fn main() -> Result<()> {
                         }
                     }
                 },
-                Ok(_) => {
+                Ok(Ok(_)) => {
+                    // Empty device list
                     let msg = create_system_message(
                         &contact,
-                        "No OMEMO devices found for this contact."
+                        &format!("No OMEMO devices found for {}", bare_jid),
                     );
                     chat_ui.add_message(msg);
                 },
-                Err(e) => {
+                Ok(Err(e)) => {
+                    // Error during device refresh
                     let msg = create_system_message(
                         &contact,
-                        &format!("Could not retrieve OMEMO device list: {}", e)
+                        &format!("Could not refresh OMEMO devices for {}: {}", bare_jid, e),
+                    );
+                    chat_ui.add_message(msg);
+                },
+                Err(_) => {
+                    // Timeout
+                    let msg = create_system_message(
+                        &contact,
+                        &format!("Timeout refreshing OMEMO devices for {}", bare_jid),
                     );
                     chat_ui.add_message(msg);
                 }
