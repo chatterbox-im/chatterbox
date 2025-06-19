@@ -1,0 +1,5 @@
+*.log
+.env
+.github
+target
+chatterbox.log
