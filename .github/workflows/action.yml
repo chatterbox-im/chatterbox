@@ -8,14 +8,13 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      XMPP_SERVER: ${{ secrets.XMPP_SERVER }}
+      XMPP_USERNAME: ${{ secrets.XMPP_USERNAME }}
+      XMPP_PASSWORD: ${{ secrets.XMPP_PASSWORD }}
+      XMPP_USERNAME_B: ${{ secrets.XMPP_USERNAME_B }}
+      XMPP_PASSWORD_B: ${{ secrets.XMPP_PASSWORD_B }}
     steps:
-      - shell: bash
-        env:
-	  XMPP_SERVER: ${{ secrets.XMPP_SERVER }}
-	  XMPP_USERNAME: ${{ secrets.XMPP_USERNAME }}
-	  XMPP_PASSWORD: ${{ secrets.XMPP_PASSWORD }}
-	  XMPP_USERNAME_B: ${{ secrets.XMPP_USERNAME_B }}
-	  XMPP_PASSWORD_B: ${{ secrets.XMPP_PASSWORD_B }}
       - uses: actions/checkout@v4
       - name: Build binaries
         run: cargo build
