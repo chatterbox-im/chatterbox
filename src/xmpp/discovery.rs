@@ -317,7 +317,7 @@ impl ServiceDiscovery {
         let identity = Element::builder("identity", "")
             .attr("category", "client")
             .attr("type", "console")
-            .attr("name", "Sermo XMPP Client")
+            .attr("name", "Chatterbox XMPP Client")
             .build();
         query.append_child(identity);
 

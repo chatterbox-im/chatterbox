@@ -1673,16 +1673,17 @@ pub enum EncryptionVerificationError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::omemo::device_id::generate_device_id;
     use tempfile::tempdir;
 
     // Helper function to create a temporary OMEMO storage for testing
     async fn create_test_storage() -> Result<OmemoStorage, anyhow::Error> {
-        // Create a temporary directory for our test DB
+        // Create a temporary directory for our test storage
         let temp_dir = tempdir()?;
-        let db_path = temp_dir.path().join("test_omemo.db");
+        let storage_path = temp_dir.path().to_path_buf();
         
         // Create a new storage instance with this path
-        let storage = OmemoStorage::new(Some(db_path))?;
+        let storage = OmemoStorage::new(Some(storage_path))?;
         
         Ok(storage)
     }

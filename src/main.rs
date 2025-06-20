@@ -25,8 +25,8 @@ use chatterbox::xmpp::discovery::ServiceDiscovery;
 #[command(
     author,
     version,
-    about = "Sermo: A CLI XMPP chat client with OMEMO encryption.",
-    long_about = "Sermo is a command-line chat client for XMPP with OMEMO encryption support.\n\n\
+    about = "Chatterbox: A CLI XMPP chat client with OMEMO encryption.",
+    long_about = "Chatterbox is a command-line chat client for XMPP with OMEMO encryption support.\n\n\
     Optional parameters:\n\
     --omemo-dir <PATH>     Override the directory for OMEMO device_id, identity_key, and multi-device info files\n\
     Use -h or --help to see all options."
@@ -98,7 +98,7 @@ async fn main() -> Result<()> {
     // Convert PathBuf to Option<&str> for setup_logging
     utils::setup_logging(log_file_path.to_str(), LevelFilter::Debug)?;
     
-    info!("Sermo XMPP Chat client starting up");
+    info!("Chatterbox XMPP Chat client starting up");
     info!("System information: {} {}", std::env::consts::OS, std::env::consts::ARCH);
     // Add log message indicating where the log file is being written
     info!("Logging to file: {}", log_file_path.display());
@@ -1534,6 +1534,9 @@ async fn run_main_loop(
                 // This typically happens when the user hasn't pressed a key
             }
         }
+        
+        // Add a small sleep to prevent tight loop and excessive CPU usage
+        tokio::time::sleep(tokio::time::Duration::from_millis(16)).await;
     }
     
     Ok(())

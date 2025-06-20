@@ -194,7 +194,7 @@ pub async fn send_initial_presence(client: &mut XMPPAsyncClient) -> Result<()> {
     
     // Add a status message (Optional)
     let mut status = Element::builder("status", "").build();
-    status.append_text_node("Online using Sermo XMPP");
+    status.append_text_node("Online using Chatterbox XMPP");
     presence.append_child(status);
     
     // Add caps (entity capabilities) advertisement

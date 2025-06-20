@@ -1,17 +1,18 @@
 // src/omemo/storage.rs
-//! Storage for OMEMO keys and sessions
+//! Filesystem-based storage for OMEMO keys and sessions
 //!
-//! This module provides storage for OMEMO encryption.
+//! This module provides filesystem-based storage for OMEMO encryption,
+//! using binary serialization for complex structures and plain text for simple values.
 
 use anyhow::{anyhow, Result};
-use std::path::PathBuf;
-use rusqlite::{params, Connection, OptionalExtension};
+use std::path::{Path, PathBuf};
+use std::fs;
 use crate::omemo::protocol::{DeviceIdentity, X3DHKeyBundle, RatchetState};
 use crate::omemo::device_id::DeviceId;
-use serde_json;
 use log::error;
 use once_cell::sync::OnceCell;
 use crate::omemo::device_id;
+use bincode;
 
 /// Entry for a device list
 pub struct DeviceListEntry {
@@ -25,170 +26,139 @@ pub struct DeviceListEntry {
     pub last_update: i64,
 }
 
-/// Storage for OMEMO data
+/// Filesystem-based storage for OMEMO data
 pub struct OmemoStorage {
-    /// SQLite connection
-    conn: Connection,
+    /// Root directory for OMEMO storage
+    base_path: PathBuf,
     
     /// Our device ID
     device_id: DeviceId,
 }
 
-static DB_PATH_OVERRIDE: OnceCell<PathBuf> = OnceCell::new();
+static STORAGE_PATH_OVERRIDE: OnceCell<PathBuf> = OnceCell::new();
 
-pub fn set_db_path_override(path: PathBuf) {
-    let _ = DB_PATH_OVERRIDE.set(path);
+pub fn set_storage_path_override(path: PathBuf) {
+    let _ = STORAGE_PATH_OVERRIDE.set(path);
 }
 
 impl OmemoStorage {
     /// Create a new OMEMO storage
     pub fn new(path: Option<PathBuf>) -> Result<Self> {
-        // Determine the database path
-        let path = match path {
+        // Determine the storage path
+        let base_path = match path {
             Some(p) => p,
             None => {
-                // If OMEMO_DIR_OVERRIDE is set, use it for omemo.db as well
+                // If OMEMO_DIR_OVERRIDE is set, use it
                 if let Some(dir) = device_id::get_omemo_dir_override() {
-                    let mut db_path = dir.clone();
-                    db_path.push("omemo.db");
-                    db_path
+                    dir.clone()
                 } else if let Some(jid) = device_id::get_omemo_jid() {
-                    // Use user-specific directory for OMEMO db
-                    let mut db_path = match dirs::data_dir() {
+                    // Use user-specific directory for OMEMO storage
+                    let mut storage_path = match dirs::data_dir() {
                         Some(path) => path,
                         None => return Err(anyhow!("Could not determine XDG_DATA_HOME directory")),
                     };
-                    db_path.push("sermo");
-                    db_path.push(&jid);
-                    std::fs::create_dir_all(&db_path)?;
-                    db_path.push("omemo.db");
-                    db_path
-                } else if let Some(override_path) = DB_PATH_OVERRIDE.get() {
+                    storage_path.push("chatterbox");
+                    storage_path.push(&jid);
+                    storage_path.push("omemo");
+                    storage_path
+                } else if let Some(override_path) = STORAGE_PATH_OVERRIDE.get() {
                     override_path.clone()
                 } else {
                     // Use the default path in the user's home directory
                     let mut home = dirs::home_dir().ok_or_else(|| anyhow!("Could not determine home directory"))?;
                     home.push(".local");
                     home.push("share");
-                    home.push("sermo");
-                    std::fs::create_dir_all(&home)?;
-                    home.push("omemo.db");
+                    home.push("chatterbox");
+                    home.push("omemo");
                     home
                 }
             }
         };
         
-        // Create the connection
-        let conn = Connection::open(&path)?;
+        // Create the directory structure
+        fs::create_dir_all(&base_path)?;
+        fs::create_dir_all(base_path.join("device_lists"))?;
+        fs::create_dir_all(base_path.join("identities"))?;
+        fs::create_dir_all(base_path.join("sessions"))?;
+        fs::create_dir_all(base_path.join("key_bundles"))?;
+        fs::create_dir_all(base_path.join("metadata"))?;
         
-        // Create the tables
-        Self::create_tables(&conn)?;
-        
-        // Get the device ID
-        let device_id = conn.query_row(
-            "SELECT value FROM metadata WHERE key = 'device_id'",
-            [],
-            |row| row.get(0),
-        ).unwrap_or(0);
+        // Load or generate device ID
+        let device_id = Self::load_or_generate_device_id(&base_path)?;
         
         Ok(Self {
-            conn,
+            base_path,
             device_id,
         })
     }
 
     /// Create a new OMEMO storage with default settings
     pub fn new_default() -> Result<Self> {
-        // Use default path (None) for the storage
         Self::new(None)
     }
     
-    /// Create the tables in the database
-    fn create_tables(conn: &Connection) -> Result<()> {
-        // Create the metadata table
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS metadata (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            )",
-            [],
-        )?;
+    /// Load or generate device ID
+    fn load_or_generate_device_id(base_path: &Path) -> Result<DeviceId> {
+        let device_id_path = base_path.join("metadata").join("device_id");
         
-        // Create the device list table
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS device_lists (
-                jid TEXT PRIMARY KEY,
-                device_ids TEXT,
-                last_update INTEGER
-            )",
-            [],
-        )?;
+        if device_id_path.exists() {
+            let content = fs::read_to_string(&device_id_path)?;
+            content.trim().parse::<DeviceId>()
+                .map_err(|e| anyhow!("Failed to parse device ID: {}", e))
+        } else {
+            // Generate new device ID and save it
+            let device_id = crate::omemo::device_id::generate_device_id();
+            Self::write_text_file(&device_id_path, &device_id.to_string())?;
+            Ok(device_id)
+        }
+    }
+    
+    /// Write text content to a file atomically
+    fn write_text_file(path: &Path, content: &str) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
         
-        // Create the identity table
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS identities (
-                jid TEXT,
-                device_id INTEGER,
-                identity_key BLOB,
-                signed_prekey_id INTEGER,
-                signed_prekey BLOB,
-                signature BLOB,
-                trusted INTEGER,
-                PRIMARY KEY (jid, device_id)
-            )",
-            [],
-        )?;
-        
-        // Create the prekeys table
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS prekeys (
-                jid TEXT,
-                device_id INTEGER,
-                prekey_id INTEGER,
-                prekey BLOB,
-                PRIMARY KEY (jid, device_id, prekey_id),
-                FOREIGN KEY (jid, device_id) REFERENCES identities (jid, device_id)
-                  ON DELETE CASCADE
-            )",
-            [],
-        )?;
-        
-        // Create the sessions table
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS sessions (
-                jid TEXT,
-                device_id INTEGER,
-                session_data BLOB,
-                last_updated INTEGER,
-                PRIMARY KEY (jid, device_id)
-            )",
-            [],
-        )?;
-        
-        // Create the key bundles table
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS key_bundles (
-                device_id INTEGER PRIMARY KEY,
-                identity_key_pair BLOB,
-                signed_prekey_id INTEGER,
-                signed_prekey_pair BLOB,
-                signed_prekey_signature BLOB,
-                one_time_prekey_pairs BLOB,
-                created_at INTEGER
-            )",
-            [],
-        )?;
-        
+        // Write to temporary file first, then rename for atomicity
+        let temp_path = path.with_extension("tmp");
+        fs::write(&temp_path, content)?;
+        fs::rename(&temp_path, path)?;
         Ok(())
+    }
+    
+    /// Write binary content to a file atomically
+    fn write_binary_file<T: serde::Serialize>(path: &Path, data: &T) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        
+        // Serialize with bincode
+        let encoded = bincode::serialize(data)?;
+        
+        // Write to temporary file first, then rename for atomicity
+        let temp_path = path.with_extension("tmp");
+        fs::write(&temp_path, encoded)?;
+        fs::rename(&temp_path, path)?;
+        Ok(())
+    }
+    
+    /// Read binary content from a file
+    fn read_binary_file<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
+        let data = fs::read(path)?;
+        bincode::deserialize(&data).map_err(|e| anyhow!("Failed to deserialize: {}", e))
+    }
+    
+    /// Get path for JID-based data
+    fn get_jid_path(&self, base_dir: &str, jid: &str) -> PathBuf {
+        // Sanitize JID for filesystem use
+        let safe_jid = jid.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
+        self.base_path.join(base_dir).join(safe_jid)
     }
     
     /// Store a device ID
     pub fn store_device_id(&mut self, device_id: DeviceId) -> Result<()> {
-        //debug!("Storing device ID: {}", device_id);
-        self.conn.execute(
-            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
-            params!["device_id", device_id.to_string()],
-        )?;
+        let device_id_path = self.base_path.join("metadata").join("device_id");
+        Self::write_text_file(&device_id_path, &device_id.to_string())?;
         
         // Also update the instance variable for immediate use
         self.device_id = device_id;
@@ -206,332 +176,197 @@ impl OmemoStorage {
     
     /// Store a device list
     pub fn save_device_list(&self, entry: &DeviceListEntry) -> Result<()> {
-        //debug!("[STORAGE DEBUG] save_device_list: saving device list for JID='{}', device_ids={:?}", entry.jid, entry.device_ids);
-        // Serialize the device IDs to JSON
-        let device_ids_json = serde_json::to_string(&entry.device_ids)?;
+        let jid_dir = self.get_jid_path("device_lists", &entry.jid);
+        fs::create_dir_all(&jid_dir)?;
         
-        // Store in the database
-        self.conn.execute(
-            "INSERT OR REPLACE INTO device_lists (jid, device_ids, last_update) VALUES (?, ?, ?)",
-            params![entry.jid, device_ids_json, entry.last_update],
-        )?;
+        // Write device IDs as newline-separated plain text
+        let device_ids_content = entry.device_ids.iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        Self::write_text_file(&jid_dir.join("device_ids"), &device_ids_content)?;
+        
+        // Write last update timestamp
+        Self::write_text_file(&jid_dir.join("last_update"), &entry.last_update.to_string())?;
         
         Ok(())
     }
     
-    /// Fix for loading a device list with proper error handling
+    /// Load a device list
     pub fn load_device_list(&self, jid: &str) -> Result<DeviceListEntry> {
-        //debug!("[STORAGE DEBUG] load_device_list: loading device list for JID='{}'", jid);
-        let result = self.conn.query_row(
-            "SELECT device_ids, last_update FROM device_lists WHERE jid = ?",
-            params![jid],
-            |row| {
-                let device_ids_json: String = row.get(0)?;
-                let last_update: i64 = row.get(1)?;
-                
-                // Handle JSON deserialization separately to properly map the error
-                let device_ids = match serde_json::from_str::<Vec<DeviceId>>(&device_ids_json) {
-                    Ok(ids) => ids,
-                    Err(_e) => {
-                        return Err(rusqlite::Error::InvalidColumnType(
-                            0, 
-                            "device_ids".to_string(), 
-                            rusqlite::types::Type::Text
-                        ));
-                    }
-                };
-                
-                Ok(DeviceListEntry {
-                    jid: jid.to_string(),
-                    device_ids,
-                    last_update,
-                })
-            },
-        )?;
+        let jid_dir = self.get_jid_path("device_lists", jid);
         
-        Ok(result)
+        // Read device IDs
+        let device_ids_path = jid_dir.join("device_ids");
+        let device_ids = if device_ids_path.exists() {
+            let content = fs::read_to_string(&device_ids_path)?;
+            content.lines()
+                .filter(|line| !line.is_empty())
+                .map(|line| line.parse::<DeviceId>())
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| anyhow!("Failed to parse device ID: {}", e))?
+        } else {
+            return Err(anyhow!("Device list not found for JID: {}", jid));
+        };
+        
+        // Read last update timestamp
+        let last_update_path = jid_dir.join("last_update");
+        let last_update = if last_update_path.exists() {
+            let content = fs::read_to_string(&last_update_path)?;
+            content.trim().parse::<i64>()
+                .map_err(|e| anyhow!("Failed to parse last_update: {}", e))?
+        } else {
+            0 // Default value if not found
+        };
+        
+        Ok(DeviceListEntry {
+            jid: jid.to_string(),
+            device_ids,
+            last_update,
+        })
     }
     
     /// Store a device identity
     pub fn save_device_identity(&mut self, jid: &str, identity: &DeviceIdentity, trusted: bool) -> Result<()> {
-        //debug!("[STORAGE DEBUG] save_device_identity: saving device identity for JID='{}', device_id={}", jid, identity.id);
-        // Start a transaction
-        let tx = self.conn.transaction()?;
+        let jid_dir = self.get_jid_path("identities", jid);
+        let device_dir = jid_dir.join(identity.id.to_string());
+        fs::create_dir_all(&device_dir)?;
         
-        // Store the identity
-        tx.execute(
-            "INSERT OR REPLACE INTO identities (
-                jid, device_id, identity_key, signed_prekey_id, signed_prekey, signature, trusted
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            params![
-                jid,
-                identity.id,
-                identity.identity_key,
-                identity.signed_pre_key.id,
-                identity.signed_pre_key.public_key,
-                identity.signed_pre_key.signature,
-                trusted as i32
-            ],
-        )?;
+        // Store the identity using binary serialization
+        Self::write_binary_file(&device_dir.join("identity.bin"), &identity)?;
         
-        // Delete existing prekeys
-        tx.execute(
-            "DELETE FROM prekeys WHERE jid = ? AND device_id = ?",
-            params![jid, identity.id],
-        )?;
-        
-        // Store the prekeys
-        for prekey in &identity.pre_keys {
-            tx.execute(
-                "INSERT INTO prekeys (jid, device_id, prekey_id, prekey) VALUES (?, ?, ?, ?)",
-                params![jid, identity.id, prekey.id, prekey.public_key],
-            )?;
-        }
-        
-        // Commit the transaction
-        tx.commit()?;
+        // Store trust status as plain text
+        Self::write_text_file(&device_dir.join("trusted"), &trusted.to_string())?;
         
         Ok(())
     }
     
     /// Load a device identity
     pub fn load_device_identity(&mut self, jid: &str, device_id: DeviceId) -> Result<DeviceIdentity> {
-        //debug!("[STORAGE DEBUG] load_device_identity: loading device identity for JID='{}', device_id={}", jid, device_id);
-        // Start a transaction
-        let tx = self.conn.transaction()?;
+        let jid_dir = self.get_jid_path("identities", jid);
+        let device_dir = jid_dir.join(device_id.to_string());
+        let identity_path = device_dir.join("identity.bin");
         
-        // Load the identity
-        let identity = tx.query_row(
-            "SELECT identity_key, signed_prekey_id, signed_prekey, signature FROM identities
-             WHERE jid = ? AND device_id = ?",
-            params![jid, device_id],
-            |row| {
-                let identity_key: Vec<u8> = row.get(0)?;
-                let signed_prekey_id: u32 = row.get(1)?;
-                let signed_prekey: Vec<u8> = row.get(2)?;
-                let signature: Vec<u8> = row.get(3)?;
-                
-                Ok((identity_key, signed_prekey_id, signed_prekey, signature))
-            },
-        )?;
-        
-        // Load the prekeys
-        let mut stmt = tx.prepare(
-            "SELECT prekey_id, prekey FROM prekeys
-             WHERE jid = ? AND device_id = ?"
-        )?;
-        
-        let prekey_rows = stmt.query_map(
-            params![jid, device_id],
-            |row| {
-                let prekey_id: u32 = row.get(0)?;
-                let prekey: Vec<u8> = row.get(1)?;
-                
-                Ok((prekey_id, prekey))
-            },
-        )?;
-        
-        let mut prekeys = Vec::new();
-        for prekey_row in prekey_rows {
-            let (prekey_id, prekey) = prekey_row?;
-            prekeys.push(crate::omemo::protocol::PreKeyBundle {
-                id: prekey_id,
-                public_key: prekey,
-            });
+        if !identity_path.exists() {
+            return Err(anyhow!("Device identity not found for JID: {}, device_id: {}", jid, device_id));
         }
         
-        // Create the device identity
-        let (identity_key, signed_prekey_id, signed_prekey, signature) = identity;
-        let device_identity = DeviceIdentity {
-            id: device_id,
-            identity_key,
-            signed_pre_key: crate::omemo::protocol::SignedPreKeyBundle {
-                id: signed_prekey_id,
-                public_key: signed_prekey,
-                signature,
-            },
-            pre_keys: prekeys,
-        };
-        
-        Ok(device_identity)
+        Self::read_binary_file(&identity_path)
     }
     
     /// Check if a device identity is trusted
     pub fn is_device_trusted(&self, jid: &str, device_id: DeviceId) -> Result<bool> {
-        let trusted = self.conn.query_row(
-            "SELECT trusted FROM identities WHERE jid = ? AND device_id = ?",
-            params![jid, device_id],
-            |row| row.get::<_, i32>(0),
-        ).optional()?;
+        let jid_dir = self.get_jid_path("identities", jid);
+        let device_dir = jid_dir.join(device_id.to_string());
+        let trusted_path = device_dir.join("trusted");
         
-        // If no record exists, consider the device untrusted
-        Ok(trusted.unwrap_or(0) != 0)
+        if trusted_path.exists() {
+            let content = fs::read_to_string(&trusted_path)?;
+            content.trim().parse::<bool>()
+                .map_err(|e| anyhow!("Failed to parse trusted status: {}", e))
+        } else {
+            // If no record exists, consider the device untrusted
+            Ok(false)
+        }
     }
     
     /// Set the trust status of a device identity
     pub fn set_device_trust(&self, jid: &str, device_id: DeviceId, trusted: bool) -> Result<()> {
-        // First check if the identity exists
-        let exists: Option<i64> = self.conn.query_row(
-            "SELECT 1 FROM identities WHERE jid = ? AND device_id = ?",
-            params![jid, device_id],
-            |row| row.get(0),
-        ).optional()?;
+        let jid_dir = self.get_jid_path("identities", jid);
+        let device_dir = jid_dir.join(device_id.to_string());
         
-        if exists.is_some() {
-            // Update existing record
-            self.conn.execute(
-                "UPDATE identities SET trusted = ? WHERE jid = ? AND device_id = ?",
-                params![trusted as i32, jid, device_id],
-            )?;
-        } else {
-            // Create a minimal record if it doesn't exist
-            self.conn.execute(
-                "INSERT INTO identities (jid, device_id, identity_key, signed_prekey_id, signed_prekey, signature, trusted)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)",
-                params![
-                    jid, 
-                    device_id, 
-                    Vec::<u8>::new(), // Empty placeholder for required fields
-                    0,
-                    Vec::<u8>::new(),
-                    Vec::<u8>::new(),
-                    trusted as i32
-                ],
-            )?;
-        }
+        // Create directory if it doesn't exist
+        fs::create_dir_all(&device_dir)?;
+        
+        // Store trust status
+        Self::write_text_file(&device_dir.join("trusted"), &trusted.to_string())?;
         
         Ok(())
     }
     
     /// Store a key bundle
     pub fn store_key_bundle(&self, bundle: &X3DHKeyBundle) -> Result<()> {
-        // Serialize the one-time prekey pairs
-        let one_time_prekey_pairs = serde_json::to_vec(&bundle.one_time_pre_key_pairs)?;
+        let bundle_dir = self.base_path.join("key_bundles").join(bundle.device_id.to_string());
+        fs::create_dir_all(&bundle_dir)?;
         
-        // Store in the database
-        self.conn.execute(
-            "INSERT OR REPLACE INTO key_bundles (
-                device_id, identity_key_pair, signed_prekey_id, signed_prekey_pair,
-                signed_prekey_signature, one_time_prekey_pairs, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            params![
-                bundle.device_id,
-                serde_json::to_vec(&bundle.identity_key_pair)?,
-                bundle.signed_pre_key_id,
-                serde_json::to_vec(&bundle.signed_pre_key_pair)?,
-                &bundle.signed_pre_key_signature,
-                one_time_prekey_pairs,
-                chrono::Utc::now().timestamp()
-            ],
-        )?;
+        // Store the bundle using binary serialization
+        Self::write_binary_file(&bundle_dir.join("bundle.bin"), bundle)?;
+        
+        // Store creation timestamp
+        let timestamp = chrono::Utc::now().timestamp();
+        Self::write_text_file(&bundle_dir.join("created_at"), &timestamp.to_string())?;
         
         Ok(())
     }
     
     /// Load a key bundle
     pub fn load_key_bundle_with_id(&self, device_id: DeviceId) -> Result<Option<X3DHKeyBundle>> {
-        let result = self.conn.query_row(
-            "SELECT
-                identity_key_pair, signed_prekey_id, signed_prekey_pair,
-                signed_prekey_signature, one_time_prekey_pairs
-             FROM key_bundles
-             WHERE device_id = ?",
-            params![device_id],
-            |row| {
-                let identity_key_pair_json: Vec<u8> = row.get(0)?;
-                let signed_prekey_id: u32 = row.get(1)?;
-                let signed_prekey_pair_json: Vec<u8> = row.get(2)?;
-                let signed_prekey_signature: Vec<u8> = row.get(3)?;
-                let one_time_prekey_pairs_json: Vec<u8> = row.get(4)?;
-                
-                // Handle JSON deserialization separately with manual mapping of errors
-                let identity_key_pair = match serde_json::from_slice::<crate::omemo::protocol::KeyPair>(&identity_key_pair_json) {
-                    Ok(pair) => pair,
-                    Err(e) => return Err(rusqlite::Error::FromSqlConversionFailure(
-                        0,
-                        rusqlite::types::Type::Blob, 
-                        Box::new(e)
-                    )),
-                };
-                
-                let signed_prekey_pair = match serde_json::from_slice::<crate::omemo::protocol::KeyPair>(&signed_prekey_pair_json) {
-                    Ok(pair) => pair,
-                    Err(e) => return Err(rusqlite::Error::FromSqlConversionFailure(
-                        2,
-                        rusqlite::types::Type::Blob, 
-                        Box::new(e)
-                    )),
-                };
-                
-                let one_time_prekey_pairs = match serde_json::from_slice::<std::collections::HashMap<u32, crate::omemo::protocol::KeyPair>>(&one_time_prekey_pairs_json) {
-                    Ok(pairs) => pairs,
-                    Err(e) => return Err(rusqlite::Error::FromSqlConversionFailure(
-                        4,
-                        rusqlite::types::Type::Blob, 
-                        Box::new(e)
-                    )),
-                };
-                
-                let bundle = X3DHKeyBundle {
-                    device_id,
-                    identity_key_pair,
-                    signed_pre_key_id: signed_prekey_id,
-                    signed_pre_key_pair: signed_prekey_pair,
-                    signed_pre_key_signature: signed_prekey_signature,
-                    one_time_pre_key_pairs: one_time_prekey_pairs,
-                };
-                
-                Ok(bundle)
-            },
-        ).optional()?;
+        let bundle_path = self.base_path.join("key_bundles").join(device_id.to_string()).join("bundle.bin");
         
-        Ok(result)
+        if bundle_path.exists() {
+            let bundle: X3DHKeyBundle = Self::read_binary_file(&bundle_path)?;
+            Ok(Some(bundle))
+        } else {
+            Ok(None)
+        }
     }
     
     /// Store a session
     pub fn save_session(&self, jid: &str, device_id: DeviceId, state: &RatchetState) -> Result<()> {
-        //debug!("[STORAGE DEBUG] save_session: saving session for JID='{}', device_id={}", jid, device_id);
-        // Serialize the session state
-        let state_bytes = serde_json::to_vec(state)?;
+        let jid_dir = self.get_jid_path("sessions", jid);
+        let session_dir = jid_dir.join(device_id.to_string());
+        fs::create_dir_all(&session_dir)?;
         
-        // Store in the database
-        self.conn.execute(
-            "INSERT OR REPLACE INTO sessions (jid, device_id, session_data, last_updated) VALUES (?, ?, ?, ?)",
-            params![jid, device_id, state_bytes, chrono::Utc::now().timestamp()],
-        )?;
+        // Store the session state using binary serialization
+        Self::write_binary_file(&session_dir.join("state.bin"), state)?;
+        
+        // Store last updated timestamp
+        let timestamp = chrono::Utc::now().timestamp();
+        Self::write_text_file(&session_dir.join("last_updated"), &timestamp.to_string())?;
         
         Ok(())
     }
     
     /// Load all sessions
     pub fn load_all_sessions(&self) -> Result<std::collections::HashMap<String, RatchetState>> {
-        //debug!("[STORAGE DEBUG] load_all_sessions: loading all sessions");
-        let mut stmt = self.conn.prepare(
-            "SELECT jid, device_id, session_data FROM sessions"
-        )?;
-        
-        let session_rows = stmt.query_map(
-            [],
-            |row| {
-                let jid: String = row.get(0)?;
-                let device_id: u32 = row.get(1)?;
-                let session_data: Vec<u8> = row.get(2)?;
-                
-                Ok((jid, device_id, session_data))
-            },
-        )?;
-        
         let mut sessions = std::collections::HashMap::new();
-        for session_row in session_rows {
-            let (jid, device_id, session_data) = session_row?;
-            let key = format!("{}:{}", jid, device_id);
+        let sessions_dir = self.base_path.join("sessions");
+        
+        if !sessions_dir.exists() {
+            return Ok(sessions);
+        }
+        
+        // Iterate through JID directories
+        for jid_entry in fs::read_dir(&sessions_dir)? {
+            let jid_entry = jid_entry?;
+            if !jid_entry.file_type()?.is_dir() {
+                continue;
+            }
             
-            match serde_json::from_slice::<RatchetState>(&session_data) {
-                Ok(state) => {
-                    sessions.insert(key, state);
-                },
-                Err(e) => {
-                    error!("Failed to deserialize session for {}:{}: {}", jid, device_id, e);
+            let jid_name = jid_entry.file_name().to_string_lossy().to_string();
+            // Convert back from safe filename to JID
+            let jid = jid_name.replace('_', "@"); // Simple conversion - may need more sophisticated handling
+            
+            // Iterate through device directories
+            for device_entry in fs::read_dir(jid_entry.path())? {
+                let device_entry = device_entry?;
+                if !device_entry.file_type()?.is_dir() {
+                    continue;
+                }
+                
+                if let Ok(device_id) = device_entry.file_name().to_string_lossy().parse::<DeviceId>() {
+                    let state_path = device_entry.path().join("state.bin");
+                    if state_path.exists() {
+                        match Self::read_binary_file::<RatchetState>(&state_path) {
+                            Ok(state) => {
+                                let key = format!("{}:{}", jid, device_id);
+                                sessions.insert(key, state);
+                            },
+                            Err(e) => {
+                                error!("Failed to deserialize session for {}:{}: {}", jid, device_id, e);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -541,155 +376,103 @@ impl OmemoStorage {
     
     /// Get the session state for a peer device
     pub fn get_session_ratchet_state(&self, jid: &str, device_id: DeviceId) -> Result<Option<RatchetState>> {
-        let result = self.conn.query_row(
-            "SELECT session_data FROM sessions WHERE jid = ? AND device_id = ?",
-            params![jid, device_id],
-            |row| {
-                let session_data: Vec<u8> = row.get(0)?;
-                // Convert JSON to RatchetState - handle deserialization errors
-                match serde_json::from_slice::<RatchetState>(&session_data) {
-                    Ok(state) => Ok(state),
-                    Err(e) => Err(rusqlite::Error::FromSqlConversionFailure(
-                        0,
-                        rusqlite::types::Type::Blob,
-                        Box::new(e)
-                    )),
-                }
-            },
-        ).optional()?;
+        let jid_dir = self.get_jid_path("sessions", jid);
+        let session_path = jid_dir.join(device_id.to_string()).join("state.bin");
         
-        Ok(result)
+        if session_path.exists() {
+            let state: RatchetState = Self::read_binary_file(&session_path)?;
+            Ok(Some(state))
+        } else {
+            Ok(None)
+        }
     }
     
     /// Store the timestamp of the last PreKey rotation
     pub fn store_prekey_rotation_time(&self, timestamp: i64) -> Result<()> {
-        self.conn.execute(
-            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
-            params!["prekey_rotation_time", timestamp.to_string()],
-        )?;
-        
+        let metadata_path = self.base_path.join("metadata").join("prekey_rotation_time");
+        Self::write_text_file(&metadata_path, &timestamp.to_string())?;
         Ok(())
     }
     
     /// Load the timestamp of the last PreKey rotation
     pub fn load_prekey_rotation_time(&self) -> Result<i64> {
-        let timestamp = self.conn.query_row(
-            "SELECT value FROM metadata WHERE key = 'prekey_rotation_time'",
-            [],
-            |row| {
-                let value: String = row.get(0)?;
-                value.parse::<i64>().map_err(|_| rusqlite::Error::InvalidColumnType(
-                    0, 
-                    "prekey_rotation_time".to_string(), 
-                    rusqlite::types::Type::Text
-                ))
-            },
-        )?;
+        let metadata_path = self.base_path.join("metadata").join("prekey_rotation_time");
         
-        Ok(timestamp)
+        if metadata_path.exists() {
+            let content = fs::read_to_string(&metadata_path)?;
+            content.trim().parse::<i64>()
+                .map_err(|e| anyhow!("Failed to parse prekey rotation time: {}", e))
+        } else {
+            Err(anyhow!("PreKey rotation time not found"))
+        }
     }
 
     /// Check if device list has been published
     pub async fn has_published_device_list(&self, jid: &str) -> Result<bool> {
-        // Check the metadata table for a record indicating the device list was published
-        let result = self.conn.query_row(
-            "SELECT value FROM metadata WHERE key = ?",
-            params![format!("published_device_list:{}", jid)],
-            |row| {
-                let value: String = row.get(0)?;
-                Ok(value == "true")
-            },
-        ).optional()?;
+        let metadata_path = self.base_path.join("metadata").join(format!("published_device_list_{}", self.sanitize_jid(jid)));
         
-        Ok(result.unwrap_or(false))
+        if metadata_path.exists() {
+            let content = fs::read_to_string(&metadata_path)?;
+            Ok(content.trim() == "true")
+        } else {
+            Ok(false)
+        }
     }
     
     /// Mark device list as published (can be called from both sync and async contexts)
     pub fn mark_device_list_published(&self, jid: &str) -> Result<()> {
-        //debug!("Marking device list as published for {}", jid);
-        
-        self.conn.execute(
-            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
-            params![
-                format!("published_device_list:{}", jid),
-                "true"
-            ],
-        )?;
-        
-        //debug!("Device list marked as published for {}", jid);
-        
+        let metadata_path = self.base_path.join("metadata").join(format!("published_device_list_{}", self.sanitize_jid(jid)));
+        Self::write_text_file(&metadata_path, "true")?;
         Ok(())
     }
     
     /// Check if bundle has been published
     pub async fn has_published_bundle(&self, device_id: u32) -> Result<bool> {
-        // Check the metadata table for a record indicating the bundle was published
-        let result = self.conn.query_row(
-            "SELECT value FROM metadata WHERE key = ?",
-            params![format!("published_bundle:{}", device_id)],
-            |row| {
-                let value: String = row.get(0)?;
-                Ok(value == "true")
-            },
-        ).optional()?;
+        let metadata_path = self.base_path.join("metadata").join(format!("published_bundle_{}", device_id));
         
-        Ok(result.unwrap_or(false))
+        if metadata_path.exists() {
+            let content = fs::read_to_string(&metadata_path)?;
+            Ok(content.trim() == "true")
+        } else {
+            Ok(false)
+        }
     }
     
     /// Mark bundle as published
     pub async fn mark_bundle_published(&self, device_id: u32) -> Result<()> {
-        //debug!("Marking bundle for device {} as published", device_id);
-        
-        self.conn.execute(
-            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
-            params![
-                format!("published_bundle:{}", device_id),
-                "true"
-            ],
-        )?;
-        
+        let metadata_path = self.base_path.join("metadata").join(format!("published_bundle_{}", device_id));
+        Self::write_text_file(&metadata_path, "true")?;
         Ok(())
     }
 
     /// Store information about a pending device verification
     pub fn store_pending_device_verification(&self, jid: &str, device_id: DeviceId, fingerprint: &str) -> Result<()> {
-        //debug!("Storing pending verification for {}:{} with fingerprint {}", jid, device_id, fingerprint);
-        
-        // Store the pending verification in metadata
-        self.conn.execute(
-            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
-            params![
-                format!("pending_verification:{}:{}", jid, device_id),
-                fingerprint
-            ],
-        )?;
-        
+        let metadata_path = self.base_path.join("metadata").join(format!("pending_verification_{}_{}",
+            self.sanitize_jid(jid), device_id));
+        Self::write_text_file(&metadata_path, fingerprint)?;
         Ok(())
     }
     
     /// Check if there's a pending verification for a device
     pub fn get_pending_device_verification(&self, jid: &str) -> Result<Option<(DeviceId, String)>> {
-        // Look for any pending verification for this JID
-        let mut stmt = self.conn.prepare(
-            "SELECT key, value FROM metadata WHERE key LIKE ?"
-        )?;
+        let metadata_dir = self.base_path.join("metadata");
+        if !metadata_dir.exists() {
+            return Ok(None);
+        }
         
-        let rows = stmt.query_map(
-            params![format!("pending_verification:{}:%", jid)],
-            |row| {
-                let key: String = row.get(0)?;
-                let fingerprint: String = row.get(1)?;
-                Ok((key, fingerprint))
-            },
-        )?;
+        let prefix = format!("pending_verification_{}_", self.sanitize_jid(jid));
         
-        for row_result in rows {
-            let (key, fingerprint) = row_result?;
-            // Extract device ID from the key
-            let parts: Vec<&str> = key.split(':').collect();
-            if parts.len() >= 3 {
-                if let Ok(device_id) = parts[2].parse::<DeviceId>() {
-                    return Ok(Some((device_id, fingerprint)));
+        for entry in fs::read_dir(&metadata_dir)? {
+            let entry = entry?;
+            let filename = entry.file_name().to_string_lossy().to_string();
+            
+            if filename.starts_with(&prefix) {
+                // Extract device ID from filename
+                if let Some(device_id_str) = filename.strip_prefix(&prefix) {
+                    if let Ok(device_id) = device_id_str.parse::<DeviceId>() {
+                        let fingerprint = fs::read_to_string(entry.path())?;
+                        return Ok(Some((device_id, fingerprint.trim().to_string())));
+                    }
                 }
             }
         }
@@ -699,79 +482,73 @@ impl OmemoStorage {
     
     /// Remove a pending verification
     pub fn remove_pending_device_verification(&self, jid: &str, device_id: DeviceId) -> Result<()> {
-        //debug!("Removing pending verification for {}:{}", jid, device_id);
+        let metadata_path = self.base_path.join("metadata").join(format!("pending_verification_{}_{}",
+            self.sanitize_jid(jid), device_id));
         
-        self.conn.execute(
-            "DELETE FROM metadata WHERE key = ?",
-            params![format!("pending_verification:{}:{}", jid, device_id)],
-        )?;
+        if metadata_path.exists() {
+            fs::remove_file(&metadata_path)?;
+        }
         
         Ok(())
     }
 
     /// Check if a bundle has been published for a given device ID
     pub fn is_bundle_published(&self, device_id: DeviceId) -> Result<bool> {
-        // Check the metadata table for a record indicating the bundle was published
-        let result = self.conn.query_row(
-            "SELECT value FROM metadata WHERE key = ?",
-            params![format!("published_bundle:{}", device_id)],
-            |row| {
-                let value: String = row.get(0)?;
-                Ok(value == "true")
-            },
-        ).optional()?;
+        let metadata_path = self.base_path.join("metadata").join(format!("published_bundle_{}", device_id));
         
-        Ok(result.unwrap_or(false))
+        if metadata_path.exists() {
+            let content = fs::read_to_string(&metadata_path)?;
+            Ok(content.trim() == "true")
+        } else {
+            Ok(false)
+        }
     }
 
+    /// Sanitize JID for use in filenames
+    fn sanitize_jid(&self, jid: &str) -> String {
+        jid.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|', '@'], "_")
+    }    
     /// Dump all device identities for debugging
     pub fn dump_all_device_identities(&self) -> Result<Vec<(String, DeviceId, DeviceIdentity)>> {
         let mut identities = Vec::new();
+        let identities_dir = self.base_path.join("identities");
         
-        let conn = &self.conn;
+        if !identities_dir.exists() {
+            return Ok(identities);
+        }
         
-        // Query all device identities
-        let query = "SELECT jid, device_id, identity_key, signed_prekey_id, signed_prekey, \
-                     signed_prekey_signature FROM identities";
-                     
-        let mut stmt = conn.prepare(query)?;
-        
-        let mut rows = stmt.query([])?;
-        
-        // Properly iterate through the rows one at a time
-        loop {
-            // First handle the Result layer
-            let row_opt = match rows.next() {
-                Ok(opt) => opt,
-                Err(e) => return Err(anyhow!("Error iterating rows: {}", e).into()),
-            };
+        // Iterate through JID directories
+        for jid_entry in fs::read_dir(&identities_dir)? {
+            let jid_entry = jid_entry?;
+            if !jid_entry.file_type()?.is_dir() {
+                continue;
+            }
             
-            // Then handle the Option layer
-            let row = match row_opt {
-                Some(r) => r,
-                None => break, // No more rows, exit loop
-            };
+            let jid_name = jid_entry.file_name().to_string_lossy().to_string();
+            // Convert back from safe filename to JID (reverse sanitization)
+            let jid = jid_name.replace('_', "@"); // Simple conversion - may need more sophisticated handling
             
-            let jid: String = row.get(0)?;
-            let device_id: u32 = row.get(1)?;
-            let identity_key: Vec<u8> = row.get(2)?;
-            let signed_pre_key_id: u32 = row.get(3)?;
-            let signed_pre_key: Vec<u8> = row.get(4)?;
-            let signature: Vec<u8> = row.get(5)?;
-            
-            // Create device identity
-            let identity = DeviceIdentity {
-                id: device_id,
-                identity_key,
-                signed_pre_key: crate::omemo::protocol::SignedPreKeyBundle {
-                    id: signed_pre_key_id,
-                    public_key: signed_pre_key,
-                    signature,
-                },
-                pre_keys: Vec::new(), // Not needed for debugging
-            };
-            
-            identities.push((jid, device_id, identity));
+            // Iterate through device directories
+            for device_entry in fs::read_dir(jid_entry.path())? {
+                let device_entry = device_entry?;
+                if !device_entry.file_type()?.is_dir() {
+                    continue;
+                }
+                
+                if let Ok(device_id) = device_entry.file_name().to_string_lossy().parse::<DeviceId>() {
+                    let identity_path = device_entry.path().join("identity.bin");
+                    if identity_path.exists() {
+                        match Self::read_binary_file::<DeviceIdentity>(&identity_path) {
+                            Ok(identity) => {
+                                identities.push((jid.clone(), device_id, identity));
+                            },
+                            Err(e) => {
+                                error!("Failed to load identity for {}:{}: {}", jid, device_id, e);
+                            }
+                        }
+                    }
+                }
+            }
         }
         
         Ok(identities)

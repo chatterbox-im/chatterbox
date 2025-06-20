@@ -79,7 +79,7 @@ fn get_device_id_file_path() -> Result<PathBuf> {
             Some(path) => path,
             None => return Err(anyhow!("Could not determine XDG_DATA_HOME directory")),
         };
-        path.push("sermo");
+        path.push("chatterbox");
         path.push(jid);
         fs::create_dir_all(&path)?;
         path.push("device_id");
@@ -108,8 +108,8 @@ fn get_device_id_file_path() -> Result<PathBuf> {
         None => return Err(anyhow!("Could not determine XDG_DATA_HOME directory")),
     };
     
-    // Create sermo directory
-    path.push("sermo");
+    // Create chatterbox directory
+    path.push("chatterbox");
     fs::create_dir_all(&path)?;
     
     // Add device_id file
@@ -235,7 +235,7 @@ fn get_identity_key_file_path() -> Result<PathBuf> {
             Some(path) => path,
             None => return Err(anyhow!("Could not determine XDG_DATA_HOME directory")),
         };
-        path.push("sermo");
+        path.push("chatterbox");
         path.push(jid);
         fs::create_dir_all(&path)?;
         path.push("identity_key");
@@ -261,8 +261,8 @@ fn get_identity_key_file_path() -> Result<PathBuf> {
         None => return Err(anyhow!("Could not determine XDG_DATA_HOME directory")),
     };
     
-    // Create sermo directory
-    path.push("sermo");
+    // Create chatterbox directory
+    path.push("chatterbox");
     fs::create_dir_all(&path)?;
     
     // Add identity_key file
@@ -897,7 +897,7 @@ mod tests {
         
         // Update with some new devices
         println!("[test_update_known_devices] file exists before update: {}", path.exists());
-        let new_devices = vec![67890, 13579];
+        let _new_devices = vec![67890, 13579];
         
         // Manually update the info to ensure it works correctly
         let mut updated_info = initial_info.clone();

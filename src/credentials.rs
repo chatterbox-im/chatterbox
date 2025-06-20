@@ -41,7 +41,7 @@ pub fn get_config_dir() -> Result<PathBuf> {
     }
     let config_dir = dirs::config_dir()
         .ok_or_else(|| anyhow!("Could not determine config directory"))?
-        .join("rust-xmpp-chat");
+        .join("chatterbox");
     
     if !config_dir.exists() {
         fs::create_dir_all(&config_dir)?;
