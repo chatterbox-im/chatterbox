@@ -71,8 +71,6 @@ fn update_readme_with_line_count() {
     let stats_section = format!(
         "## Project Stats\n\n\
         - Total lines of Rust code: {} lines\n\
-        - Fully implemented OMEMO encryption (XEP-0384)\n\
-        - Core modules:\n\
           - OMEMO implementation: {} lines\n\
           - XMPP integration: {} lines\n\
           - UI and app logic: {} lines\n\n",
