@@ -928,55 +928,66 @@ async fn run_main_loop(
                     // Render UI to show the sending status
                     terminal.draw(|f| chat_ui.draw(f))?;
                     
-                    // Check if we need to verify recipient's key first
-                    if xmpp_client.is_omemo_enabled().await {
-                        info!("MAIN: OMEMO is enabled, checking keys for: {}", actual_recipient);
-                        // Check OMEMO keys for this recipient
-                        if let Err(e) = xmpp_client.check_omemo_keys_for_contact(actual_recipient).await {
-                            error!("Error checking OMEMO keys: {}", e);
+                    // Check the UI's OMEMO setting to determine encryption preference
+                    if chat_ui.is_omemo_enabled() {
+                        info!("MAIN: UI OMEMO is enabled, attempting encrypted message to: {}", actual_recipient);
+                        
+                        // Check if OMEMO manager is available 
+                        if xmpp_client.is_omemo_enabled().await {
+                            // Check OMEMO keys for this recipient
+                            if let Err(e) = xmpp_client.check_omemo_keys_for_contact(actual_recipient).await {
+                                error!("Error checking OMEMO keys: {}", e);
+                                
+                                // Show error in UI
+                                chat_ui.remove_last_message(); // Remove "preparing" message
+                                chat_ui.add_message(create_system_message(
+                                    actual_recipient,
+                                    &format!("Error checking encryption keys: {}", e)
+                                ));
+                                continue;
+                            }
                             
-                            // Show error in UI
+                            // Log the message content being sent
+                            info!("MAIN: Sending encrypted message to {}: content_starts_with='{}'", 
+                                 actual_recipient, content.chars().take(30).collect::<String>());
+                            
+                            // Send the encrypted message
+                            match xmpp_client.send_encrypted_message(actual_recipient, &content).await {
+                                Ok(_) => {
+                                    info!("MAIN: Encrypted message sent successfully to {}", actual_recipient);
+                                    // Remove the "preparing message..." status
+                                    chat_ui.remove_last_message();
+                                    
+                                    // Message sent successfully, the UI already has this message displayed
+                                },
+                                Err(e) => {
+                                    error!("MAIN: Error sending encrypted message to {}: {}", actual_recipient, e);
+                                    // Remove the "preparing message..." status
+                                    chat_ui.remove_last_message();
+                                    
+                                    // Add error message to the chat
+                                    chat_ui.add_message(create_system_message(
+                                        actual_recipient,
+                                        &format!("Error sending encrypted message: {}", e)
+                                    ));
+                                    
+                                    // Log the error
+                                    error!("Failed to send encrypted message to {}: {}", actual_recipient, e);
+                                }
+                            }
+                        } else {
+                            // OMEMO manager not available, show warning and fall back to plaintext
+                            warn!("MAIN: OMEMO requested but not available, falling back to plaintext");
                             chat_ui.remove_last_message(); // Remove "preparing" message
                             chat_ui.add_message(create_system_message(
                                 actual_recipient,
-                                &format!("Error checking encryption keys: {}", e)
+                                "OMEMO encryption requested but not available. Message not sent. Please initialize OMEMO or disable encryption."
                             ));
-                            continue;
-                        }
-                        
-                        // Log the message content being sent
-                        info!("MAIN: Sending message to {}: content_starts_with='{}'", 
-                             actual_recipient, content.chars().take(30).collect::<String>());
-                        
-                        // Send the message
-                        match xmpp_client.send_message(actual_recipient, &content).await {
-                            Ok(_) => {
-                                info!("MAIN: Message sent successfully to {}", actual_recipient);
-                                // Remove the "preparing message..." status
-                                chat_ui.remove_last_message();
-                                
-                                // Message sent successfully, the UI already has this message displayed
-                                // as it was added when the user pressed Enter
-                            },
-                            Err(e) => {
-                                error!("MAIN: Error sending message to {}: {}", actual_recipient, e);
-                                // Remove the "preparing message..." status
-                                chat_ui.remove_last_message();
-                                
-                                // Add error message to the chat
-                                chat_ui.add_message(create_system_message(
-                                    actual_recipient,
-                                    &format!("Error sending message: {}", e)
-                                ));
-                                
-                                // Log the error
-                                error!("Failed to send message to {}: {}", actual_recipient, e);
-                            }
                         }
                     } else {
-                        info!("MAIN: OMEMO is disabled, sending plaintext to {}", actual_recipient);
-                        // OMEMO is disabled, just send the message normally
-                        match xmpp_client.send_message(actual_recipient, &content).await {
+                        info!("MAIN: UI OMEMO is disabled, sending plaintext message to: {}", actual_recipient);
+                        // OMEMO is disabled by user, send unencrypted message
+                        match xmpp_client.send_message_with_receipt(actual_recipient, &content).await {
                             Ok(_) => {
                                 info!("MAIN: Plaintext message sent successfully to {}", actual_recipient);
                                 // Remove the "preparing message..." status
@@ -1427,9 +1438,19 @@ async fn run_main_loop(
                     // Render UI to show the sending status
                     terminal.draw(|f| chat_ui.draw(f))?;
                     
-                    // Send the message
+                    // Send the message - check UI's OMEMO preference
                     let prepared_content = prepare_message_for_sending(chat_ui, &recipient, &content);
-                    match xmpp_client.send_message(&recipient, &prepared_content).await {
+                    
+                    // Check if OMEMO is enabled in the UI for this conversation
+                    let send_result = if chat_ui.is_omemo_enabled() {
+                        // OMEMO is enabled in UI, send encrypted message
+                        xmpp_client.send_message(&recipient, &prepared_content).await
+                    } else {
+                        // OMEMO is disabled in UI, send unencrypted message
+                        xmpp_client.send_message_with_receipt(&recipient, &prepared_content).await
+                    };
+                    
+                    match send_result {
                         Ok(_) => {
                             // Remove the "sending message..." status
                             chat_ui.remove_last_message();

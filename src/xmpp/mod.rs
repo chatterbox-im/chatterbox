@@ -1086,8 +1086,7 @@ impl XMPPClient {
 
     /// Send an encrypted message using OMEMO
     pub async fn send_encrypted_message(&mut self, to: &str, content: &str) -> Result<()> {
-        //debug!("Sending encrypted message to {}", to);
-        //debug!("[JID DEBUG] send_encrypted_message: to='{}'", to);
+        info!("Sending encrypted message to {}", to);
         
         // Get our OMEMO manager
         let omemo_manager = match &self.omemo_manager {
@@ -1114,9 +1113,6 @@ impl XMPPClient {
                 return Err(anyhow!("Failed to encrypt message: {}", e));
             }
         };
-        
-        // Debug: Print the encrypted message structure
-        //debug!("Encrypted message structure: {:?}", encrypted_message);
         
         // Use the verify_message_encryption function to check for plaintext leakage
         let omemo_verified = omemo_manager_guard.verify_message_encryption(&format!("{:?}", &encrypted_message), content);
@@ -1176,75 +1172,55 @@ impl XMPPClient {
         encrypted_element.append_child(payload_element);
         message_element.append_child(encrypted_element);
         
-        // Use the message element
-        let stanza = message_element;
-
-        // Convert the stanza to string for inspection
-        let stanza_str = introspection::stanza_to_string(&stanza);
-        
-        // Debug: Print the raw XML stanza
-        //debug!("Raw OMEMO stanza XML: {}", stanza_str);
-        
-        // Verify the stanza structure with our dedicated function
-        match verify_omemo_stanza(&stanza, content) {
-            Ok(_) => debug!("OMEMO stanza structure verification passed - all required elements present"),
-            Err(e) => {
-                error!("{}", e);
-                return Err(anyhow!("Failed to create valid OMEMO stanza: {}", e));
-            }
-        }
-        
-        // Directly send to XML inspectors for the test to verify
-        introspection::inspect_outbound_xml(&stanza_str);
-        
-        // Send the message with XML inspection to verify encryption
+        // Send the message
         if let Some(client) = &self.client {
-            // Debug: Print the client state before sending (just existence, as AsyncClient doesn't implement Debug)
-            //debug!("Client exists and is ready to send message");
-            
-            // Then perform the actual send
+            let stanza = message_element.into();
             let mut client_guard = client.lock().await;
             match client_guard.send_stanza(stanza).await {
-                Ok(_) => debug!("Successfully sent stanza to XMPP server"),
+                Ok(_) => {
+                    info!("Encrypted message sent successfully to {}", to);
+                    
+                    // Store message ID in pending receipts
+                    {
+                        let mut pending_receipts_guard = self.pending_receipts.lock().await;
+                        let pending_message = PendingMessage {
+                            id: id.clone(),
+                            to: to.to_string(),
+                            content: content.to_string(),
+                            timestamp: chrono::Utc::now().timestamp() as u64,
+                            status: DeliveryStatus::Sent,
+                        };
+                        pending_receipts_guard.insert(id.clone(), pending_message);
+                    }
+                    
+                    // Create a "sent" message for the UI
+                    let message = Message {
+                        id: id.clone(),
+                        sender_id: "me".to_string(),
+                        recipient_id: to.to_string(),
+                        content: content.to_string(),
+                        timestamp: chrono::Utc::now().timestamp() as u64,
+                        delivery_status: DeliveryStatus::Sent,
+                    };
+                    
+                    if let Err(e) = self.msg_tx.send(message).await {
+                        error!("Failed to send message to UI: {}", e);
+                    }
+                    
+                    Ok(())
+                },
                 Err(e) => {
-                    error!("Failed to send stanza to XMPP server: {}", e);
-                    return Err(anyhow!("Failed to send stanza: {}", e));
+                    error!("Failed to send encrypted message to {}: {}", to, e);
+                    Err(anyhow!("Failed to send encrypted message: {}", e))
                 }
             }
-            
-            //debug!("Sent encrypted message to {}", to);
-            
-            // Store message ID in pending receipts
-            let mut pending_receipts_guard = self.pending_receipts.lock().await;
-            let pending_message = PendingMessage {
-                id: id.clone(),
-                to: to.to_string(),
-                content: content.to_string(),
-                timestamp: chrono::Utc::now().timestamp() as u64,
-                status: DeliveryStatus::Sent,
-            };
-            pending_receipts_guard.insert(id.clone(), pending_message);
-            
-            // Create a "sent" message for the UI
-            let message = Message {
-                id: id.clone(),
-                sender_id: "me".to_string(),  // Use "me" instead of self.jid to make UI show "You"
-                recipient_id: to.to_string(),
-                content: content.to_string(),
-                timestamp: chrono::Utc::now().timestamp() as u64,
-                delivery_status: DeliveryStatus::Sent,
-            };
-            
-            if let Err(e) = self.msg_tx.send(message).await {
-                error!("Failed to send message to UI: {}", e);
-            }
-            
-            Ok(())
         } else {
             error!("Client not initialized");
             Err(anyhow!("Client not initialized"))
         }
     }
+
+    // ...existing code...
 
     /// Get access to the OMEMO manager (primarily for testing)
     pub fn get_omemo_manager(&self) -> Option<Arc<TokioMutex<crate::omemo::OmemoManager>>> {
@@ -1791,16 +1767,13 @@ impl XMPPClient {
         message_element.append_child(active_element);
         
         // Create encrypted element with OMEMO namespace
-        //debug!("DEBUG: Building encrypted element with namespace: {}", custom_ns::OMEMO);
         let mut encrypted_element = Element::builder("encrypted", custom_ns::OMEMO).build();
         
         // Create header element with OMEMO namespace
-        //debug!("DEBUG: Building header element with namespace: {}", custom_ns::OMEMO);
         let mut header_element = Element::builder("header", custom_ns::OMEMO).build();
         header_element.set_attr("sid", &encrypted_message.sender_device_id.to_string());
         
         // Add key elements with OMEMO namespace
-        //debug!("DEBUG: Adding {} key elements", encrypted_message.encrypted_keys.len());
         for (device_id, encrypted_key) in &encrypted_message.encrypted_keys {
             let mut key_element = Element::builder("key", custom_ns::OMEMO).build();
             key_element.set_attr("rid", &device_id.to_string());

@@ -38,7 +38,6 @@ pub async fn handle_receipt(
             // Process receipt in a separate task
             tokio::spawn(async move {
                 super::XMPPClient::process_receipt(
-                    Arc::new(TokioMutex::new(XMPPAsyncClient::new("dummy".parse::<tokio_xmpp::BareJid>().unwrap(), "dummy"))), // Dummy client not actually used
                     msg_tx_clone,
                     pending_clone,
                     from,
@@ -198,9 +197,9 @@ impl super::XMPPClient {
             error!("Failed to send message to UI: {}", e);
         }
         
-        // Constants for retry logic
-        const MAX_RETRIES: usize = 3;
-        const TOTAL_TIMEOUT_SECS: u64 = 5;
+        // Constants for retry logic - reduced to minimize race conditions
+        const MAX_RETRIES: usize = 2;
+        const TOTAL_TIMEOUT_SECS: u64 = 3;
         
         let total_timeout = tokio::time::Instant::now() + Duration::from_secs(TOTAL_TIMEOUT_SECS);
         
@@ -257,7 +256,7 @@ impl super::XMPPClient {
         Err(anyhow::anyhow!("Failed to send message after {} attempts", MAX_RETRIES))
     }
 
-    /// Send a single message attempt with timeout
+    /// Send a single message attempt with timeout - simplified version to avoid race conditions
     async fn send_message_attempt(
         &self, 
         client: Arc<TokioMutex<XMPPAsyncClient>>,
@@ -269,23 +268,22 @@ impl super::XMPPClient {
         // Convert the message to a stanza before acquiring the lock
         let stanza = message.into();
         
-        // Spawn a separate task for sending to avoid deadlocks
-        let send_task = tokio::spawn(async move {
+        // Send directly without spawning a task to avoid race conditions
+        let send_future = async {
             let mut client_guard = client.lock().await;
             match client_guard.send_stanza(stanza).await {
                 Ok(_) => Ok(()),
                 Err(e) => Err(anyhow::anyhow!("Failed to send stanza: {}", e))
             }
-        });
+        };
         
-        // Wait for the send task to complete with the same timeout
+        // Wait for the send operation to complete with timeout
         match tokio::time::timeout(
             Duration::from_secs(SEND_TIMEOUT_SECS),
-            send_task
+            send_future
         ).await {
-            Ok(Ok(result)) => Ok(result),
-            Ok(Err(e)) => Err(anyhow::anyhow!("Task failed: {}", e)),
-            Err(_) => Err(anyhow::anyhow!("Timed out waiting for send task")),
+            Ok(result) => Ok(result),
+            Err(_) => Err(anyhow::anyhow!("Timed out sending message")),
         }
     }
 
@@ -366,7 +364,6 @@ impl super::XMPPClient {
 
     /// Process a received delivery receipt
     pub async fn process_receipt(
-        _client: Arc<TokioMutex<XMPPAsyncClient>>,
         msg_tx: tokio::sync::mpsc::Sender<Message>,
         pending_receipts: Arc<TokioMutex<std::collections::HashMap<String, PendingMessage>>>,
         _from: Option<String>,
