@@ -23,8 +23,8 @@ jobs:
         shell: bash
         run: ./scripts/grep_bundle_publication.sh
       - name: Check for item-not-found errors
-	shell: bash
-	run: ./scripts/grep_item-not-found.sh
+        shell: bash
+        run: ./scripts/grep_item-not-found.sh
       - name: Check capability discovery works
-	shell: bash
-	run: ./scripts/grep_disco_capabilities.sh 
+        shell: bash
+        run: ./scripts/grep_disco_capabilities.sh 
