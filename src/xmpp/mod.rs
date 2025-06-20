@@ -1220,8 +1220,6 @@ impl XMPPClient {
         }
     }
 
-    // ...existing code...
-
     /// Get access to the OMEMO manager (primarily for testing)
     pub fn get_omemo_manager(&self) -> Option<Arc<TokioMutex<crate::omemo::OmemoManager>>> {
         self.omemo_manager.clone()
