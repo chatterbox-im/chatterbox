@@ -1488,43 +1488,6 @@ pub async fn publish_pubsub_item(
     }
 }
 
-// Helper function to serialize an Element to XML
-#[allow(dead_code)]
-fn serialize_element<W: std::io::Write>(
-    element: &xmpp_parsers::Element,
-    writer: &mut xml::writer::EventWriter<W>,
-) -> Result<()> {
-    // Start element
-    let mut start = xml::writer::XmlEvent::start_element(element.name());
-    
-    // Add namespace if it's not empty
-    if !element.ns().is_empty() {
-        start = start.ns("", element.ns());
-    }
-    
-    // Add attributes
-    for (name, value) in element.attrs() {
-        start = start.attr(name, value);
-    }
-    
-    writer.write(start).ok();
-    
-    // Process children
-    for child in element.children() {
-        serialize_element(child, writer)?;
-    }
-    
-    // Add text if any
-    let text = element.text();
-    if !text.is_empty() {
-        writer.write(xml::writer::XmlEvent::Characters(&text)).ok();
-    }
-    
-    // End element
-    writer.write(xml::writer::XmlEvent::end_element()).ok();
-    
-    Ok(())
-}
 
 // ...existing code...
 
