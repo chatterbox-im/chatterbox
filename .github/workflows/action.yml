@@ -17,6 +17,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build binaries
+        shell: bash
         run: cargo build
       - name: Check bundle publication
+        shell: bash
         run: ./scripts/grep_bundle_publication.sh
