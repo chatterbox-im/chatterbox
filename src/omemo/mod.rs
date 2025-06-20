@@ -17,8 +17,7 @@ use crate::omemo::protocol::{DeviceIdentity, RatchetState, OmemoMessage, X3DHPro
 use crate::omemo::storage::OmemoStorage;
 use crate::omemo::session::{OmemoSession, SessionError};
 use crate::omemo::crypto::CryptoError;
-use crate::omemo::device_id::{DeviceId, generate_device_id};
-use crate::omemo::bundle::OmemoBundle;
+use crate::omemo::device_id::DeviceId;
 
 pub mod crypto;
 pub mod protocol;

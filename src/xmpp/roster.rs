@@ -2,7 +2,7 @@
 // Contains all roster-related methods for XMPPClient
 
 use anyhow::{anyhow, Result};
-use log::{debug, error, info, warn};
+use log::{error, info, warn};
 use std::time::Duration;
 use uuid::Uuid;
 use xmpp_parsers::Element;

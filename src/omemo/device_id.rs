@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::path::Path;
 use std::collections::HashSet;
 use anyhow::{Result, anyhow};
-use log::{debug, info, warn, trace};
+use log::{info, warn, trace};
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use serde::{Serialize, Deserialize};
 use std::sync::Mutex;

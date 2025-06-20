@@ -13,7 +13,7 @@ use rand::{rngs::OsRng, RngCore};
 use sha2::{Sha256, Digest};
 use thiserror::Error;
 use x25519_dalek::{PublicKey, StaticSecret};
-use log::{debug, trace, error};
+use log::{trace, error};
 use std::time::Instant;
 // Add imports for AES-CBC with PKCS#7 padding
 use aes::Aes256;

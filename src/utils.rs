@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::io::Write;
 use log::{LevelFilter, Record};
 use std::fs::OpenOptions;
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, Local};
 
 // This file contains utility functions that assist with various tasks in the application, such as formatting messages and handling errors.
 

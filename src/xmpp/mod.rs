@@ -445,7 +445,7 @@ impl XMPPClient {
                     }
                 },
                 Some(XMPPEvent::Online { bound_jid, resumed }) => {
-                    if (!seen_online_event) {
+                    if !seen_online_event {
                         info!("Connected to XMPP server as {}", bound_jid);
                         seen_online_event = true;
                         

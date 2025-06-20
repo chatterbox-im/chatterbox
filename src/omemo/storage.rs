@@ -9,7 +9,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use crate::omemo::protocol::{DeviceIdentity, X3DHKeyBundle, RatchetState};
 use crate::omemo::device_id::DeviceId;
 use serde_json;
-use log::{error, debug};
+use log::error;
 use once_cell::sync::OnceCell;
 use crate::omemo::device_id;
 

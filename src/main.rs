@@ -1,6 +1,6 @@
 #![deny(dead_code)] // DO NOT REMOVE THIS EVER
 use anyhow::Result;
-use log::{info, error, warn, debug, LevelFilter};
+use log::{info, error, warn, LevelFilter};
 use std::{env, io};
 use clap::Parser;
 use std::path::PathBuf;
@@ -148,7 +148,7 @@ async fn main() -> Result<()> {
     match xmpp_client.connect(&server, &username, &password).await {
         Ok(_) => {
             // Save credentials on successful connection, but only if not from env vars
-            if (!credentials_from_env) {
+            if !credentials_from_env {
                 let credentials = Credentials::new(&server, &username, &password);
                 if let Err(e) = save_credentials(&credentials) {
                     eprintln!("Warning: Failed to save credentials: {}", e);
@@ -474,7 +474,7 @@ fn load_message_history_async(chat_ui: &mut ChatUI, xmpp_client: &XMPPClient, co
         // First do a quick check to see if any history exists at all
         let has_history = match client_clone.has_message_history(&contact_clone, 1).await {
             Ok(exists) => {
-                if (!exists) {
+                if !exists {
                     // No history exists
                     if let Err(e) = msg_tx.send(create_system_message(
                         &contact_clone,
@@ -500,7 +500,7 @@ fn load_message_history_async(chat_ui: &mut ChatUI, xmpp_client: &XMPPClient, co
         };
         
         // If we have history, send an update message
-        if (has_history) {
+        if has_history {
             if let Err(e) = msg_tx.send(create_system_message(
                 &contact_clone,
                 "Fetching message history..."
@@ -517,7 +517,7 @@ fn load_message_history_async(chat_ui: &mut ChatUI, xmpp_client: &XMPPClient, co
         // Fetch message history with pagination info
         match client_clone.get_message_history_with_pagination(options).await {
             Ok(result) => {
-                if (result.messages.is_empty()) {
+                if result.messages.is_empty() {
                     // No history found
                     if let Err(e) = msg_tx.send(create_system_message(
                         &contact_clone,
@@ -544,7 +544,7 @@ fn load_message_history_async(chat_ui: &mut ChatUI, xmpp_client: &XMPPClient, co
                     
                     // If the query was not complete and we have a pagination token,
                     // continue loading history in the background
-                    if (!result.complete && result.rsm_last.is_some()) {
+                    if !result.complete && result.rsm_last.is_some() {
                         // Create a short delay before starting the background loading to give UI time to render
                         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                         

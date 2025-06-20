@@ -6,18 +6,14 @@
 //! XMPP server implementations, accounting for variations in how servers implement
 //! the XEP-0384 specification.
 
-use anyhow::{Result, anyhow};
-use log::{debug, info, warn, error};
+use anyhow::Result;
+use log::{debug, info, warn};
 use tokio::time::timeout;
 use tokio::time::Duration;
-use std::sync::Arc;
-use tokio::sync::Mutex as TokioMutex;
 
 use crate::omemo::OmemoError;
 use crate::omemo::device_id::DeviceId;
 use crate::omemo::OMEMO_NAMESPACE;
-use crate::omemo::OmemoManager;
-use crate::xmpp::XMPPClient;
 
 /// Default timeout for device list retrieval
 const DEVICE_LIST_TIMEOUT_SECS: u64 = 5;

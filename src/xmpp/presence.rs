@@ -199,7 +199,7 @@ pub async fn send_initial_presence(client: &mut XMPPAsyncClient) -> Result<()> {
     
     // Add caps (entity capabilities) advertisement
     // This advertises that we have capabilities that can be discovered via Service Discovery
-    let mut caps = Element::builder("c", "http://jabber.org/protocol/caps")
+    let caps = Element::builder("c", "http://jabber.org/protocol/caps")
         .attr("hash", "sha-1")
         .attr("node", "https://github.com/user/sermo")
         .attr("ver", "1.0.0")

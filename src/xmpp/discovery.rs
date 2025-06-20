@@ -1,7 +1,6 @@
 use anyhow::Result;
-use log::{debug, info, warn};
+use log::{info, warn};
 use xmpp_parsers::Element;
-use crate::xmpp::custom_ns;
 use tokio_xmpp::AsyncClient;
 use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;

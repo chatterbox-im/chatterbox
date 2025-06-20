@@ -165,13 +165,13 @@ impl ChatUI {
         // Store the resource if present
         if let Some(res) = resource {
             let resources = self.resources.entry(base_jid.clone()).or_insert_with(Vec::new);
-            if (!resources.contains(&res)) {
+            if !resources.contains(&res) {
                 resources.push(res);
             }
         }
 
         // Only add the base JID to contacts list if not already present
-        if (!self.contacts.contains(&base_jid)) {
+        if !self.contacts.contains(&base_jid) {
             self.contacts.push(base_jid);
         }
     }
@@ -412,7 +412,7 @@ impl ChatUI {
                             KeyCode::Enter => {
                                 // Process and add contact
                                 let input = dialog.input.value().trim();
-                                if (!input.is_empty()) {
+                                if !input.is_empty() {
                                     // Get the input before closing the dialog
                                     let input_str = input.to_string();
                                     

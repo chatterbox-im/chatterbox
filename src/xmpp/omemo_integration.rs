@@ -1497,7 +1497,7 @@ fn serialize_element<W: std::io::Write>(
     let mut start = xml::writer::XmlEvent::start_element(element.name());
     
     // Add namespace if it's not empty
-    if (!element.ns().is_empty()) {
+    if !element.ns().is_empty() {
         start = start.ns("", element.ns());
     }
     

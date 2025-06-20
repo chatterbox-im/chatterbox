@@ -2,10 +2,8 @@
 // https://xmpp.org/extensions/xep-0313.html
 
 use anyhow::{anyhow, Result};
-use log::{debug, error, info, warn};
+use log::{error, info, warn};
 use std::time::Duration;
-use std::sync::Arc;
-use tokio::sync::Mutex as TokioMutex;
 use uuid::Uuid;
 use futures_util::StreamExt;
 use base64::Engine;

@@ -4,13 +4,10 @@
 use anyhow::{anyhow, Result};
 use log::{debug, error, info, warn};
 use futures_util::StreamExt;
-use uuid::Uuid;
 
 use xmpp_parsers::Element;
 use crate::models::{Message, DeliveryStatus};
 use super::custom_ns;
-use crate::omemo::protocol::OmemoMessage;
-use crate::omemo::crypto;
 use base64::Engine;
 
 /// Implementation of XEP-0280 Message Carbons
