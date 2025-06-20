@@ -479,17 +479,36 @@ impl OmemoManager {
     pub async fn encrypt_message(&mut self, recipient: &str, plaintext: &str) -> Result<OmemoMessage, OmemoError> {
         info!("Encrypting message for {}", recipient);
         
-        // Get the device list for the recipient
-        let recipient_device_ids = self.get_device_ids(recipient).await?;
+        // Get the device list for the recipient with timeout protection
+        let device_discovery_timeout = Duration::from_secs(10); // 10 seconds max for device discovery
+        let recipient_device_ids = match timeout(device_discovery_timeout, self.get_device_ids(recipient)).await {
+            Ok(Ok(devices)) => devices,
+            Ok(Err(e)) => return Err(e),
+            Err(_) => {
+                warn!("Timeout while fetching device list for {}, assuming no OMEMO devices", recipient);
+                Vec::new()
+            }
+        };
+        
         if recipient_device_ids.is_empty() {
             return Err(OmemoError::NoDeviceError(recipient.to_string()));
         }
         
-        // Get our own device IDs (important for message carbons)
+        // Get our own device IDs (important for message carbons) with timeout
         let local_username = self.local_jid.split('@').next().unwrap_or(&self.local_jid);
         let local_domain = self.local_jid.split('@').nth(1).unwrap_or("");
         let user_bare_jid = format!("{}@{}", local_username, local_domain);
-        let own_device_ids = self.get_device_ids(&user_bare_jid).await?;
+        let own_device_ids = match timeout(device_discovery_timeout, self.get_device_ids(&user_bare_jid)).await {
+            Ok(Ok(devices)) => devices,
+            Ok(Err(e)) => {
+                warn!("Failed to get own device list: {}, continuing with recipient devices only", e);
+                Vec::new()
+            },
+            Err(_) => {
+                warn!("Timeout while fetching own device list, continuing with recipient devices only");
+                Vec::new()
+            }
+        };
         
         info!("Found {} devices for recipient {}: {:?}", recipient_device_ids.len(), recipient, recipient_device_ids);
         info!("Found {} own devices: {:?}", own_device_ids.len(), own_device_ids);
@@ -554,28 +573,45 @@ impl OmemoManager {
         info!("Encrypting random key for {} total devices", all_devices.len());
         
         // Now encrypt the random key (not the derived keys) for all devices
-        for (jid, device_id) in all_devices {
-            // Get or create session with this device
-            match self.get_or_create_session(&jid, device_id).await {
-                Ok(session) => {
-                    // Encrypt the message key for this device
-                    match session.encrypt_key(&random_key) {
-                        Ok(encrypted_key) => {
-                            encrypted_keys.insert(device_id, encrypted_key);
-                            device_list.push(device_id);
-                            debug!("Encrypted random key for {}:{}", jid, device_id);
-                        },
-                        Err(e) => {
-                            warn!("Failed to encrypt message key for {}:{}: {}", jid, device_id, e);
-                            // Continue with other devices
+        // Add overall timeout protection to prevent UI hangs
+        let overall_timeout = Duration::from_secs(15); // Maximum 15 seconds for all session creations
+        let session_creation_future = async {
+            for (jid, device_id) in all_devices {
+                // Add per-device timeout to prevent individual device hangs
+                let device_timeout = Duration::from_secs(8); // 8 seconds per device
+                let session_result = timeout(device_timeout, self.get_or_create_session(&jid, device_id)).await;
+                
+                match session_result {
+                    Ok(Ok(session)) => {
+                        // Encrypt the message key for this device
+                        match session.encrypt_key(&random_key) {
+                            Ok(encrypted_key) => {
+                                encrypted_keys.insert(device_id, encrypted_key);
+                                device_list.push(device_id);
+                                debug!("Encrypted random key for {}:{}", jid, device_id);
+                            },
+                            Err(e) => {
+                                warn!("Failed to encrypt message key for {}:{}: {}", jid, device_id, e);
+                                // Continue with other devices
+                            }
                         }
+                    },
+                    Ok(Err(e)) => {
+                        warn!("Failed to get or create session with {}:{}: {}", jid, device_id, e);
+                        // Continue with other devices
+                    },
+                    Err(_) => {
+                        warn!("Timeout getting session with {}:{}, skipping device", jid, device_id);
+                        // Continue with other devices
                     }
-                },
-                Err(e) => {
-                    warn!("Failed to get or create session with {}:{}: {}", jid, device_id, e);
-                    // Continue with other devices
                 }
             }
+        };
+        
+        // Apply overall timeout
+        if let Err(_) = timeout(overall_timeout, session_creation_future).await {
+            warn!("Overall timeout while creating sessions for message encryption");
+            // Continue with whatever sessions we managed to create
         }
         
         // Create the complete OMEMO message
@@ -610,8 +646,20 @@ impl OmemoManager {
         // Store local_jid in temporary variable to avoid borrow issues
         let local_jid = self.local_jid.clone();
         
-        // Get or create session
-        let session = self.get_or_create_session(&sender_str, device_id).await?;
+        // Get or create session with timeout protection
+        let session = match tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            self.get_or_create_session(&sender_str, device_id)
+        ).await {
+            Ok(result) => result?,
+            Err(_) => {
+                return Err(OmemoError::SessionError(
+                    crate::omemo::session::SessionError::InvalidStateError(
+                        format!("Timeout while creating session for decryption with {}:{}", sender_str, device_id)
+                    )
+                ));
+            }
+        };
         
         // Decrypt the message key using our session with the sender
         // This key is the random 32-byte key that was used as input to HKDF
@@ -702,17 +750,40 @@ impl OmemoManager {
         // If not in storage or cached list is empty/stale, fetch from the server
         info!("[OMEMO] get_device_ids: Fetching device list for {} from XMPP server", jid);
         
-        // Try to fetch with retries
-        let max_retries = 3;
-        let mut retry_count = 0;
-        let mut last_error = None;
-        
-        while retry_count < max_retries {
-            match self.fetch_device_list_from_server(jid).await {
-                Ok(ids) => {
-                    info!("[OMEMO] get_device_ids: Successfully fetched device list for {}: {:?}", jid, ids);
+        // Try to fetch with limited retries and faster timeout for better UX
+        match self.fetch_device_list_from_server(jid).await {
+            Ok(ids) => {
+                info!("[OMEMO] get_device_ids: Successfully fetched device list for {}: {:?}", jid, ids);
+                
+                // Store the device list with current timestamp
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                
+                let entry = storage::DeviceListEntry {
+                    jid: jid.to_string(),
+                    device_ids: ids.clone(),
+                    last_update: now,
+                };
+                
+                let storage_guard = self.storage.lock().await;
+                if let Err(e) = storage_guard.save_device_list(&entry) {
+                    warn!("[OMEMO] get_device_ids: Failed to store device list: {}", e);
+                    // Non-fatal error, continue
+                }
+                drop(storage_guard);
+                
+                return Ok(ids);
+            },
+            Err(e) => {
+                warn!("[OMEMO] get_device_ids: Failed to fetch device list for {}: {}", jid, e);
+                
+                // For item-not-found errors, immediately return empty list instead of retrying
+                if e.to_string().contains("item-not-found") || e.to_string().contains("No device list found") {
+                    info!("[OMEMO] get_device_ids: No OMEMO devices found for {} (no device list published)", jid);
                     
-                    // Store the device list with current timestamp
+                    // Store an empty device list to cache this result
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
@@ -720,30 +791,17 @@ impl OmemoManager {
                     
                     let entry = storage::DeviceListEntry {
                         jid: jid.to_string(),
-                        device_ids: ids.clone(),
+                        device_ids: vec![], // Empty list
                         last_update: now,
                     };
                     
                     let storage_guard = self.storage.lock().await;
                     if let Err(e) = storage_guard.save_device_list(&entry) {
-                        warn!("[OMEMO] get_device_ids: Failed to store device list: {}", e);
-                        // Non-fatal error, continue
+                        warn!("[OMEMO] get_device_ids: Failed to store empty device list: {}", e);
                     }
                     drop(storage_guard);
                     
-                    return Ok(ids);
-                },
-                Err(e) => {
-                    warn!("[OMEMO] get_device_ids: Attempt {} failed to fetch device list for {}: {}", 
-                          retry_count + 1, jid, e);
-                    last_error = Some(e);
-                    retry_count += 1;
-                    
-                    if retry_count < max_retries {
-                        // Exponential backoff: 500ms, 1000ms, 2000ms, etc.
-                        let delay = std::time::Duration::from_millis(500 * (2_u64.pow(retry_count as u32 - 1)));
-                        tokio::time::sleep(delay).await;
-                    }
+                    return Ok(vec![]); // Return empty list
                 }
             }
         }
@@ -760,16 +818,9 @@ impl OmemoManager {
         }
         drop(storage_guard);
         
-        // If we have no cached list, return a meaningful error instead of defaulting to device ID 1
-        if let Some(e) = last_error {
-            error!("[OMEMO] get_device_ids: All attempts to fetch device list failed: {}", e);
-            return Err(OmemoError::NoDeviceError(format!(
-                "Failed to fetch device list for {}: {}", jid, e)));
-        } else {
-            error!("[OMEMO] get_device_ids: All attempts to fetch device list failed with unknown error");
-            return Err(OmemoError::NoDeviceError(format!(
-                "Failed to fetch device list for {}", jid)));
-        }
+        // If we have no cached list, return empty list for better UX
+        warn!("[OMEMO] get_device_ids: No device list available for {}, returning empty list", jid);
+        return Ok(vec![]);
     }
     
     /// Fetch device list from the XMPP server
@@ -1261,8 +1312,20 @@ impl OmemoManager {
     pub async fn decrypt_message_key(&mut self, from: String, sender_device_id: u32, encrypted_key: &[u8]) -> Result<Vec<u8>, OmemoError> {
         debug!("Decrypting message key from device {} (sender: {})", sender_device_id, from);
         
-        // Find the session for this device
-        let session = self.get_or_create_session(&from, sender_device_id).await?;
+        // Find the session for this device with timeout protection
+        let session = match tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            self.get_or_create_session(&from, sender_device_id)
+        ).await {
+            Ok(result) => result?,
+            Err(_) => {
+                return Err(OmemoError::SessionError(
+                    crate::omemo::session::SessionError::InvalidStateError(
+                        format!("Timeout while creating session for key decryption with {}:{}", from, sender_device_id)
+                    )
+                ));
+            }
+        };
         
         // Decrypt the key using the session
         match session.decrypt_key(encrypted_key) {

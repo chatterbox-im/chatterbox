@@ -1368,10 +1368,24 @@ impl XMPPClient {
         
         let omemo_manager = self.omemo_manager.as_ref().unwrap();
         
-        // First, get the device IDs for this contact
+        // First, get the device IDs for this contact with timeout protection
         let device_ids = {
             let manager_guard = omemo_manager.lock().await;
-            manager_guard.get_device_ids_for_test(contact).await?
+            // Add timeout protection to prevent UI hangs
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(10), 
+                manager_guard.get_device_ids_for_test(contact)
+            ).await {
+                Ok(Ok(device_ids)) => device_ids,
+                Ok(Err(e)) => {
+                    warn!("Failed to get device IDs for {}: {}", contact, e);
+                    return Ok(()); // Continue without OMEMO verification
+                },
+                Err(_) => {
+                    warn!("Timeout while getting device IDs for {}, skipping OMEMO verification", contact);
+                    return Ok(()); // Continue without OMEMO verification
+                }
+            }
         };
         
         if device_ids.is_empty() {
@@ -1393,17 +1407,43 @@ impl XMPPClient {
         
         // Check each device to see if it's trusted
         for device_id in device_ids {
-            // Check if this device is already trusted
+            // Check if this device is already trusted with timeout protection
             let trusted = {
                 let manager_guard = omemo_manager.lock().await;
-                manager_guard.is_device_identity_trusted(contact, device_id).await?
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(8),
+                    manager_guard.is_device_identity_trusted(contact, device_id)
+                ).await {
+                    Ok(Ok(trusted)) => trusted,
+                    Ok(Err(e)) => {
+                        warn!("Failed to check trust for {}:{}: {}", contact, device_id, e);
+                        false // Assume not trusted if we can't check
+                    },
+                    Err(_) => {
+                        warn!("Timeout checking trust for {}:{}, assuming not trusted", contact, device_id);
+                        false // Assume not trusted if timeout
+                    }
+                }
             };
             
             if !trusted {
-                // This device is not trusted, get its fingerprint and request verification
+                // This device is not trusted, get its fingerprint and request verification with timeout
                 let fingerprint = {
                     let manager_guard = omemo_manager.lock().await;
-                    manager_guard.get_device_fingerprint(contact, device_id).await?
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(8),
+                        manager_guard.get_device_fingerprint(contact, device_id)
+                    ).await {
+                        Ok(Ok(fingerprint)) => fingerprint,
+                        Ok(Err(e)) => {
+                            warn!("Failed to get fingerprint for {}:{}: {}", contact, device_id, e);
+                            continue; // Skip this device if we can't get fingerprint
+                        },
+                        Err(_) => {
+                            warn!("Timeout getting fingerprint for {}:{}, skipping device", contact, device_id);
+                            continue; // Skip this device if timeout
+                        }
+                    }
                 };
                 
                 // Double-check if this fingerprint is already trusted in the database
@@ -1412,10 +1452,21 @@ impl XMPPClient {
                 if fingerprint_trusted {
                     //debug!("Device {}:{} is already trusted in the database. Updating trust state in manager.", contact, device_id);
                     
-                    // Update the trust state in the manager
+                    // Update the trust state in the manager with timeout protection
                     let manager_guard = omemo_manager.lock().await;
-                    if let Err(e) = manager_guard.trust_device_identity(contact, device_id).await {
-                        warn!("Failed to update device trust state in manager: {}", e);
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        manager_guard.trust_device_identity(contact, device_id)
+                    ).await {
+                        Ok(Ok(_)) => {
+                            //debug!("Successfully updated trust state for {}:{}", contact, device_id);
+                        },
+                        Ok(Err(e)) => {
+                            warn!("Failed to update device trust state in manager: {}", e);
+                        },
+                        Err(_) => {
+                            warn!("Timeout updating trust state for {}:{}", contact, device_id);
+                        }
                     }
                     
                     // Continue to the next device
@@ -1967,13 +2018,18 @@ impl XMPPClient {
             for device_id in contact_devices {
                 info!("Checking/creating session with {}:{}", contact, device_id);
                 
-                match manager.get_or_create_session(contact, device_id).await {
-                    Ok(_) => {
+                // Add timeout protection to prevent UI hang on session creation
+                let session_timeout = tokio::time::Duration::from_secs(8);
+                match tokio::time::timeout(session_timeout, manager.get_or_create_session(contact, device_id)).await {
+                    Ok(Ok(_)) => {
                         info!("Session established or already exists with {}:{}", contact, device_id);
                         established_sessions = true;
                     },
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         warn!("Failed to establish session with {}:{}: {}", contact, device_id, e);
+                    },
+                    Err(_) => {
+                        warn!("Timeout while creating session with {}:{}, skipping device", contact, device_id);
                     }
                 }
             }
