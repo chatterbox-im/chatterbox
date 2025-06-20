@@ -5,9 +5,8 @@ set -ex
 rm -f chatterbox.log
 
 # 0. Run as cb to publish their bundle and device list, then disconnect
-export XMPP_SERVER="xmpp.server.org"
-export XMPP_USERNAME="cb"
-export XMPP_PASSWORD="+ng0APPS2TCL1rTeWZjXA1ULFz5ns35"
+export XMPP_USERNAME=XMPP_USERNAME_B
+export XMPP_PASSWORD=XMPP_PASSWORD_B
 
 (
     timeout 30s expect <<EOF
@@ -29,9 +28,7 @@ fi
 
 # 1. Run as ca to send a message to cb using expect
 rm -f chatterbox.log
-export XMPP_USERNAME="ca"
-export XMPP_PASSWORD="+ng0APPS2TCL1rTeWZjXA1ULFz5ns34"
-export RECIPIENT="cb@xmpp.server.org"
+export RECIPIENT="$XMPP_USERNAME_B@$XMPP_SERVER"
 export TEST_MESSAGE="hello from ca to cb"
 
 (
@@ -54,8 +51,8 @@ grep "$TEST_MESSAGE" chatterbox.log || (cat chatterbox.log && exit 1)
 
 # 4. Run as cb to receive the message from ca
 rm -f chatterbox.log
-export XMPP_USERNAME="cb"
-export XMPP_PASSWORD="+ng0APPS2TCL1rTeWZjXA1ULFz5ns35"
+export XMPP_USERNAME=$XMPP_USERNAME_B
+export XMPP_PASSWORD=$XMPP_PASSWORD_B
 
 (
     timeout 30s expect <<EOF
