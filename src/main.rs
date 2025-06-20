@@ -1,7 +1,7 @@
 #![deny(dead_code)] // DO NOT REMOVE THIS EVER
 use anyhow::Result;
 use log::{info, error, warn, LevelFilter};
-use std::{env, io};
+use std::{env, io::{self, Write}};
 use clap::Parser;
 use std::path::PathBuf;
 
@@ -111,12 +111,6 @@ async fn main() -> Result<()> {
         info!("OMEMO directory overridden to: {}", omemo_dir.display());
     }
 
-    // Before connecting, print the username and server for debugging
-    let username = std::env::var("XMPP_USERNAME").unwrap_or_else(|_| "".to_string());
-    let server = std::env::var("XMPP_SERVER").unwrap_or_else(|_| "".to_string());
-    //debug!("[DEBUG] About to connect with username: '{}' and server: '{}'", username, server);
-    println!("Connecting to {}@{}... please wait...\n", username, server);
-
     // Get credentials: prefer environment variables, then file, then prompt
     let (server, username, password, credentials_from_env) = if let (Ok(server), Ok(username), Ok(password)) = (
         env::var("XMPP_SERVER"),
@@ -138,6 +132,10 @@ async fn main() -> Result<()> {
         (server, username, password, false)
     };
 
+    // Print initial connection message
+    print!("Connecting to {}@{}... please wait", username, server);
+    io::stdout().flush().unwrap();
+
     // Set up the XMPP client
     let (mut xmpp_client, mut msg_rx) = XMPPClient::new();
 
@@ -145,8 +143,48 @@ async fn main() -> Result<()> {
     let bare_jid = username.split('/').next().unwrap_or(&username);
     chatterbox::omemo::device_id::set_omemo_jid(bare_jid);
 
-    match xmpp_client.connect(&server, &username, &password).await {
+    // Start the animated dots task
+    let (dots_stop_tx, mut dots_stop_rx) = tokio::sync::mpsc::channel(1);
+    let username_clone = username.clone();
+    let server_clone = server.clone();
+    let dots_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(500));
+        let mut dots_count = 0;
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    print!(".");
+                    io::stdout().flush().unwrap();
+                    dots_count += 1;
+                    // Reset line after 6 dots for better readability
+                    if dots_count >= 6 {
+                        print!("\rConnecting to {}@{}... please wait", username_clone, server_clone);
+                        io::stdout().flush().unwrap();
+                        dots_count = 0;
+                    }
+                }
+                _ = dots_stop_rx.recv() => {
+                    break;
+                }
+            }
+        }
+    });
+
+    let connection_result = xmpp_client.connect(&server, &username, &password).await;
+    
+    // Stop the dots animation
+    let _ = dots_stop_tx.send(()).await;
+    dots_task.abort(); // Ensure the task is stopped
+    
+    // Clear the connection line and move to next line
+    let connection_msg = format!("Connecting to {}@{}... please wait......", username, server);
+    print!("\r{}\r", " ".repeat(connection_msg.len()));
+    io::stdout().flush().unwrap();
+    
+    match connection_result {
         Ok(_) => {
+            println!("Connected successfully!");
+            
             // Save credentials on successful connection, but only if not from env vars
             if !credentials_from_env {
                 let credentials = Credentials::new(&server, &username, &password);
@@ -176,6 +214,8 @@ async fn main() -> Result<()> {
 
         },
         Err(e) => {
+            println!("Connection failed!");
+            
             // Get detailed error information - break it into multiple lines for better readability
             let error_details = format!("Connection to XMPP server failed: {}", e);
             let error_display = format!(
