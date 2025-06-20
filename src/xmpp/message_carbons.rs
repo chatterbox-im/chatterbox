@@ -567,7 +567,7 @@ impl super::XMPPClient {
             debug!("Decrypting OMEMO carbon message from {}:{}", sender_jid, sender_device_id);
             
             // Get the encrypted key for our device
-            let encrypted_key = encrypted_keys.get(&own_device_id).unwrap().clone();
+            let _encrypted_key = encrypted_keys.get(&own_device_id).unwrap().clone();
             
             // Create an OMEMO message structure with the parts we extracted
             let omemo_message = crate::omemo::protocol::OmemoMessage {

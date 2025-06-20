@@ -32,7 +32,7 @@ pub fn register_inspector(tx: mpsc::Sender<String>) {
             tokio::spawn(async move {
                 for stanza in stanzas_to_send {
                     if let Err(e) = tx.send(stanza).await {
-                        //debug!("Failed to send buffered stanza to inspector: {}", e);
+                        trace!("Failed to send buffered stanza to inspector: {}", e.to_string());
                         break;
                     }
                 }
@@ -110,13 +110,13 @@ pub fn stanza_to_string(stanza: &Element) -> String {
             if let Some(header) = encrypted.get_child("header", "") {
                 //debug!("Found header with {} children", header.children().count());
                 if let Some(iv) = header.get_child("iv", "") {
-                    //debug!("Found IV element: {}", iv.text());
+                    trace!("Found IV element: {}", iv.text());
                 }
                 let key_count = header.children().filter(|c| c.name() == "key").count();
-                //debug!("Found {} key elements", key_count);
+                trace!("Found {} key elements", key_count);
             }
             if let Some(payload) = encrypted.get_child("payload", "") {
-                //debug!("Found payload element: {}", payload.text());
+                trace!("Found payload element: {}", payload.text());
             }
         }
     }
@@ -138,9 +138,10 @@ pub fn verify_omemo_stanza(stanza: &Element, content: &str) -> Result<(), String
         error!("Message element namespace issue: expected 'jabber:client', got '{}'", stanza.ns());
         return Err(format!("SECURITY VIOLATION: Message missing required OMEMO elements: {}", missing_elements.join(", ")));
     }
-    //debug!("Message attributes:");
+    
+    trace!("Message attributes:");
     for (name, value) in stanza.attrs() {
-        //debug!("  - {}: {}", name, value);
+        trace!("  - {}: {}", name, value);
     }
     // Check for encrypted element with either the standard or legacy OMEMO namespace
     let encrypted = match stanza.get_child("encrypted", custom_ns::OMEMO) {
@@ -165,7 +166,7 @@ pub fn verify_omemo_stanza(stanza: &Element, content: &str) -> Result<(), String
                         None => {
                             error!("Missing encrypted element with proper namespace");
                             //debug!("Direct children of message element:");
-                            for child in stanza.children() {
+                            for _child in stanza.children() {
                                 //debug!("  - {} (ns: {})", child.name(), child.ns());
                             }
                             missing_elements.push("OMEMO namespace, encrypted element");
@@ -197,7 +198,7 @@ pub fn verify_omemo_stanza(stanza: &Element, content: &str) -> Result<(), String
                         None => {
                             error!("Missing header element in encrypted element");
                             //debug!("Direct children of encrypted element:");
-                            for child in encrypted.children() {
+                            for _child in encrypted.children() {
                                 //debug!("  - {} (ns: {})", child.name(), child.ns());
                             }
                             missing_elements.push("header element");
@@ -208,7 +209,7 @@ pub fn verify_omemo_stanza(stanza: &Element, content: &str) -> Result<(), String
             }
         }
     };
-    if let Some(sid) = header.attr("sid") {
+    if let Some(_sid) = header.attr("sid") {
         //debug!("Found sender device ID: {}", sid);
     } else {
         error!("Missing sender device ID in header element");
@@ -229,7 +230,7 @@ pub fn verify_omemo_stanza(stanza: &Element, content: &str) -> Result<(), String
     } else {
         error!("Missing initialization vector (iv) element in header");
         //debug!("Header children:");
-        for child in header.children() {
+        for _child in header.children() {
             //debug!("  - {} (ns: {})", child.name(), child.ns());
         }
         missing_elements.push("initialization vector");
@@ -242,8 +243,8 @@ pub fn verify_omemo_stanza(stanza: &Element, content: &str) -> Result<(), String
         missing_elements.push("encrypted key");
     } else {
         //debug!("Found {} key elements", key_elements.len());
-        for (i, key) in key_elements.iter().enumerate() {
-            let rid = key.attr("rid").unwrap_or("missing-rid");
+        for (_i, key) in key_elements.iter().enumerate() {
+            let _rid = key.attr("rid").unwrap_or("missing-rid");
             //debug!("Key {}: rid={}, namespace={}, content_length={}", i, rid, key.ns(), key.text().len());
             match base64::engine::general_purpose::STANDARD.decode(key.text().trim()) {
                 Ok(decoded) => debug!("Valid base64 key content, decoded length: {} bytes", decoded.len()),
@@ -265,9 +266,9 @@ pub fn verify_omemo_stanza(stanza: &Element, content: &str) -> Result<(), String
         }
     } else {
         error!("Missing payload element in encrypted element");
-        //debug!("Encrypted element children:");
+        trace!("Encrypted element children:");
         for child in encrypted.children() {
-            //debug!("  - {} (ns: {})", child.name(), child.ns());
+            trace!("  - {} (ns: {})", child.name(), child.ns());
         }
         missing_elements.push("encrypted payload");
     }

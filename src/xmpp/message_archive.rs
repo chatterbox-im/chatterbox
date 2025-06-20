@@ -338,7 +338,7 @@ impl super::XMPPClient {
                         if let Some(result) = stanza.get_child("result", custom_ns::MAM) {
                             if result.attr("queryid") == Some(&query_id) {
                                 // Store the result ID for pagination
-                                let result_id = result.attr("id").map(|s| s.to_string());
+                                let _result_id = result.attr("id").map(|s| s.to_string());
                                 
                                 if let Some(forwarded) = result.get_child("forwarded", "urn:xmpp:forward:0") {
                                     // Extract the original message and delay info

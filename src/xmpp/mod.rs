@@ -259,8 +259,8 @@ impl XMPPClient {
                     if stanza.name() == "presence" {
                         // Handle presence stanzas
                         //debug!("Received presence stanza: {:?}", stanza);
-                        let from = stanza.attr("from").unwrap_or("");
-                        let to = stanza.attr("to").unwrap_or("");
+                        let _from = stanza.attr("from").unwrap_or("");
+                        let _to = stanza.attr("to").unwrap_or("");
                         //debug!("[JID DEBUG] handle_incoming_messages: presence stanza from='{}', to='{}'", from, to);
                         
                         // Process presence updates using our dedicated handler in presence.rs
@@ -285,8 +285,8 @@ impl XMPPClient {
                     } else if stanza.name() == "message" {
                         // Process message here or call into message handler
                         //debug!("Received message stanza: {:?}", stanza);
-                        let from = stanza.attr("from").unwrap_or("");
-                        let to = stanza.attr("to").unwrap_or("");
+                        let _from = stanza.attr("from").unwrap_or("");
+                        let _to = stanza.attr("to").unwrap_or("");
                         //debug!("[JID DEBUG] handle_incoming_messages: message stanza from='{}', to='{}'", from, to);
                         
                         // Check for OMEMO encrypted messages
@@ -311,7 +311,7 @@ impl XMPPClient {
                                 };
                                 
                                 // Register the global client for OMEMO integration
-                                if let Some(manager) = &omemo_manager {
+                                if let Some(_manager) = &omemo_manager {
                                     crate::xmpp::omemo_integration::set_current_client_arc(client_clone.clone());
                                 }
                                 
@@ -369,7 +369,7 @@ impl XMPPClient {
                                     };
                                     
                                     // Register the global client for OMEMO integration
-                                    if let Some(manager) = &omemo_manager {
+                                    if let Some(_manager) = &omemo_manager {
                                         crate::xmpp::omemo_integration::set_current_client_arc(client_clone.clone());
                                     }
                                     
@@ -431,12 +431,12 @@ impl XMPPClient {
                         //debug!("Received IQ stanza: {:?}", stanza);
                         
                         // Check if this is a service discovery response
-                        if let Some(query) = stanza.get_child("query", "http://jabber.org/protocol/disco#info") {
+                        if let Some(_query) = stanza.get_child("query", "http://jabber.org/protocol/disco#info") {
                             //debug!("Received service discovery info response");
                             if let Err(e) = service_discovery.handle_disco_response(&stanza).await {
                                 warn!("Failed to process service discovery info response: {}", e);
                             }
-                        } else if let Some(query) = stanza.get_child("query", "http://jabber.org/protocol/disco#items") {
+                        } else if let Some(_query) = stanza.get_child("query", "http://jabber.org/protocol/disco#items") {
                             //debug!("Received service discovery items response");
                             if let Err(e) = service_discovery.handle_disco_response(&stanza).await {
                                 warn!("Failed to process service discovery items response: {}", e);
@@ -444,7 +444,7 @@ impl XMPPClient {
                         }
                     }
                 },
-                Some(XMPPEvent::Online { bound_jid, resumed }) => {
+                Some(XMPPEvent::Online { bound_jid, resumed: _ }) => {
                     if !seen_online_event {
                         info!("Connected to XMPP server as {}", bound_jid);
                         seen_online_event = true;
@@ -1849,29 +1849,29 @@ impl XMPPClient {
                         //debug!("DEBUG: Found header element with namespace: {}", header.ns());
                         //debug!("DEBUG: Header attributes: sid={}", header.attr("sid").unwrap_or("MISSING"));
                         
-                        let key_count = header.children().filter(|c| c.name() == "key").count();
+                        let _key_count = header.children().filter(|c| c.name() == "key").count();
                         //debug!("DEBUG: Found {} key elements", key_count);
                         
-                        if let Some(iv) = header.get_child("iv", custom_ns::OMEMO) {
+                        if let Some(_iv) = header.get_child("iv", custom_ns::OMEMO) {
                             //debug!("DEBUG: Found IV element with namespace: {}", iv.ns());
                             //debug!("DEBUG: IV content length: {}", iv.text().len());
-                        } else if let Some(iv) = header.get_child("iv", "") {
+                        } else if let Some(_iv) = header.get_child("iv", "") {
                             //debug!("DEBUG: Found IV element with empty namespace: {}", iv.ns());
                             //debug!("DEBUG: IV content length: {}", iv.text().len());
                         } else {
                             error!("DEBUG: IV element missing");
                         }
                         
-                    } else if let Some(header) = encrypted.get_child("header", "") {
+                    } else if let Some(_header) = encrypted.get_child("header", "") {
                         //debug!("DEBUG: Found header element with empty namespace: {}", header.ns());
                     } else {
                         error!("DEBUG: Header element missing");
                     }
                     
-                    if let Some(payload) = encrypted.get_child("payload", custom_ns::OMEMO) {
+                    if let Some(_payload) = encrypted.get_child("payload", custom_ns::OMEMO) {
                         //debug!("DEBUG: Found payload element with namespace: {}", payload.ns());
                         //debug!("DEBUG: Payload content length: {}", payload.text().len());
-                    } else if let Some(payload) = encrypted.get_child("payload", "") {
+                    } else if let Some(_payload) = encrypted.get_child("payload", "") {
                         //debug!("DEBUG: Found payload element with empty namespace: {}", payload.ns());
                         //debug!("DEBUG: Payload content length: {}", payload.text().len());
                     } else {
@@ -1881,7 +1881,7 @@ impl XMPPClient {
                 } else {
                     error!("DEBUG: Encrypted element missing");
                     //debug!("DEBUG: Message children:");
-                    for child in stanza.children() {
+                    for _child in stanza.children() {
                         //debug!("  - {} (ns: {})", child.name(), child.ns());
                     }
                 }
@@ -2226,7 +2226,7 @@ fn verify_omemo_stanza(stanza: &xmpp_parsers::Element, content: &str) -> Result<
     
     // Debug attributes
     //debug!("Message attributes:");
-    for (name, value) in stanza.attrs() {
+    for (_name, _value) in stanza.attrs() {
         //debug!("  - {}: {}", name, value);
     }
     
@@ -2239,7 +2239,7 @@ fn verify_omemo_stanza(stanza: &xmpp_parsers::Element, content: &str) -> Result<
         None => {
             error!("Missing encrypted element with proper namespace");
             //debug!("Direct children of message element:");
-            for child in stanza.children() {
+            for _child in stanza.children() {
                 //debug!("  - {} (ns: {})", child.name(), child.ns());
             }
             missing_elements.push("OMEMO namespace, encrypted element");
@@ -2264,7 +2264,7 @@ fn verify_omemo_stanza(stanza: &xmpp_parsers::Element, content: &str) -> Result<
                 None => {
                     error!("Missing header element in encrypted element");
                     //debug!("Direct children of encrypted element:");
-                    for child in encrypted.children() {
+                    for _child in encrypted.children() {
                         //debug!("  - {} (ns: {})", child.name(), child.ns());
                     }
                     missing_elements.push("header element");
@@ -2276,7 +2276,7 @@ fn verify_omemo_stanza(stanza: &xmpp_parsers::Element, content: &str) -> Result<
     };
     
     // Check sender device ID
-    if let Some(sid) = header.attr("sid") {
+    if let Some(_sid) = header.attr("sid") {
         //debug!("Found sender device ID: {}", sid);
     } else {
         error!("Missing sender device ID in header element");
@@ -2299,7 +2299,7 @@ fn verify_omemo_stanza(stanza: &xmpp_parsers::Element, content: &str) -> Result<
     } else {
         error!("Missing initialization vector (iv) element in header");
         //debug!("Header children:");
-        for child in header.children() {
+        for _child in header.children() {
             //debug!("  - {} (ns: {})", child.name(), child.ns());
         }
         missing_elements.push("initialization vector");

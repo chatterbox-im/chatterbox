@@ -14,10 +14,9 @@ use sha2::{Sha256, Digest};
 use thiserror::Error;
 use x25519_dalek::{PublicKey, StaticSecret};
 use log::{trace, error};
-use std::time::Instant;
-// Add imports for AES-CBC with PKCS#7 padding
-use aes::Aes256;
-// The KeyIvInit trait is needed for new() method on Encryptor and Decryptor
+
+use aes::Aes256; // Add imports for AES-CBC with PKCS#7 padding
+
 use aes::cipher::{KeyIvInit, BlockEncryptMut, BlockDecryptMut};
 use cbc::{Encryptor, Decryptor};
 use block_padding::Pkcs7;
@@ -104,20 +103,17 @@ pub fn validate_iv(iv: &[u8]) -> Result<(), CryptoError> {
         )));
     }
     
-    //debug!("IV validation successful: {} bytes", iv.len());
     trace!("IV: {}", hex::encode(iv));
     Ok(())
 }
 
-/// Encrypt a message using AES-256-GCM
+/// Encrypt a message (currently uses GCM but I think it needs to be CBC for OMEMO)
 pub fn encrypt(
     plaintext: &[u8],
     key: &[u8],
     iv: &[u8],
     associated_data: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
-    let start = Instant::now();
-    //debug!("Encrypting {} bytes of data with AES-256-GCM", plaintext.len());
     trace!("Encryption key: {}", hex::encode(key));
     trace!("IV: {}", hex::encode(iv));
     if !associated_data.is_empty() {
@@ -157,8 +153,6 @@ pub fn encrypt(
         }
     };
     
-    let duration = start.elapsed();
-    //debug!("Encryption successful: {} bytes encrypted in {:?}", ciphertext.len(), duration);
     trace!("Ciphertext: {}", hex::encode(&ciphertext));
     
     Ok(ciphertext)
@@ -171,8 +165,6 @@ pub fn decrypt(
     iv: &[u8],
     associated_data: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
-    let start = Instant::now();
-    //debug!("Decrypting {} bytes of data with AES-256-GCM", ciphertext.len());
     trace!("Decryption key: {}", hex::encode(key));
     trace!("IV: {}", hex::encode(iv));
     if !associated_data.is_empty() {
@@ -212,10 +204,7 @@ pub fn decrypt(
             return Err(CryptoError::AesGcmError(format!("Decryption failed: {}", e)));
         }
     };
-    
-    let duration = start.elapsed();
-    //debug!("Decryption successful: {} bytes decrypted in {:?}", plaintext.len(), duration);
-    
+        
     Ok(plaintext)
 }
 
@@ -226,8 +215,7 @@ pub fn encrypt_data(
     key: &[u8],
     iv: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
-    let start = Instant::now();
-    //debug!("Encrypting {} bytes of data with AES-256-CBC", data.len());
+
     trace!("Encryption key: {}", hex::encode(key));
     trace!("IV: {}", hex::encode(iv));
     
@@ -267,8 +255,6 @@ pub fn encrypt_data(
     // Now we can safely truncate the buffer
     buffer.truncate(pos_len);
     
-    let duration = start.elapsed();
-    //debug!("AES-CBC encryption successful: {} bytes encrypted in {:?}", buffer.len(), duration);
     trace!("Ciphertext: {}", hex::encode(&buffer));
     
     Ok(buffer)
@@ -281,8 +267,7 @@ pub fn decrypt_data(
     key: &[u8],
     iv: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
-    let start = Instant::now();
-    //debug!("Decrypting {} bytes of data with AES-256-CBC", data.len());
+
     trace!("Decryption key: {}", hex::encode(key));
     trace!("IV: {}", hex::encode(iv));
     trace!("Ciphertext: {}", hex::encode(data));
@@ -323,7 +308,6 @@ pub fn decrypt_data(
     // Now we can safely truncate the buffer
     buffer.truncate(pos_len);
     
-    let duration = start.elapsed();
     //debug!("AES-CBC decryption successful: {} bytes decrypted in {:?}", buffer.len(), duration);
     
     Ok(buffer)
@@ -331,7 +315,7 @@ pub fn decrypt_data(
 
 /// Calculate an HMAC using SHA-256
 pub fn hmac_sha256(key: &[u8], data: &[u8]) -> Result<Vec<u8>, CryptoError> {
-    let start = Instant::now();
+
     //debug!("Calculating HMAC-SHA256 for {} bytes of data", data.len());
     trace!("HMAC key: {}", hex::encode(key));
     
@@ -348,7 +332,6 @@ pub fn hmac_sha256(key: &[u8], data: &[u8]) -> Result<Vec<u8>, CryptoError> {
     // Finalize and get the result
     let result = mac.finalize().into_bytes().to_vec();
     
-    let duration = start.elapsed();
     //debug!("HMAC-SHA256 computation successful in {:?}", duration);
     trace!("HMAC result: {}", hex::encode(&result));
     
@@ -375,14 +358,13 @@ pub fn kdf(ikm: &[u8], salt: &[u8], info: &[u8]) -> Vec<u8> {
 
 /// Calculate a SHA-256 hash
 pub fn sha256_hash(data: &[u8]) -> Vec<u8> {
-    let start = Instant::now();
+
     trace!("Calculating SHA-256 hash of {} bytes of data", data.len());
     
     let mut hasher = Sha256::new();
     hasher.update(data);
     let hash = hasher.finalize().to_vec();
     
-    let duration = start.elapsed();
     //debug!("SHA-256 hash computation successful in {:?}", duration);
     trace!("Hash result: {}", hex::encode(&hash));
     hash
@@ -409,8 +391,7 @@ pub fn secure_compare(a: &[u8], b: &[u8]) -> bool {
 
 /// Generate an ephemeral X25519 key pair for the X3DH key agreement
 pub fn generate_x25519_keypair() -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
-    let start = Instant::now();
-    //debug!("Generating X25519 key pair");
+    trace!("Generating X25519 key pair");
     
     // Generate a secure random static secret key using OsRng for cryptographic randomness
     let static_secret = StaticSecret::random_from_rng(OsRng);
@@ -422,7 +403,6 @@ pub fn generate_x25519_keypair() -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
     let public_key_bytes = public_key.as_bytes().to_vec();
     let private_key_bytes = static_secret.to_bytes().to_vec();
     
-    let duration = start.elapsed();
     //debug!("X25519 key pair generation successful in {:?}", duration);
     trace!("Public key: {}", hex::encode(&public_key_bytes));
     trace!("Private key: {}", hex::encode(&private_key_bytes));
@@ -432,8 +412,7 @@ pub fn generate_x25519_keypair() -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
 
 /// Perform a Diffie-Hellman key exchange with X25519
 pub fn x25519_diffie_hellman(private_key: &[u8], public_key: &[u8]) -> Result<Vec<u8>, CryptoError> {
-    let start = Instant::now();
-    //debug!("Performing X25519 Diffie-Hellman key exchange");
+    trace!("Performing X25519 Diffie-Hellman key exchange");
     trace!("Using private key: {}", hex::encode(private_key));
     trace!("Using public key: {}", hex::encode(public_key));
     
@@ -461,7 +440,6 @@ pub fn x25519_diffie_hellman(private_key: &[u8], public_key: &[u8]) -> Result<Ve
     let shared_secret = static_secret.diffie_hellman(&public);
     let shared_bytes = shared_secret.as_bytes().to_vec();
     
-    let duration = start.elapsed();
     //debug!("X25519 key exchange completed successfully in {:?}", duration);
     trace!("Shared secret: {}", hex::encode(&shared_bytes));
     
@@ -475,7 +453,7 @@ pub fn hkdf_derive(
     info: &[u8],
     output_len: usize,
 ) -> Result<Vec<u8>, CryptoError> {
-    let start = Instant::now();
+
     //debug!("Deriving key with HKDF: output_len={}", output_len);
     trace!("Salt: {}", hex::encode(salt));
     trace!("Input key material: {}", hex::encode(ikm));
@@ -489,8 +467,6 @@ pub fn hkdf_derive(
         return Err(CryptoError::KdfError(format!("HKDF expansion failed: {}", e)));
     }
     
-    let duration = start.elapsed();
-    //debug!("HKDF key derivation successful in {:?}", duration);
     trace!("Derived key: {}", hex::encode(&okm));
     
     Ok(okm)

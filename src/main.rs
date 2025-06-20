@@ -115,7 +115,7 @@ async fn main() -> Result<()> {
     let username = std::env::var("XMPP_USERNAME").unwrap_or_else(|_| "".to_string());
     let server = std::env::var("XMPP_SERVER").unwrap_or_else(|_| "".to_string());
     //debug!("[DEBUG] About to connect with username: '{}' and server: '{}'", username, server);
-    println!("Connecting to XMPP server at {}... please wait...\n", server);
+    println!("Connecting to {}@{}... please wait...\n", username, server);
 
     // Get credentials: prefer environment variables, then file, then prompt
     let (server, username, password, credentials_from_env) = if let (Ok(server), Ok(username), Ok(password)) = (
@@ -881,7 +881,7 @@ async fn run_main_loop(
                                 chat_ui.reset_device_fingerprints_dialog();
                                 chat_ui.add_message(create_system_message(
                                     "me",
-                                    "Error displaying device fingerprints dialog"
+                                    &format!("Error displaying device fingerprints dialog: {}", e)
                                 ));
                             }
                         },

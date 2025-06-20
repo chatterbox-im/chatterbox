@@ -159,7 +159,7 @@ impl super::OmemoManager {
         //debug!("Parsing device bundle response for device ID {}", device_id);
         
         // Check if we're in development mode (only use fallback bundles in development)
-        let is_development = cfg!(debug_assertions);
+        let _is_development = cfg!(debug_assertions);
         
         let document = roxmltree::Document::parse(response)
             .map_err(|e| OmemoError::ProtocolError(format!("Failed to parse device bundle response: {}", e)))?;
@@ -447,7 +447,7 @@ impl super::OmemoManager {
             Err(e) => {
                 warn!("Error in PubSub request to {}: {}, using fallback response", node, e);
                 if node.ends_with(":devicelist") {
-                    let mock_response = format!(
+                    let _mock_response = format!(
                         r#"<iq type='result' from='{node}' id='request1'>
                           <pubsub xmlns='http://jabber.org/protocol/pubsub'>
                             <items node='{node}'>
@@ -463,7 +463,7 @@ impl super::OmemoManager {
                     return Ok(());
                 }
                 if node.contains(".bundles:") {
-                    let mock_response = format!(
+                    let _mock_response = format!(
                         r#"<iq type='result' from='{node}' id='request1'>
                           <pubsub xmlns='http://jabber.org/protocol/pubsub'>
                             <items node='{node}'>

@@ -642,8 +642,6 @@ impl OmemoManager {
         // Get the session for the sender device
         let sender_str = sender.to_string();
         
-        // Store local_jid in temporary variable to avoid borrow issues
-        let local_jid = self.local_jid.clone();
         
         // Get or create session with timeout protection
         let session = match tokio::time::timeout(
@@ -1277,30 +1275,6 @@ impl OmemoManager {
         }
     }
     
-    /// Convert a device list to XML format
-    fn device_list_to_xml(&self, device_list: &[u32]) -> Result<String> {
-        debug!("Creating device list XML for devices: {:?}", device_list);
-        
-        // Create the list element
-        let mut xml = String::new();
-        
-        // Add opening list tag with namespace
-        xml.push_str(&format!("<list xmlns='{}'>", OMEMO_NAMESPACE));
-        
-        // Add each device
-        for device_id in device_list {
-            xml.push_str(&format!("<device id='{}' />", device_id));
-        }
-        
-        // Close list tag
-        xml.push_str("</list>");
-        
-        info!("Generated device list XML: {}", xml);
-        
-        Ok(xml)
-    }
-
-
 
     /// Get the device IDs for a user (public wrapper for testing)
     pub async fn get_device_ids_for_test(&self, jid: &str) -> Result<Vec<DeviceId>, OmemoError> {

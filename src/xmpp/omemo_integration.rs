@@ -463,7 +463,7 @@ impl super::XMPPClient {
         }
         
         // Validate and normalize the JID first
-        let normalized_jid = match self.ensure_full_jid(peer_jid).await {
+        let _normalized_jid = match self.ensure_full_jid(peer_jid).await {
             Ok(jid) => {
                 //debug!("Normalized JID for bundle request: {} -> {}", peer_jid, jid);
                 jid
@@ -1489,6 +1489,7 @@ pub async fn publish_pubsub_item(
 }
 
 // Helper function to serialize an Element to XML
+#[allow(dead_code)]
 fn serialize_element<W: std::io::Write>(
     element: &xmpp_parsers::Element,
     writer: &mut xml::writer::EventWriter<W>,
@@ -1597,7 +1598,7 @@ pub fn add_iv_to_header(header: &mut Element, iv: &[u8]) -> Result<(), OmemoErro
 /// Create an OMEMO header for a message
 pub fn create_omemo_header(
     sender_device_id: u32,
-    recipient_devices: &[(JidBare, u32)],
+    _recipient_devices: &[(JidBare, u32)],
     iv: &[u8],
     keys: &[(u32, Vec<u8>)],
 ) -> Result<Element, OmemoError> {

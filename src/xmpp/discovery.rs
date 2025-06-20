@@ -394,9 +394,9 @@ impl ServiceDiscovery {
             };
             
             // Extract the hash, node, and ver attributes
-            let node = caps.attr("node").unwrap_or("");
+            let _node = caps.attr("node").unwrap_or("");
             let ver = caps.attr("ver").unwrap_or("");
-            let hash = caps.attr("hash").unwrap_or("");
+            let _hash = caps.attr("hash").unwrap_or("");
             
             //debug!("Received entity capabilities from {}: node={}, ver={}, hash={}", from, node, ver, hash);
             
