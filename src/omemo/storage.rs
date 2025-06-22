@@ -617,7 +617,7 @@ mod tests {
         let storage = OmemoStorage::new_default().unwrap();
         
         // Test basic JID encoding/decoding
-        let original_jid = "hatt@mysterymen.duckdns.org";
+        let original_jid = "user@domain.com";
         let encoded = storage.jid_to_alphanumeric(original_jid);
         let decoded = storage.alphanumeric_to_jid(&encoded);
         

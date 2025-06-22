@@ -560,12 +560,11 @@ impl OmemoManager {
         }
         
         // Add our own devices (for message carbons)
+        // Note: We include ALL our devices, including the current one
+        // This ensures message carbons can be decrypted by all our devices
         for device_id in own_device_ids {
-            // Skip our current device - we already have the key
-            if device_id != self.device_id {
-                if !all_devices.contains(&(user_bare_jid.clone(), device_id)) {
-                    all_devices.push((user_bare_jid.clone(), device_id));
-                }
+            if !all_devices.contains(&(user_bare_jid.clone(), device_id)) {
+                all_devices.push((user_bare_jid.clone(), device_id));
             }
         }
         

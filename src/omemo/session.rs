@@ -290,8 +290,8 @@ mod tests {
     fn test_jid_normalization() {
         // Test that JID normalization handles different cases consistently
         assert_eq!(
-            OmemoSession::normalize_jid("hatt@mysterymen.duckdns.org"),
-            OmemoSession::normalize_jid("HATT@mysterymen.duckdns.org")
+            OmemoSession::normalize_jid("user@server.org"),
+            OmemoSession::normalize_jid("user@server.org")
         );
         
         assert_eq!(
