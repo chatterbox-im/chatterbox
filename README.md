@@ -1,7 +1,9 @@
 # Chatterbox
 
-This is a command-line interface chat application
+This is a secure terminal chat application
 implementing XMPP and OMEMO. It is proudly made with Rust.
+
+![chatterbox](.github/chatterbox.png)
 
 ## Project Stats
 
@@ -18,7 +20,8 @@ This currently implements the following XMPP Extension Protocols:
 - XEP-0313: Message Archive Management (message history)
 - XEP-0085: Chat State Notifications (typing indicators)
 - XEP-0280: Message Carbons (sync messages across devices)
-- XEP-0384: OMEMO Encryption
+- OMEMO Encryption 0.3
+
 
 ## Setup Instructions
 
