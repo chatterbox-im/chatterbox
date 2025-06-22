@@ -7,7 +7,7 @@
 //! the XEP-0384 specification.
 
 use anyhow::Result;
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
 use tokio::time::timeout;
 use tokio::time::Duration;
 
@@ -17,6 +17,151 @@ use crate::omemo::OMEMO_NAMESPACE;
 
 /// Default timeout for device list retrieval
 const DEVICE_LIST_TIMEOUT_SECS: u64 = 5;
+
+/// Static function to parse device list response without requiring locks
+/// This is a duplicate of the logic in OmemoManager to avoid deadlock situations
+fn parse_device_list_response_static(response: &str) -> Result<Vec<u32>, OmemoError> {
+    debug!("Static parsing device list response - starting");
+    debug!("Raw XML response (first 500 chars): {}", 
+           if response.len() > 500 { &response[..500] } else { response });
+    
+    // Check if the response is empty or whitespace only
+    if response.trim().is_empty() {
+        debug!("Empty response received, returning empty device list");
+        return Ok(Vec::new());
+    }
+    
+    // Check for item-not-found error before attempting to parse
+    if response.contains("item-not-found") {
+        debug!("Response contains 'item-not-found', returning empty device list");
+        return Ok(Vec::new());
+    }
+    
+    debug!("Static parsing device list response - starting XML parsing");
+    
+    // Parse the XML response
+    let document = match roxmltree::Document::parse(response) {
+        Ok(doc) => doc,
+        Err(e) => {
+            error!("Failed to parse device list XML: {}", e);
+            return Err(OmemoError::ProtocolError(format!("XML parsing error: {}", e)));
+        }
+    };
+    
+    debug!("Static parsing device list response - XML parsed successfully, checking for errors");
+    
+    // Check for error responses first
+    if let Some(error) = document.descendants().find(|n| n.has_tag_name("error")) {
+        let error_type = error.attribute("type").unwrap_or("unknown");
+        
+        // Find the error condition
+        let error_condition = error.children()
+            .find(|n| n.is_element() && n.tag_name().namespace() == Some("urn:ietf:params:xml:ns:xmpp-stanzas"))
+            .map(|n| n.tag_name().name())
+            .unwrap_or("unknown");
+        
+        warn!("Error in device list response: type={}, condition={}", error_type, error_condition);
+        
+        match error_condition {
+            "item-not-found" => {
+                // This means no device list exists yet, return empty list
+                debug!("No device list found (item-not-found)");
+                return Ok(Vec::new());
+            },
+            _ => {
+                return Err(OmemoError::ProtocolError(
+                    format!("XMPP error in device list response: {}", error_condition)
+                ));
+            }
+        }
+    }
+    
+    debug!("Static parsing device list response - no errors found, extracting device IDs");
+    
+    // Extract device IDs from the response
+    let mut device_ids = Vec::new();
+    
+    // Approach 1: Find <list> element by namespace
+    let list_elements: Vec<_> = document.descendants()
+        .filter(|n| n.has_tag_name("list") && 
+              (n.attribute("xmlns") == Some(OMEMO_NAMESPACE) || 
+               n.tag_name().namespace() == Some(OMEMO_NAMESPACE)))
+        .collect();
+    
+    if !list_elements.is_empty() {
+        debug!("Found {} list elements with OMEMO namespace", list_elements.len());
+        
+        for list in list_elements {
+            for device in list.children().filter(|n| n.has_tag_name("device") && n.has_attribute("id")) {
+                if let Some(id_str) = device.attribute("id") {
+                    if let Ok(id) = id_str.parse::<u32>() {
+                        debug!("Found device ID: {}", id);
+                        if !device_ids.contains(&id) {
+                            device_ids.push(id);
+                        }
+                    } else {
+                        warn!("Invalid device ID '{}' in device list", id_str);
+                    }
+                }
+            }
+        }
+    } else {
+        // Approach 2: Try to find <list> inside <item id='current'> (PubSub format)
+        debug!("No direct list elements found, trying PubSub item structure");
+        
+        let item_elements: Vec<_> = document.descendants()
+            .filter(|n| n.has_tag_name("item") && n.attribute("id") == Some("current"))
+            .collect();
+        
+        if !item_elements.is_empty() {
+            debug!("Found {} item elements with id='current'", item_elements.len());
+            
+            for item in item_elements {
+                if let Some(list) = item.children().find(|n| n.has_tag_name("list")) {
+                    for device in list.children().filter(|n| n.has_tag_name("device") && n.has_attribute("id")) {
+                        if let Some(id_str) = device.attribute("id") {
+                            if let Ok(id) = id_str.parse::<u32>() {
+                                debug!("Found device ID: {}", id);
+                                if !device_ids.contains(&id) {
+                                    device_ids.push(id);
+                                }
+                            } else {
+                                warn!("Invalid device ID '{}' in device list", id_str);
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            // Approach 3: Search any <device> elements with "id" attributes anywhere
+            debug!("No PubSub item structure found, looking for any device elements");
+            
+            for device in document.descendants().filter(|n| n.has_tag_name("device") && n.has_attribute("id")) {
+                if let Some(id_str) = device.attribute("id") {
+                    if let Ok(id) = id_str.parse::<u32>() {
+                        debug!("Found device ID: {}", id);
+                        if !device_ids.contains(&id) {
+                            device_ids.push(id);
+                        }
+                    } else {
+                        warn!("Invalid device ID '{}' in device list", id_str);
+                    }
+                }
+            }
+        }
+    }
+    
+    // If we found device IDs with any approach, return them
+    if !device_ids.is_empty() {
+        info!("Found {} OMEMO device IDs: {:?}", device_ids.len(), device_ids);
+        return Ok(device_ids);
+    }
+    
+    // If we reach here, we found no device IDs. This could mean no devices exist yet
+    // Return an empty list as this is a valid state for a new user
+    debug!("No device IDs found in response, returning empty list");
+    Ok(Vec::new())
+}
 
 /// Known OMEMO namespace variations
 pub const OMEMO_NAMESPACES: [&str; 2] = [
@@ -74,9 +219,10 @@ pub async fn fetch_device_list_with_fallbacks(jid: &str) -> Result<Vec<DeviceId>
                 Ok(Ok(xml)) => {
                     debug!("[OMEMO] Got response for node {}, parsing...", node);
                     
-                    // Parse with the OMEMO manager
-                    let manager_guard = omemo_manager.lock().await;
-                    match manager_guard.parse_device_list_response(&xml).await {
+                    // Parse directly without acquiring lock (avoid deadlock)
+                    let parsed_devices = parse_device_list_response_static(&xml);
+                    
+                    match parsed_devices {
                         Ok(devices) if !devices.is_empty() => {
                             info!("[OMEMO] Found {} devices using node {}", devices.len(), node);
                             
@@ -88,6 +234,11 @@ pub async fn fetch_device_list_with_fallbacks(jid: &str) -> Result<Vec<DeviceId>
                             }
                             
                             any_success = true;
+                            
+                            // Return immediately when we find devices to avoid unnecessary delays
+                            drop(client_guard);
+                            info!("[OMEMO] Successfully found devices for {}: {:?}", jid, combined_devices);
+                            return Ok(combined_devices);
                         },
                         Ok(_) => {
                             debug!("[OMEMO] No devices found with node {}", node);
@@ -119,8 +270,11 @@ pub async fn fetch_device_list_with_fallbacks(jid: &str) -> Result<Vec<DeviceId>
     let standard_node = format!("{}:devices", OMEMO_NAMESPACE);
     match client_guard.request_pubsub_items(jid, &standard_node).await {
         Ok(xml) => {
-            let manager_guard = omemo_manager.lock().await;
-            if let Ok(devices) = manager_guard.parse_device_list_response(&xml).await {
+            let parsed_devices = {
+                let manager_guard = omemo_manager.lock().await;
+                manager_guard.parse_device_list_response(&xml)
+            };
+            if let Ok(devices) = parsed_devices {
                 if !devices.is_empty() {
                     return Ok(devices);
                 }
@@ -131,8 +285,11 @@ pub async fn fetch_device_list_with_fallbacks(jid: &str) -> Result<Vec<DeviceId>
             let legacy_node = format!("{}:devicelist", OMEMO_NAMESPACE);
             match client_guard.request_pubsub_items(jid, &legacy_node).await {
                 Ok(xml) => {
-                    let manager_guard = omemo_manager.lock().await;
-                    if let Ok(devices) = manager_guard.parse_device_list_response(&xml).await {
+                    let parsed_devices = {
+                        let manager_guard = omemo_manager.lock().await;
+                        manager_guard.parse_device_list_response(&xml)
+                    };
+                    if let Ok(devices) = parsed_devices {
                         if !devices.is_empty() {
                             return Ok(devices);
                         }

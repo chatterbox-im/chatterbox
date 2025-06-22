@@ -97,30 +97,22 @@ pub fn inspect_inbound_xml(xml: &str) {
 
 /// Helper function to convert Element to String
 pub fn stanza_to_string(stanza: &Element) -> String {
-    let debug_str = format!("{:?}", stanza);
-    //debug!("Element name: {}, children count: {}", stanza.name(), stanza.children().count());
-    //debug!("Element namespace: {}", stanza.ns());
-    if stanza.name() == "message" {
-        // Check for encrypted element with either standard or legacy namespace
-        let encrypted = stanza.get_child("encrypted", custom_ns::OMEMO)
-            .or_else(|| stanza.get_child("encrypted", custom_ns::OMEMO_V1));
-            
-        if let Some(encrypted) = encrypted {
-            //debug!("Found encrypted element with namespace: {}", encrypted.ns());
-            if let Some(header) = encrypted.get_child("header", "") {
-                //debug!("Found header with {} children", header.children().count());
-                if let Some(iv) = header.get_child("iv", "") {
-                    trace!("Found IV element: {}", iv.text());
-                }
-                let key_count = header.children().filter(|c| c.name() == "key").count();
-                trace!("Found {} key elements", key_count);
-            }
-            if let Some(payload) = encrypted.get_child("payload", "") {
-                trace!("Found payload element: {}", payload.text());
-            }
+    // Convert Element to actual XML string instead of debug format
+    let mut xml_bytes = Vec::new();
+    if let Err(e) = stanza.write_to(&mut xml_bytes) {
+        error!("Failed to serialize stanza to XML: {}", e);
+        // Fallback to debug format if serialization fails
+        return format!("{:?}", stanza);
+    }
+    
+    match String::from_utf8(xml_bytes) {
+        Ok(xml_string) => xml_string,
+        Err(e) => {
+            error!("Failed to convert XML bytes to string: {}", e);
+            // Fallback to debug format if conversion fails
+            format!("{:?}", stanza)
         }
     }
-    debug_str
 }
 
 /// Helper function to verify OMEMO stanza structure

@@ -851,7 +851,7 @@ impl OmemoManager {
             
             match response {
                 Ok(xml) => {
-                    match self.parse_device_list_response(&xml).await {
+                    match self.parse_device_list_response(&xml) {
                         Ok(devices) => {
                             info!("[OMEMO] Found {} devices with basic method: {:?}", devices.len(), devices);
                             return Ok(devices);
@@ -1341,8 +1341,8 @@ impl OmemoManager {
     }
 
     /// Parse a device list response from the server
-    async fn parse_device_list_response(&self, response: &str) -> Result<Vec<u32>, OmemoError> {
-        debug!("Parsing device list response");
+    fn parse_device_list_response(&self, response: &str) -> Result<Vec<u32>, OmemoError> {
+        debug!("Parsing device list response - starting");
         
         // Check if the response is empty or whitespace only
         if response.trim().is_empty() {
@@ -1356,6 +1356,8 @@ impl OmemoManager {
             return Ok(Vec::new());
         }
         
+        debug!("Parsing device list response - starting XML parsing");
+        
         // Parse the XML response
         let document = match roxmltree::Document::parse(response) {
             Ok(doc) => doc,
@@ -1364,6 +1366,8 @@ impl OmemoManager {
                 return Err(OmemoError::ProtocolError(format!("XML parsing error: {}", e)));
             }
         };
+        
+        debug!("Parsing device list response - XML parsed successfully, checking for errors");
         
         // Check for error responses first
         if let Some(error) = document.descendants().find(|n| n.has_tag_name("error")) {
@@ -1390,6 +1394,8 @@ impl OmemoManager {
                 }
             }
         }
+        
+        debug!("Parsing device list response - no errors found, extracting device IDs");
         
         // Extract device IDs from the response
         let mut device_ids = Vec::new();
