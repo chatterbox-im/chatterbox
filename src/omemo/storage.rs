@@ -344,8 +344,8 @@ impl OmemoStorage {
             }
             
             let jid_name = jid_entry.file_name().to_string_lossy().to_string();
-            // Convert back from safe filename to JID
-            let jid = jid_name.replace('_', "@"); // Simple conversion - may need more sophisticated handling
+            // Convert back from alphanumeric filename to JID
+            let jid = self.alphanumeric_to_jid(&jid_name);
             
             // Iterate through device directories
             for device_entry in fs::read_dir(jid_entry.path())? {
@@ -518,6 +518,45 @@ impl OmemoStorage {
             .collect()
     }
 
+    /// Convert alphanumeric encoded JID back to original format
+    fn alphanumeric_to_jid(&self, encoded: &str) -> String {
+        let mut result = String::new();
+        let mut chars = encoded.chars().peekable();
+        
+        while let Some(c) = chars.next() {
+            if c.is_ascii_alphanumeric() && !c.is_ascii_digit() {
+                // Regular letter, add as-is
+                result.push(c);
+            } else if c.is_ascii_digit() {
+                // Check if this starts a hex sequence
+                if let Some(&next_char) = chars.peek() {
+                    if next_char.is_ascii_hexdigit() {
+                        // This is likely a hex-encoded character
+                        let hex_str = format!("{}{}", c, chars.next().unwrap());
+                        if let Ok(byte_val) = u8::from_str_radix(&hex_str, 16) {
+                            result.push(byte_val as char);
+                        } else {
+                            // If hex parsing fails, treat as regular chars
+                            result.push(c);
+                            result.push(chars.next().unwrap());
+                        }
+                    } else {
+                        // Single digit, add as-is
+                        result.push(c);
+                    }
+                } else {
+                    // Last character, add as-is
+                    result.push(c);
+                }
+            } else {
+                // Other character, add as-is
+                result.push(c);
+            }
+        }
+        
+        result
+    }
+
     /// Legacy method for backward compatibility - now uses alphanumeric encoding
     fn sanitize_jid(&self, jid: &str) -> String {
         self.jid_to_alphanumeric(jid)
@@ -566,5 +605,40 @@ impl OmemoStorage {
         }
         
         Ok(identities)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    fn test_alphanumeric_jid_conversion() {
+        let storage = OmemoStorage::new_default().unwrap();
+        
+        // Test basic JID encoding/decoding
+        let original_jid = "hatt@mysterymen.duckdns.org";
+        let encoded = storage.jid_to_alphanumeric(original_jid);
+        let decoded = storage.alphanumeric_to_jid(&encoded);
+        
+        assert_eq!(original_jid, decoded);
+        
+        // Test special characters
+        let jid_with_special = "user@domain.com/resource";
+        let encoded_special = storage.jid_to_alphanumeric(jid_with_special);
+        let decoded_special = storage.alphanumeric_to_jid(&encoded_special);
+        
+        assert_eq!(jid_with_special, decoded_special);
+        
+        // Test that encoding produces valid filename characters
+        let complex_jid = "test+user@sub.domain-name.org/resource#1";
+        let encoded_complex = storage.jid_to_alphanumeric(complex_jid);
+        
+        // Should only contain alphanumeric characters
+        assert!(encoded_complex.chars().all(|c| c.is_ascii_alphanumeric()));
+        
+        // Should be reversible
+        let decoded_complex = storage.alphanumeric_to_jid(&encoded_complex);
+        assert_eq!(complex_jid, decoded_complex);
     }
 }

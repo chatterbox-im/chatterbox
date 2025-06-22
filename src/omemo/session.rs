@@ -176,7 +176,11 @@ impl OmemoSession {
             )));
         }
         
-        if state.remote_jid != self.remote_jid {
+        // Normalize JIDs for comparison to handle different encoding formats
+        let normalized_session_jid = Self::normalize_jid(&self.remote_jid);
+        let normalized_state_jid = Self::normalize_jid(&state.remote_jid);
+        
+        if normalized_state_jid != normalized_session_jid {
             return Err(SessionError::InvalidStateError(format!(
                 "JID mismatch: expected {}, got {}",
                 self.remote_jid,
@@ -187,6 +191,13 @@ impl OmemoSession {
         self.ratchet_state = state;
         
         Ok(())
+    }
+    
+    /// Normalize a JID for comparison purposes
+    /// This ensures consistent comparison regardless of encoding differences
+    fn normalize_jid(jid: &str) -> String {
+        // Convert to lowercase and trim whitespace for consistent comparison
+        jid.to_lowercase().trim().to_string()
     }
     
     /// Get the ratchet state
@@ -269,4 +280,73 @@ impl OmemoSession {
     pub fn is_initialized(&self) -> bool {
         self.ratchet_state.initialized
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    fn test_jid_normalization() {
+        // Test that JID normalization handles different cases consistently
+        assert_eq!(
+            OmemoSession::normalize_jid("hatt@mysterymen.duckdns.org"),
+            OmemoSession::normalize_jid("HATT@mysterymen.duckdns.org")
+        );
+        
+        assert_eq!(
+            OmemoSession::normalize_jid("  user@domain.com  "),
+            "user@domain.com"
+        );
+        
+        // Test that different JIDs still produce different normalized results
+        assert_ne!(
+            OmemoSession::normalize_jid("user1@domain.com"),
+            OmemoSession::normalize_jid("user2@domain.com")
+        );
+    }
+    
+    #[test]
+    fn test_restore_from_state_with_case_mismatch() {
+        use crate::omemo::protocol::RatchetState;
+        use std::collections::HashMap;
+        
+        let remote_jid = "User@Domain.Com".to_string();
+        let remote_device_id = 123;
+        let local_device_id = 456;
+        
+        let mut session = OmemoSession::new(remote_jid.clone(), remote_device_id, local_device_id);
+        
+        // Create a ratchet state with different case
+        let state = RatchetState {
+            initialized: true,
+            is_initiator: false,
+            remote_identity_key: vec![],
+            local_identity_key_pair: crate::omemo::protocol::KeyPair {
+                private_key: vec![],
+                public_key: vec![],
+            },
+            root_key: vec![],
+            send_chain_key: vec![],
+            receive_chain_key: vec![],
+            ratchet_key_pair: crate::omemo::protocol::KeyPair {
+                private_key: vec![],
+                public_key: vec![],
+            },
+            remote_ratchet_key: vec![],
+            prev_remote_ratchet_key: vec![],
+            send_message_number: 0,
+            receive_message_number: 0,
+            prev_receive_message_number: 0,
+            skipped_message_keys: HashMap::new(),
+            local_device_id,
+            remote_device_id,
+            remote_jid: "user@domain.com".to_string(), // Different case
+        };
+        
+        // Should succeed despite case difference
+        assert!(session.restore_from_state(state).is_ok());
+    }
+
+    // ...existing tests...
 }
