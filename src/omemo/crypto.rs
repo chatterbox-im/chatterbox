@@ -410,27 +410,59 @@ pub fn generate_x25519_keypair() -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
     Ok((private_key_bytes, public_key_bytes))
 }
 
+/// Normalize a Curve25519 public key to 32 bytes
+/// OMEMO/Signal protocol sometimes encodes public keys with a 0x05 prefix byte
+fn normalize_curve25519_public_key(key: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    match key.len() {
+        32 => {
+            trace!("Public key already 32 bytes, no normalization needed");
+            Ok(key.to_vec())
+        }
+        33 => {
+            // Check if it has the standard 0x05 prefix for Curve25519 public keys
+            if key[0] == 0x05 {
+                trace!("Normalizing 33-byte public key by removing 0x05 prefix");
+                Ok(key[1..].to_vec())
+            } else {
+                error!("33-byte public key with unexpected prefix: 0x{:02X}", key[0]);
+                Err(CryptoError::InvalidInputError(format!(
+                    "33-byte public key with unexpected prefix: 0x{:02X}", key[0]
+                )))
+            }
+        }
+        _ => {
+            error!("Invalid Curve25519 public key length: {}", key.len());
+            Err(CryptoError::InvalidInputError(format!(
+                "Invalid Curve25519 public key length: {}", key.len()
+            )))
+        }
+    }
+}
+
 /// Perform a Diffie-Hellman key exchange with X25519
 pub fn x25519_diffie_hellman(private_key: &[u8], public_key: &[u8]) -> Result<Vec<u8>, CryptoError> {
     trace!("Performing X25519 Diffie-Hellman key exchange");
     trace!("Using private key: {}", hex::encode(private_key));
     trace!("Using public key: {}", hex::encode(public_key));
     
-    // Validate key lengths
-    if private_key.len() != 32 || public_key.len() != 32 {
-        error!("Invalid X25519 key length: private={}, public={}", private_key.len(), public_key.len());
+    // Validate private key length
+    if private_key.len() != 32 {
+        error!("Invalid X25519 private key length: {}", private_key.len());
         return Err(CryptoError::InvalidInputError(format!(
-            "Invalid key length: private={}, public={}",
-            private_key.len(), public_key.len()
+            "Invalid private key length: {}",
+            private_key.len()
         )));
     }
+    
+    // Normalize the public key (handle 33-byte keys with 0x05 prefix)
+    let normalized_public_key = normalize_curve25519_public_key(public_key)?;
     
     // Convert to the appropriate types for x25519-dalek
     let mut private_bytes = [0u8; 32];
     private_bytes.copy_from_slice(private_key);
     
     let mut public_bytes = [0u8; 32];
-    public_bytes.copy_from_slice(public_key);
+    public_bytes.copy_from_slice(&normalized_public_key);
     
     // Create the StaticSecret from bytes
     let static_secret = StaticSecret::from(private_bytes);
@@ -580,4 +612,47 @@ mod tests {
         let formatted = format_fingerprint(&fingerprint);
         assert_eq!(formatted, "01:23:45:67:89:ab:cd:ef:fe:dc:ba:98:76:54:32:10");
     }
+    
+    #[test]
+    fn test_normalize_curve25519_public_key() {
+        // Test 32-byte key (should remain unchanged)
+        let key_32 = vec![0x01; 32];
+        let result = normalize_curve25519_public_key(&key_32).unwrap();
+        assert_eq!(result, key_32);
+        
+        // Test 33-byte key with 0x05 prefix (should remove prefix)
+        let mut key_33 = vec![0x05];
+        key_33.extend_from_slice(&vec![0x02; 32]);
+        let result = normalize_curve25519_public_key(&key_33).unwrap();
+        assert_eq!(result, vec![0x02; 32]);
+        
+        // Test 33-byte key with wrong prefix (should fail)
+        let mut key_33_wrong = vec![0x04];
+        key_33_wrong.extend_from_slice(&vec![0x03; 32]);
+        let result = normalize_curve25519_public_key(&key_33_wrong);
+        assert!(result.is_err());
+        
+        // Test invalid length (should fail)
+        let key_invalid = vec![0x01; 31];
+        let result = normalize_curve25519_public_key(&key_invalid);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_x25519_with_33_byte_public_key() {
+        // Generate a test key pair
+        let (private_key, public_key_32) = generate_x25519_keypair().unwrap();
+        
+        // Create a 33-byte version with 0x05 prefix
+        let mut public_key_33 = vec![0x05];
+        public_key_33.extend_from_slice(&public_key_32);
+        
+        // Both should produce the same result
+        let result_32 = x25519_diffie_hellman(&private_key, &public_key_32).unwrap();
+        let result_33 = x25519_diffie_hellman(&private_key, &public_key_33).unwrap();
+        
+        assert_eq!(result_32, result_33);
+    }
+
+    // ...existing tests...
 }
