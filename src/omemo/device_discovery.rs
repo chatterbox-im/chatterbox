@@ -25,12 +25,14 @@ pub const OMEMO_NAMESPACES: [&str; 2] = [
 ];
 
 /// Known node format patterns
-pub const NODE_FORMATS: [&str; 6] = [
+pub const NODE_FORMATS: [&str; 8] = [
+    "{}.devicelist",        // Dino/Conversations format (dot + devicelist)
     "{}:devices",           // Standard format with colon (XEP-0384)
     "{}devices",            // No separator
     "{}/devices",           // Slash separator
     "{}:devicelist",        // Legacy format used by some implementations
     "{}/devicelist",        // Slash separator with legacy name
+    "{}.devices",           // Dot separator with devices
     "{}",                   // Just the namespace (some servers)
 ];
 
@@ -161,7 +163,7 @@ async fn try_fetch_bundle_for_common_device_ids(
     let mut found_devices = Vec::new();
     
     for &device_id in &common_device_ids {
-        let bundle_node = format!("{}:bundles:{}", OMEMO_NAMESPACE, device_id);
+        let bundle_node = format!("{}.bundles:{}", OMEMO_NAMESPACE, device_id);
         match client_guard.request_pubsub_items(jid, &bundle_node).await {
             Ok(_) => {
                 // If we can fetch a bundle, this device likely exists
@@ -169,10 +171,10 @@ async fn try_fetch_bundle_for_common_device_ids(
                 found_devices.push(device_id);
             },
             Err(_) => {
-                // Try alternative format
-                let alt_bundle_node = format!("{}bundles:{}", OMEMO_NAMESPACE, device_id);
+                // Try alternative format (legacy with colon)
+                let alt_bundle_node = format!("{}:bundles:{}", OMEMO_NAMESPACE, device_id);
                 if let Ok(_) = client_guard.request_pubsub_items(jid, &alt_bundle_node).await {
-                    info!("[OMEMO] Found device {} for {} by checking alternative bundle format", device_id, jid);
+                    info!("[OMEMO] Found device {} for {} by checking legacy bundle format", device_id, jid);
                     found_devices.push(device_id);
                 }
             }

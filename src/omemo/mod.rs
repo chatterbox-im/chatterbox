@@ -1568,7 +1568,7 @@ impl OmemoManager {
         
         // Use direct access to the omemo_integration module
         // This uses the global client instance set in the module
-        let node = format!("{}:bundles:{}", OMEMO_NAMESPACE, self.device_id);
+        let node = format!("{}.bundles:{}", OMEMO_NAMESPACE, self.device_id);
         
         // Use the publish_pubsub_item function directly
         match crate::xmpp::omemo_integration::publish_pubsub_item(None, &node, "current", &bundle_xml).await {
@@ -1633,7 +1633,7 @@ impl OmemoManager {
         debug!("Attempting with alternative bundle format: {}", alternative_payload);
         
         // Use direct access to the omemo_integration module
-        let node = format!("{}:bundles:{}", OMEMO_NAMESPACE, self.device_id);
+        let node = format!("{}.bundles:{}", OMEMO_NAMESPACE, self.device_id);
         
         // Try publishing with the alternative format
         match crate::xmpp::omemo_integration::publish_pubsub_item(None, &node, "current", &alternative_payload).await {

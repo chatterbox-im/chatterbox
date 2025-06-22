@@ -297,7 +297,7 @@ impl super::XMPPClient {
         
         // Create the items element with the bundle
         let items_element = xmpp_parsers::Element::builder("items", custom_ns::PUBSUB)
-            .attr("node", &format!("{}:bundles:{}", custom_ns::OMEMO, device_id))
+            .attr("node", &format!("{}.bundles:{}", custom_ns::OMEMO_V1, device_id))
             .append(
                 xmpp_parsers::Element::builder("item", custom_ns::PUBSUB)
                     .attr("id", "current")
@@ -480,7 +480,7 @@ impl super::XMPPClient {
         let request_id = Uuid::new_v4().to_string();
         
         // Create the PubSub IQ request for the device bundle
-        let node = format!("{}:bundles:{}", custom_ns::OMEMO, device_id);
+        let node = format!("{}.bundles:{}", custom_ns::OMEMO_V1, device_id);
         
         // Build the IQ stanza
         let iq = xmpp_parsers::Element::builder("iq", "jabber:client")
@@ -692,7 +692,7 @@ impl super::XMPPClient {
                 xmpp_parsers::Element::builder("pubsub", custom_ns::PUBSUB)
                     .append(
                         xmpp_parsers::Element::builder("publish", custom_ns::PUBSUB)
-                            .attr("node", &format!("{}:bundles:{}", custom_ns::OMEMO, device_id))
+                            .attr("node", &format!("{}.bundles:{}", custom_ns::OMEMO_V1, device_id))
                             .append(item_element)
                             .build()
                     )
