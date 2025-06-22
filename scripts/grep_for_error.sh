@@ -1,1 +1,1 @@
-grep ERROR chatterbox.log
+grep -v ERROR chatterbox.log
