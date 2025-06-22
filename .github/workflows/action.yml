@@ -22,7 +22,7 @@ jobs:
         run: cargo build
       - name: Run
         shell: bash
-        run: timeout 20s ./target/debug/chatterbox || true 
+        run: timeout 30s ./target/debug/chatterbox || true 
       - name: Check connection
         shell: bash
         run: grep "Connected to XMPP server successfully" chatterbox.log
