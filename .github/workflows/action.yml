@@ -19,6 +19,12 @@ jobs:
       - name: Build binaries
         shell: bash
         run: cargo build
+      - name: Run
+        shell: bash
+        run: timeout 20s ./target/debug/chatterbox || true 
+      - name: Check connection
+        shell: bash
+        run: grep "Connected to XMPP server successfully" chatterbox.log
       - name: Check bundle publication
         shell: bash
         run: ./scripts/grep_bundle_publication.sh
