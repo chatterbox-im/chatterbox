@@ -25,6 +25,6 @@ jobs:
       - name: Check for item-not-found errors
         shell: bash
         run: ./scripts/grep_item-not-found.sh
-      - name: Check capability discovery works
+      - name: Check for errors 
         shell: bash
-        run: ./scripts/grep_disco_capabilities.sh 
+        run: ./scripts/grep_for_error.sh 
