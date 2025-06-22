@@ -80,7 +80,8 @@ fn get_device_id_file_path() -> Result<PathBuf> {
             None => return Err(anyhow!("Could not determine XDG_DATA_HOME directory")),
         };
         path.push("chatterbox");
-        path.push(jid);
+        // Use alphanumeric encoding for safe filesystem usage
+        path.push(jid_to_alphanumeric(jid));
         fs::create_dir_all(&path)?;
         path.push("device_id");
         //debug!("Using OMEMO_JID for device_id: {}", path.display());
@@ -236,7 +237,8 @@ fn get_identity_key_file_path() -> Result<PathBuf> {
             None => return Err(anyhow!("Could not determine XDG_DATA_HOME directory")),
         };
         path.push("chatterbox");
-        path.push(jid);
+        // Use alphanumeric encoding for safe filesystem usage
+        path.push(jid_to_alphanumeric(jid));
         fs::create_dir_all(&path)?;
         path.push("identity_key");
         //debug!("Using OMEMO_JID for identity_key: {}", path.display());
@@ -682,6 +684,19 @@ pub fn set_omemo_jid(jid: &str) {
 /// Get the OMEMO JID for user-specific storage
 pub fn get_omemo_jid() -> Option<String> {
     OMEMO_JID.get().cloned()
+}
+
+/// Convert JID to alphanumeric filename
+fn jid_to_alphanumeric(jid: &str) -> String {
+    jid.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_string()
+            } else {
+                format!("{:02x}", c as u8)
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]

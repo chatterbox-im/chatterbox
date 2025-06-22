@@ -150,9 +150,9 @@ impl OmemoStorage {
     
     /// Get path for JID-based data
     fn get_jid_path(&self, base_dir: &str, jid: &str) -> PathBuf {
-        // Sanitize JID for filesystem use
-        let safe_jid = jid.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
-        self.base_path.join(base_dir).join(safe_jid)
+        // Convert JID to alphanumeric filename
+        let alphanumeric_jid = self.jid_to_alphanumeric(jid);
+        self.base_path.join(base_dir).join(alphanumeric_jid)
     }
     
     /// Store a device ID
@@ -505,8 +505,22 @@ impl OmemoStorage {
     }
 
     /// Sanitize JID for use in filenames
+    /// Convert JID to alphanumeric filename
+    fn jid_to_alphanumeric(&self, jid: &str) -> String {
+        jid.chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    c.to_string()
+                } else {
+                    format!("{:02x}", c as u8)
+                }
+            })
+            .collect()
+    }
+
+    /// Legacy method for backward compatibility - now uses alphanumeric encoding
     fn sanitize_jid(&self, jid: &str) -> String {
-        jid.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|', '@'], "_")
+        self.jid_to_alphanumeric(jid)
     }    
     /// Dump all device identities for debugging
     pub fn dump_all_device_identities(&self) -> Result<Vec<(String, DeviceId, DeviceIdentity)>> {
