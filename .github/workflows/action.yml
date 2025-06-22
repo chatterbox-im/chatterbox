@@ -32,6 +32,9 @@ jobs:
       - name: Check for item-not-found errors
         shell: bash
         run: ./scripts/grep_item-not-found.sh
+      - name: Check for capability response
+        shell: bash
+        run: grep "<<" chatterbox.log | grep "disco#" | grep register
       - name: Check for errors 
         shell: bash
         run: ./scripts/grep_for_error.sh 
