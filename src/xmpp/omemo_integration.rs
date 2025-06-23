@@ -537,6 +537,13 @@ impl super::XMPPClient {
         }
         
         let client = self.client.as_ref().unwrap();
+        let node_name = format!("{}:devices", custom_ns::OMEMO);
+        
+        // First, try to configure the node for open access
+        if let Err(e) = self.configure_node_for_open_access(&node_name).await {
+            warn!("Could not configure device list node for open access: {}", e);
+            // Continue anyway - the node might already exist with correct permissions
+        }
         
         // Generate a unique ID for this publish request
         let publish_id = Uuid::new_v4().to_string();
@@ -612,6 +619,13 @@ impl super::XMPPClient {
         }
         
         let client = self.client.as_ref().unwrap();
+        
+        // Configure the bundle node for open access before publishing
+        let bundle_node_name = format!("{}.bundles:{}", custom_ns::OMEMO_V1, device_id);
+        if let Err(e) = self.configure_node_for_open_access(&bundle_node_name).await {
+            warn!("Failed to configure bundle node {} for open access: {}", bundle_node_name, e);
+            // Continue with publishing even if configuration fails
+        }
         
         // Generate a unique ID for this publish request
         let publish_id = Uuid::new_v4().to_string();
@@ -1037,6 +1051,78 @@ impl super::XMPPClient {
         // This isn't a proper group encryption implementation, but it demonstrates the flow
         info!("Sending encrypted message to MUC: {}", muc_jid);
         self.send_encrypted_message(muc_jid, content).await
+    }
+
+    /// Configure a PubSub node for open access (required for OMEMO)
+    async fn configure_node_for_open_access(&self, node_name: &str) -> Result<()> {
+        if self.client.is_none() {
+            return Err(anyhow!("XMPP client not initialized"));
+        }
+        
+        let client = self.client.as_ref().unwrap();
+        let config_id = Uuid::new_v4().to_string();
+        
+        // Create configuration form for open access
+        let config_iq = xmpp_parsers::Element::builder("iq", "jabber:client")
+            .attr("type", "set")
+            .attr("id", &config_id)
+            .append(
+                xmpp_parsers::Element::builder("pubsub", "http://jabber.org/protocol/pubsub#owner")
+                    .append(
+                        xmpp_parsers::Element::builder("configure", "")
+                            .attr("node", node_name)
+                            .append(
+                                xmpp_parsers::Element::builder("x", "jabber:x:data")
+                                    .attr("type", "submit")
+                                    .append(
+                                        xmpp_parsers::Element::builder("field", "")
+                                            .attr("var", "FORM_TYPE")
+                                            .attr("type", "hidden")
+                                            .append({
+                                                let mut value_elem = xmpp_parsers::Element::builder("value", "").build();
+                                                value_elem.append_text_node("http://jabber.org/protocol/pubsub#node_config");
+                                                value_elem
+                                            })
+                                            .build()
+                                    )
+                                    .append(
+                                        xmpp_parsers::Element::builder("field", "")
+                                            .attr("var", "pubsub#access_model")
+                                            .append({
+                                                let mut value_elem = xmpp_parsers::Element::builder("value", "").build();
+                                                value_elem.append_text_node("open");
+                                                value_elem
+                                            })
+                                            .build()
+                                    )
+                                    .build()
+                            )
+                            .build()
+                    )
+                    .build()
+            )
+            .build();
+        
+        // Send the configuration request
+        let send_result = {
+            let mut client_guard = tokio::time::timeout(Duration::from_secs(5), client.lock()).await
+                .map_err(|_| anyhow!("Timed out acquiring client lock for node configuration"))?;
+            
+            tokio::time::timeout(Duration::from_secs(5), client_guard.send_stanza(config_iq)).await
+                .map_err(|_| anyhow!("Timed out configuring node"))?
+        };
+        
+        match send_result {
+            Ok(_) => {
+                info!("Successfully configured node {} for open access", node_name);
+                Ok(())
+            },
+            Err(e) => {
+                warn!("Failed to configure node {} for open access: {}", node_name, e);
+                // Don't fail the entire operation if configuration fails
+                Ok(())
+            }
+        }
     }
 }
 
@@ -1885,151 +1971,152 @@ pub async fn publish_bundle_alternative_format(
     //debug!("Trying alternative bundle format for node {}", node);
     
     // Get the client from the global static
-    let client_ref = match get_current_client() {
-        Some(client) => client,
-        None => {
-            error!("No client available for alternative bundle publication");
-            return Err(anyhow!("No client available for alternative bundle publication"));
-        }
-    };
-    
-    // Lock the client
-    let mut client_guard = client_ref.lock().await;
-    
-    // Generate a unique IQ ID
-    let iq_id = Uuid::new_v4().to_string();
-    
-    // Create a simplified bundle XML with minimal nesting
-    let doc = match roxmltree::Document::parse(payload) {
-        Ok(doc) => doc,
-        Err(e) => {
-            error!("Failed to parse bundle payload: {}", e);
-            return Err(anyhow!("Failed to parse bundle payload: {}", e));
-        }
-    };
-    
-    let root = doc.root_element();
-    
-    // Extract key components
-    let identity_key = root.children()
-        .find(|n| n.has_tag_name("identityKey"))
-        .and_then(|n| n.text())
-        .unwrap_or("");
-    
-    let signed_pre_key_elem = root.children().find(|n| n.has_tag_name("signedPreKeyPublic"));
-    let signed_pre_key_id = signed_pre_key_elem
-        .and_then(|n| n.attribute("signedPreKeyId"))
-        .unwrap_or("1");
-    let signed_pre_key = signed_pre_key_elem
-        .and_then(|n| n.text())
-        .unwrap_or("");
-    
-    let signature = root.children()
-        .find(|n| n.has_tag_name("signedPreKeySignature"))
-        .and_then(|n| n.text())
-        .unwrap_or("");
-    
-    // Build prekeys section
-    let mut prekeys_xml = String::new();
-    if let Some(prekeys_elem) = root.children().find(|n| n.has_tag_name("prekeys")) {
-        for prekey in prekeys_elem.children().filter(|n| n.has_tag_name("preKeyPublic")) {
-            let id = prekey.attribute("preKeyId").unwrap_or("1");
-            let key = prekey.text().unwrap_or("");
-            prekeys_xml.push_str(&format!("<preKeyPublic preKeyId='{}'>{}</preKeyPublic>", id, key));
-        }
-    }
-    
-    // Create a simplified XML string with explicit namespace declarations
-    let simplified_xml = format!(
-        r#"<bundle xmlns='eu.siacs.conversations.axolotl'>
-            <identityKey>{}</identityKey>
-            <signedPreKeyPublic signedPreKeyId='{}'>{}</signedPreKeyPublic>
-            <signedPreKeySignature>{}</signedPreKeySignature>
-            <prekeys>{}</prekeys>
-        </bundle>"#,
-        identity_key, signed_pre_key_id, signed_pre_key, signature, prekeys_xml
-    );
-    
-    // Create the IQ stanza as a raw string to ensure exact format
-    let iq_str = format!(
-        r#"<iq type='set' id='{}'{}>
-            <pubsub xmlns='http://jabber.org/protocol/pubsub'>
-                <publish node='{}'>
-                    <item id='{}'>
-                        {}
-                    </item>
-                </publish>
-            </pubsub>
-        </iq>"#,
-        iq_id,
-        to.map_or(String::new(), |t| format!(" to='{}'", t)),
-        node,
-        id,
-        simplified_xml
-    );
-    
-    // Parse the raw string into an Element
-    let iq = match roxmltree::Document::parse(&iq_str) {
-        Ok(doc) => {
+    if let Ok(current_client) = CURRENT_CLIENT.read() {
+        if let Some(client_ref) = current_client.as_ref() {
+            let mut client_guard = client_ref.lock().await;
+            
+            // Generate a unique IQ ID
+            let iq_id = Uuid::new_v4().to_string();
+            
+            // Create a simplified bundle XML with minimal nesting
+            let doc = match roxmltree::Document::parse(payload) {
+                Ok(doc) => doc,
+                Err(e) => {
+                    error!("Failed to parse bundle payload: {}", e);
+                    return Err(anyhow!("Failed to parse bundle payload: {}", e));
+                }
+            };
+            
             let root = doc.root_element();
-            let mut iq = xmpp_parsers::Element::builder(root.tag_name().name(), root.tag_name().namespace().unwrap_or("jabber:client")).build();
             
-            // Copy attributes
-            for attr in root.attributes() {
-                iq.set_attr(attr.name(), attr.value());
+            // Extract key components
+            let identity_key = root.children()
+                .find(|n| n.has_tag_name("identityKey"))
+                .and_then(|n| n.text())
+                .unwrap_or("");
+            
+            let signed_pre_key_elem = root.children().find(|n| n.has_tag_name("signedPreKeyPublic"));
+            let signed_pre_key_id = signed_pre_key_elem
+                .and_then(|n| n.attribute("signedPreKeyId"))
+                .unwrap_or("1");
+            let signed_pre_key = signed_pre_key_elem
+                .and_then(|n| n.text())
+                .unwrap_or("");
+            
+            let signature = root.children()
+                .find(|n| n.has_tag_name("signedPreKeySignature"))
+                .and_then(|n| n.text())
+                .unwrap_or("");
+            
+            // Build prekeys section
+            let mut prekeys_xml = String::new();
+            if let Some(prekeys_elem) = root.children().find(|n| n.has_tag_name("prekeys")) {
+                for prekey in prekeys_elem.children().filter(|n| n.has_tag_name("preKeyPublic")) {
+                    let id = prekey.attribute("preKeyId").unwrap_or("1");
+                    let key = prekey.text().unwrap_or("");
+                    prekeys_xml.push_str(&format!("<preKeyPublic preKeyId='{}'>{}</preKeyPublic>", id, key));
+                }
             }
             
-            // Function to recursively build elements
-            fn build_element(node: roxmltree::Node) -> xmpp_parsers::Element {
-                let mut elem = xmpp_parsers::Element::builder(
-                    node.tag_name().name(),
-                    node.tag_name().namespace().unwrap_or("")
-                ).build();
-                
-                // Copy attributes
-                for attr in node.attributes() {
-                    elem.set_attr(attr.name(), attr.value());
-                }
-                
-                // Process children
-                for child in node.children().filter(|n| n.is_element()) {
-                    elem.append_child(build_element(child));
-                }
-                
-                // Add text content
-                if let Some(text) = node.text() {
-                    if !text.trim().is_empty() {
-                        elem.append_text_node(text);
+            // Create a simplified XML string with explicit namespace declarations
+            let simplified_xml = format!(
+                r#"<bundle xmlns='eu.siacs.conversations.axolotl'>
+                    <identityKey>{}</identityKey>
+                    <signedPreKeyPublic signedPreKeyId='{}'>{}</signedPreKeyPublic>
+                    <signedPreKeySignature>{}</signedPreKeySignature>
+                    <prekeys>{}</prekeys>
+                </bundle>"#,
+                identity_key, signed_pre_key_id, signed_pre_key, signature, prekeys_xml
+            );
+            
+            // Create the IQ stanza as a raw string to ensure exact format
+            let iq_str = format!(
+                r#"<iq type='set' id='{}'{}>
+                    <pubsub xmlns='http://jabber.org/protocol/pubsub'>
+                        <publish node='{}'>
+                            <item id='{}'>
+                                {}
+                            </item>
+                        </publish>
+                    </pubsub>
+                </iq>"#,
+                iq_id,
+                to.map_or(String::new(), |t| format!(" to='{}'", t)),
+                node,
+                id,
+                simplified_xml
+            );
+            
+            // Parse the raw string into an Element
+            let iq = match roxmltree::Document::parse(&iq_str) {
+                Ok(doc) => {
+                    let root = doc.root_element();
+                    let mut iq = xmpp_parsers::Element::builder(root.tag_name().name(), root.tag_name().namespace().unwrap_or("jabber:client")).build();
+                    
+                    // Copy attributes
+                    for attr in root.attributes() {
+                        iq.set_attr(attr.name(), attr.value());
                     }
+                    
+                    // Function to recursively build elements
+                    fn build_element(node: roxmltree::Node) -> xmpp_parsers::Element {
+                        let mut elem = xmpp_parsers::Element::builder(
+                            node.tag_name().name(),
+                            node.tag_name().namespace().unwrap_or("")
+                        ).build();
+                        
+                        // Copy attributes
+                        for attr in node.attributes() {
+                            elem.set_attr(attr.name(), attr.value());
+                        }
+                        
+                        // Process children
+                        for child in node.children().filter(|n| n.is_element()) {
+                            elem.append_child(build_element(child));
+                        }
+                        
+                        // Add text content
+                        if let Some(text) = node.text() {
+                            if !text.trim().is_empty() {
+                                elem.append_text_node(text);
+                            }
+                        }
+                        
+                        elem
+                    }
+                    
+                    // Add children
+                    for child in root.children().filter(|n| n.is_element()) {
+                        iq.append_child(build_element(child));
+                    }
+                    
+                    iq
+                },
+                Err(e) => {
+                    error!("Failed to parse alternative bundle XML: {}", e);
+                    return Err(anyhow!("Failed to parse alternative bundle XML: {}", e));
                 }
-                
-                elem
-            }
+            };
             
-            // Add children
-            for child in root.children().filter(|n| n.is_element()) {
-                iq.append_child(build_element(child));
+            // Send the stanza
+            //debug!("Sending alternative bundle stanza: {:?}", iq);
+            match client_guard.send_stanza(iq).await {
+                Ok(_) => {
+                    info!("Alternative bundle format published successfully");
+                    Ok(())
+                },
+                Err(e) => {
+                    error!("Failed to send alternative bundle format: {}", e);
+                    Err(anyhow!("Failed to send alternative bundle format: {}", e))
+                }
             }
-            
-            iq
-        },
-        Err(e) => {
-            error!("Failed to parse alternative bundle XML: {}", e);
-            return Err(anyhow!("Failed to parse alternative bundle XML: {}", e));
+        } else {
+            error!("No client available for OMEMO device list publishing");
+            Err(anyhow!("No client available"))
         }
-    };
-    
-    // Send the stanza
-    //debug!("Sending alternative bundle stanza: {:?}", iq);
-    match client_guard.send_stanza(iq).await {
-        Ok(_) => {
-            info!("Alternative bundle format published successfully");
-            Ok(())
-        },
-        Err(e) => {
-            error!("Failed to send alternative bundle format: {}", e);
-            Err(anyhow!("Failed to send alternative bundle format: {}", e))
-        }
+    } else {
+        error!("Failed to acquire read lock for CURRENT_CLIENT");
+        Err(anyhow!("Failed to acquire read lock for CURRENT_CLIENT"))
     }
 }
 
@@ -2219,7 +2306,7 @@ pub async fn publish_pubsub_item_device_list(
         }
     } else {
         error!("Failed to acquire read lock for CURRENT_CLIENT");
-        Err(anyhow!("Failed to acquire client lock"))
+        Err(anyhow!("Failed to acquire read lock for CURRENT_CLIENT"))
     }
 }
 
