@@ -1324,10 +1324,10 @@ pub async fn publish_pubsub_item(
                     .append(
                         Element::builder("pubsub", "http://jabber.org/protocol/pubsub")
                             .append(
-                                Element::builder("publish", "")
+                                Element::builder("publish", "http://jabber.org/protocol/pubsub")
                                     .attr("node", node)
                                     .append(
-                                        Element::builder("item", "")
+                                        Element::builder("item", "http://jabber.org/protocol/pubsub")
                                             .attr("id", id)
                                             .append(
                                                 {
@@ -1395,12 +1395,12 @@ pub async fn publish_pubsub_item(
                 let mut pubsub_elem = xmpp_parsers::Element::builder("pubsub", "http://jabber.org/protocol/pubsub").build();
                 
                 // Create the publish element
-                let mut publish_elem = xmpp_parsers::Element::builder("publish", "")
+                let mut publish_elem = xmpp_parsers::Element::builder("publish", "http://jabber.org/protocol/pubsub")
                     .attr("node", node)
                     .build();
                 
                 // Create the item element
-                let mut item_elem = xmpp_parsers::Element::builder("item", "")
+                let mut item_elem = xmpp_parsers::Element::builder("item", "http://jabber.org/protocol/pubsub")
                     .attr("id", id)
                     .build();
                 
@@ -1470,12 +1470,12 @@ pub async fn publish_pubsub_item(
             let mut pubsub_element = xmpp_parsers::Element::builder("pubsub", "http://jabber.org/protocol/pubsub").build();
             
             // Create the publish element
-            let mut publish_element = xmpp_parsers::Element::builder("publish", "")
+            let mut publish_element = xmpp_parsers::Element::builder("publish", "http://jabber.org/protocol/pubsub")
                 .attr("node", node)
                 .build();
             
             // Create the item element with the payload
-            let mut item_element = xmpp_parsers::Element::builder("item", "")
+            let mut item_element = xmpp_parsers::Element::builder("item", "http://jabber.org/protocol/pubsub")
                 .attr("id", id)
                 .build();
             
