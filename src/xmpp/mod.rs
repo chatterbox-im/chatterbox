@@ -528,7 +528,9 @@ impl XMPPClient {
             return Ok(None); // Not a message stanza
         }
 
-        let encrypted = match stanza.get_child("encrypted", custom_ns::OMEMO) {
+        let encrypted = match stanza.get_child("encrypted", custom_ns::OMEMO)
+            .or_else(|| stanza.get_child("encrypted", custom_ns::OMEMO_V1))
+            .or_else(|| stanza.get_child("encrypted", "")) {
             Some(elem) => elem,
             None => return Ok(None), // No OMEMO encrypted content
         };
@@ -892,9 +894,17 @@ impl XMPPClient {
         
         //debug!("Received encrypted message from {} with ID: {}", from, id);
         
-        // Look for OMEMO encrypted element
-        if let Some(encrypted) = element.get_child("encrypted", custom_ns::OMEMO) {
-            if let Some(header) = encrypted.get_child("header", custom_ns::OMEMO) {
+        // Look for OMEMO encrypted element - check both standard and legacy namespaces
+        let encrypted = element.get_child("encrypted", custom_ns::OMEMO)
+            .or_else(|| element.get_child("encrypted", custom_ns::OMEMO_V1))
+            .or_else(|| element.get_child("encrypted", ""));
+            
+        if let Some(encrypted) = encrypted {
+            let header = encrypted.get_child("header", custom_ns::OMEMO)
+                .or_else(|| encrypted.get_child("header", custom_ns::OMEMO_V1))
+                .or_else(|| encrypted.get_child("header", ""));
+                
+            if let Some(header) = header {
                 // Extract sender device ID
                 let sender_device_id = match header.attr("sid") {
                     Some(sid) => match sid.parse::<u32>() {
@@ -922,8 +932,10 @@ impl XMPPClient {
                 // Process encrypted message using the OMEMO manager
                 // Extract necessary information to create an OmemoMessage
                 
-                // Get IV
-                let iv = match header.get_child("iv", "") {
+                // Get IV - check both standard and legacy OMEMO namespaces
+                let iv = match header.get_child("iv", custom_ns::OMEMO)
+                    .or_else(|| header.get_child("iv", custom_ns::OMEMO_V1))
+                    .or_else(|| header.get_child("iv", "")) {
                     Some(iv_elem) => {
                         match iv_elem.text() {
                             text => {
@@ -969,8 +981,10 @@ impl XMPPClient {
                     }
                 }
                 
-                // Get payload
-                let payload = match encrypted.get_child("payload", "") {
+                // Get payload - check both standard and legacy OMEMO namespaces
+                let payload = match encrypted.get_child("payload", custom_ns::OMEMO)
+                    .or_else(|| encrypted.get_child("payload", custom_ns::OMEMO_V1))
+                    .or_else(|| encrypted.get_child("payload", "")) {
                     Some(payload_elem) => {
                         match payload_elem.text() {
                             text => {
@@ -1821,10 +1835,14 @@ impl XMPPClient {
                 //debug!("DEBUG: Detailed stanza structure:");
                 //debug!("DEBUG: Root element: {} (ns: {})", stanza.name(), stanza.ns());
                 
-                if let Some(encrypted) = stanza.get_child("encrypted", custom_ns::OMEMO) {
+                if let Some(encrypted) = stanza.get_child("encrypted", custom_ns::OMEMO)
+                    .or_else(|| stanza.get_child("encrypted", custom_ns::OMEMO_V1))
+                    .or_else(|| stanza.get_child("encrypted", "")) {
                     //debug!("DEBUG: Found encrypted element with namespace: {}", encrypted.ns());
                     
-                    if let Some(header) = encrypted.get_child("header", custom_ns::OMEMO) {
+                    if let Some(header) = encrypted.get_child("header", custom_ns::OMEMO)
+                        .or_else(|| encrypted.get_child("header", custom_ns::OMEMO_V1))
+                        .or_else(|| encrypted.get_child("header", "")) {
                         //debug!("DEBUG: Found header element with namespace: {}", header.ns());
                         //debug!("DEBUG: Header attributes: sid={}", header.attr("sid").unwrap_or("MISSING"));
                         
@@ -2210,7 +2228,9 @@ fn verify_omemo_stanza(stanza: &xmpp_parsers::Element, content: &str) -> Result<
     }
     
     // Check the encrypted element exists and has the right namespace
-    let encrypted = match stanza.get_child("encrypted", custom_ns::OMEMO) {
+    let encrypted = match stanza.get_child("encrypted", custom_ns::OMEMO)
+        .or_else(|| stanza.get_child("encrypted", custom_ns::OMEMO_V1))
+        .or_else(|| stanza.get_child("encrypted", "")) {
         Some(elem) => {
             //debug!("Found encrypted element with namespace: {}", elem.ns());
             elem
@@ -2228,29 +2248,22 @@ fn verify_omemo_stanza(stanza: &xmpp_parsers::Element, content: &str) -> Result<
     };
     
     // Check header element - note that child elements may inherit namespace from parent
-    let header = match encrypted.get_child("header", custom_ns::OMEMO) {
+    let header = match encrypted.get_child("header", custom_ns::OMEMO)
+        .or_else(|| encrypted.get_child("header", custom_ns::OMEMO_V1))
+        .or_else(|| encrypted.get_child("header", "")) {
         Some(elem) => {
-            //debug!("Found header element with explicit OMEMO namespace: {}", elem.ns());
+            //debug!("Found header element with namespace: {}", elem.ns());
             elem
         },
         None => {
-            // Try again with empty namespace since it might inherit from parent
-            match encrypted.get_child("header", "") {
-                Some(elem) => {
-                    //debug!("Found header element with inherited namespace from parent: {}", elem.ns());
-                    elem
-                },
-                None => {
-                    error!("Missing header element in encrypted element");
-                    //debug!("Direct children of encrypted element:");
-                    for _child in encrypted.children() {
-                        //debug!("  - {} (ns: {})", child.name(), child.ns());
-                    }
-                    missing_elements.push("header element");
-                    return Err(format!("SECURITY VIOLATION: Message missing required OMEMO elements: {}", 
-                                     missing_elements.join(", ")));
-                }
+            error!("Missing header element in encrypted element");
+            //debug!("Direct children of encrypted element:");
+            for _child in encrypted.children() {
+                //debug!("  - {} (ns: {})", child.name(), child.ns());
             }
+            missing_elements.push("header element");
+            return Err(format!("SECURITY VIOLATION: Message missing required OMEMO elements: {}", 
+                             missing_elements.join(", ")));
         }
     };
     
