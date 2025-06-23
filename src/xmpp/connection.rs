@@ -113,6 +113,11 @@ impl XMPPClient {
                         Ok(false) => warn!("Message carbons enable request was sent but returned unexpected result"),
                         Err(e) => error!("Failed to enable message carbons during connect: {}", e),
                     }
+                    
+                    // Send initial presence to make client available for real-time message delivery
+                    if let Err(e) = self.send_initial_presence().await {
+                        error!("Failed to send initial presence: {}", e);
+                    }
                     return Ok(());
                 },
                 Ok(false) => {
@@ -275,5 +280,15 @@ impl XMPPClient {
         self.client = None;
         self.connected = false;
         _disconnect_result
+    }
+    
+    /// Send initial presence to make the client available for receiving real-time messages
+    pub async fn send_initial_presence(&self) -> Result<()> {
+        if let Some(client) = &self.client {
+            let mut client_guard = client.lock().await;
+            super::presence::send_initial_presence(&mut *client_guard).await
+        } else {
+            Err(anyhow!("Client not initialized"))
+        }
     }
 }
