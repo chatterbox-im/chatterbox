@@ -158,11 +158,18 @@ impl super::OmemoManager {
     pub fn parse_device_bundle_response(&self, response: &str, device_id: DeviceId) -> Result<DeviceIdentity, OmemoError> {
         //debug!("Parsing device bundle response for device ID {}", device_id);
         
+        // Log the actual response for debugging
+        debug!("Bundle response XML for device {}: {}", device_id, response);
+        
         // Check if we're in development mode (only use fallback bundles in development)
         let _is_development = cfg!(debug_assertions);
         
         let document = roxmltree::Document::parse(response)
-            .map_err(|e| OmemoError::ProtocolError(format!("Failed to parse device bundle response: {}", e)))?;
+            .map_err(|e| {
+                warn!("Failed to parse device bundle response for device {}: {}", device_id, e);
+                debug!("Malformed bundle response: {}", response);
+                OmemoError::ProtocolError(format!("Failed to parse device bundle response: {}", e))
+            })?;
         
         // Check for error responses
         if let Some(error) = document.descendants().find(|n| n.has_tag_name("error")) {
@@ -194,7 +201,11 @@ impl super::OmemoManager {
         
         // Check for items element
         let items_element = document.descendants().find(|n| n.has_tag_name("items"));
-        if items_element.is_none() {            
+        if items_element.is_none() {
+            debug!("Document structure for device {}: root={}, children={:?}", 
+                device_id, 
+                document.root_element().tag_name().name(),
+                document.descendants().map(|n| n.tag_name().name()).collect::<Vec<_>>());
             error!("No items element found in bundle response from device {}", device_id);
             return Err(OmemoError::NoKeyBundleError(device_id));
         }
@@ -202,7 +213,9 @@ impl super::OmemoManager {
         // Check for item element
         let item_element = items_element.unwrap().descendants().find(|n| n.has_tag_name("item"));
         if item_element.is_none() {
-            
+            debug!("Items element children for device {}: {:?}", 
+                device_id,
+                items_element.unwrap().descendants().map(|n| n.tag_name().name()).collect::<Vec<_>>());
             error!("No item element found in bundle response from device {}", device_id);
             return Err(OmemoError::NoKeyBundleError(device_id));
         }
