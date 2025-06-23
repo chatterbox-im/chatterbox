@@ -284,14 +284,17 @@ impl XMPPClient {
                         });
                     } else if stanza.name() == "message" {
                         // Process message here or call into message handler
-                        //debug!("Received message stanza: {:?}", stanza);
-                        let _from = stanza.attr("from").unwrap_or("");
-                        let _to = stanza.attr("to").unwrap_or("");
-                        //debug!("[JID DEBUG] handle_incoming_messages: message stanza from='{}', to='{}'", from, to);
+                        let from = stanza.attr("from").unwrap_or("");
+                        let to = stanza.attr("to").unwrap_or("");
+                        info!("Received message stanza from='{}', to='{}'", from, to);
+                        debug!("Message stanza content: {:?}", stanza);
                         
                         // Check for OMEMO encrypted messages
-                        if stanza.has_child("encrypted", custom_ns::OMEMO) {
-                            //debug!("Detected OMEMO encrypted message");
+                        let has_omemo_v1 = stanza.has_child("encrypted", custom_ns::OMEMO);
+                        let has_omemo_axolotl = stanza.has_child("encrypted", custom_ns::OMEMO_V1);
+                        
+                        if has_omemo_v1 || has_omemo_axolotl {
+                            info!("Detected OMEMO encrypted message (v1={}, axolotl={})", has_omemo_v1, has_omemo_axolotl);
                             
                             // Clone needed values for async task
                             let stanza_clone = stanza.clone();
@@ -336,6 +339,8 @@ impl XMPPClient {
                             });
                         } else {
                             // Handle other message types: delivery receipts, chat states, etc.
+                            info!("Processing non-OMEMO message from {}", from);
+                            debug!("Non-OMEMO message content: {:?}", stanza);
                             
                             // Check for message delivery receipts
                             if let Err(e) = delivery_receipts::handle_receipt(&stanza, &pending_receipts, &msg_tx).await {
@@ -1157,28 +1162,28 @@ impl XMPPClient {
         let active_element = Element::builder("active", custom_ns::CHATSTATES).build();
         message_element.append_child(active_element);
         
-        // Create encrypted element with OMEMO namespace
-        let mut encrypted_element = Element::builder("encrypted", custom_ns::OMEMO).build();
+        // Create encrypted element with OMEMO namespace (use legacy namespace that works)
+        let mut encrypted_element = Element::builder("encrypted", custom_ns::OMEMO_V1).build();
         
         // Create header element with OMEMO namespace
-        let mut header_element = Element::builder("header", custom_ns::OMEMO).build();
+        let mut header_element = Element::builder("header", custom_ns::OMEMO_V1).build();
         header_element.set_attr("sid", &encrypted_message.sender_device_id.to_string());
         
         // Add key elements with OMEMO namespace
         for (device_id, encrypted_key) in &encrypted_message.encrypted_keys {
-            let mut key_element = Element::builder("key", custom_ns::OMEMO).build();
+            let mut key_element = Element::builder("key", custom_ns::OMEMO_V1).build();
             key_element.set_attr("rid", &device_id.to_string());
             key_element.append_text_node(&base64::engine::general_purpose::STANDARD.encode(encrypted_key));
             header_element.append_child(key_element);
         }
         
         // Add IV element with OMEMO namespace
-        let mut iv_element = Element::builder("iv", custom_ns::OMEMO).build();
+        let mut iv_element = Element::builder("iv", custom_ns::OMEMO_V1).build();
         iv_element.append_text_node(&base64::engine::general_purpose::STANDARD.encode(&encrypted_message.iv));
         header_element.append_child(iv_element);
         
         // Add payload element with OMEMO namespace
-        let mut payload_element = Element::builder("payload", custom_ns::OMEMO).build();
+        let mut payload_element = Element::builder("payload", custom_ns::OMEMO_V1).build();
         payload_element.append_text_node(&base64::engine::general_purpose::STANDARD.encode(&encrypted_message.ciphertext));
         
         // Assemble the elements
@@ -1782,28 +1787,28 @@ impl XMPPClient {
         let active_element = Element::builder("active", custom_ns::CHATSTATES).build();
         message_element.append_child(active_element);
         
-        // Create encrypted element with OMEMO namespace
-        let mut encrypted_element = Element::builder("encrypted", custom_ns::OMEMO).build();
+        // Create encrypted element with OMEMO namespace (use legacy namespace that works)
+        let mut encrypted_element = Element::builder("encrypted", custom_ns::OMEMO_V1).build();
         
         // Create header element with OMEMO namespace
-        let mut header_element = Element::builder("header", custom_ns::OMEMO).build();
+        let mut header_element = Element::builder("header", custom_ns::OMEMO_V1).build();
         header_element.set_attr("sid", &encrypted_message.sender_device_id.to_string());
         
         // Add key elements with OMEMO namespace
         for (device_id, encrypted_key) in &encrypted_message.encrypted_keys {
-            let mut key_element = Element::builder("key", custom_ns::OMEMO).build();
+            let mut key_element = Element::builder("key", custom_ns::OMEMO_V1).build();
             key_element.set_attr("rid", &device_id.to_string());
             key_element.append_text_node(&base64::engine::general_purpose::STANDARD.encode(encrypted_key));
             header_element.append_child(key_element);
         }
         
         // Add IV element with OMEMO namespace
-        let mut iv_element = Element::builder("iv", custom_ns::OMEMO).build();
+        let mut iv_element = Element::builder("iv", custom_ns::OMEMO_V1).build();
         iv_element.append_text_node(&base64::engine::general_purpose::STANDARD.encode(&encrypted_message.iv));
         header_element.append_child(iv_element);
         
         // Add payload element with OMEMO namespace
-        let mut payload_element = Element::builder("payload", custom_ns::OMEMO).build();
+        let mut payload_element = Element::builder("payload", custom_ns::OMEMO_V1).build();
         payload_element.append_text_node(&base64::engine::general_purpose::STANDARD.encode(&encrypted_message.ciphertext));
         
         // Assemble the elements

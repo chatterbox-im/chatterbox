@@ -372,9 +372,11 @@ impl super::XMPPClient {
                                                     (from.clone(), "me".to_string())
                                                 };
                                                 
-                                                // Check if this is an OMEMO encrypted message
-                                                if let Some(_encrypted) = message_stanza.get_child("encrypted", custom_ns::OMEMO) {
-                                                    info!("Found OMEMO encrypted message in archive from {}", sender_id);
+                                                // Check if this is an OMEMO encrypted message (try both namespaces)
+                                                let has_omemo_v1 = message_stanza.has_child("encrypted", custom_ns::OMEMO);
+                                                let has_omemo_axolotl = message_stanza.has_child("encrypted", custom_ns::OMEMO_V1);
+                                                if has_omemo_v1 || has_omemo_axolotl {
+                                                    info!("Found OMEMO encrypted message in archive from {} (v1={}, axolotl={})", sender_id, has_omemo_v1, has_omemo_axolotl);
                                                     
                                                     // Try to decrypt the message if we have an OMEMO manager
                                                     if let Some(_omemo_manager) = &self.omemo_manager {
@@ -703,14 +705,16 @@ impl super::XMPPClient {
     ) -> Result<Option<String>> {
         //debug!("Attempting to decrypt archived OMEMO message from {}", sender_jid);
         
-        // Extract the OMEMO encrypted element
-        let encrypted = match message_stanza.get_child("encrypted", custom_ns::OMEMO) {
+        // Extract the OMEMO encrypted element (try both namespaces)
+        let encrypted = match message_stanza.get_child("encrypted", custom_ns::OMEMO)
+            .or_else(|| message_stanza.get_child("encrypted", custom_ns::OMEMO_V1)) {
             Some(e) => e,
             None => return Ok(None),  // No encrypted element found
         };
         
-        // Get the header element which contains keys and other metadata
-        let header = match encrypted.get_child("header", custom_ns::OMEMO) {
+        // Get the header element which contains keys and other metadata (try both namespaces)
+        let header = match encrypted.get_child("header", custom_ns::OMEMO)
+            .or_else(|| encrypted.get_child("header", custom_ns::OMEMO_V1)) {
             Some(h) => h,
             None => {
                 warn!("Missing header in OMEMO encrypted message");
@@ -743,7 +747,9 @@ impl super::XMPPClient {
         };
         
         // Get IV (initialization vector) - try with OMEMO namespace first, then with no namespace
-        let iv = match header.get_child("iv", custom_ns::OMEMO).or_else(|| header.get_child("iv", "")) {
+        let iv = match header.get_child("iv", custom_ns::OMEMO)
+            .or_else(|| header.get_child("iv", custom_ns::OMEMO_V1))
+            .or_else(|| header.get_child("iv", "")) {
             Some(iv_elem) => {
                 let iv_base64 = iv_elem.text();
                 match base64::engine::general_purpose::STANDARD.decode(iv_base64) {
@@ -775,7 +781,7 @@ impl super::XMPPClient {
         // iterate through all children and filter for key elements
         let mut found_key = false;
         for child in header.children() {
-            if child.name() == "key" && (child.ns() == custom_ns::OMEMO || child.ns() == "") {
+            if child.name() == "key" && (child.ns() == custom_ns::OMEMO || child.ns() == custom_ns::OMEMO_V1 || child.ns() == "") {
                 if let Some(rid) = child.attr("rid") {
                     match rid.parse::<u32>() {
                         Ok(device_id) if device_id == own_device_id => {
@@ -816,8 +822,10 @@ impl super::XMPPClient {
             }
         };
         
-        // Get the payload (encrypted message content) - try with OMEMO namespace first, then with no namespace
-        let payload = match encrypted.get_child("payload", custom_ns::OMEMO).or_else(|| encrypted.get_child("payload", "")) {
+        // Get the payload (encrypted message content) - try both OMEMO namespaces
+        let payload = match encrypted.get_child("payload", custom_ns::OMEMO)
+            .or_else(|| encrypted.get_child("payload", custom_ns::OMEMO_V1))
+            .or_else(|| encrypted.get_child("payload", "")) {
             Some(payload_elem) => {
                 let payload_base64 = payload_elem.text();
                 match base64::engine::general_purpose::STANDARD.decode(payload_base64) {

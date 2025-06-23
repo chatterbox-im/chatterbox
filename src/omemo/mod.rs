@@ -630,13 +630,44 @@ impl OmemoManager {
         Ok(message)
     }
     
+    /// Force refresh device list for a JID (public method)
+    pub async fn force_refresh_device_list(&self, jid: &str) -> Result<Vec<DeviceId>, OmemoError> {
+        info!("[OMEMO] Force refreshing device list for {}", jid);
+        self.get_device_ids_with_force_refresh(jid, true).await
+    }
+    
     /// Decrypt a message from a sender
     pub async fn decrypt_message(&mut self, sender: &str, device_id: u32, message: &OmemoMessage) -> Result<String, OmemoError> {
         info!("Decrypting message from {}:{}", sender, device_id);
         
         // First, check if we have an encrypted key for our device
-        let encrypted_key = message.encrypted_keys.get(&self.device_id)
-            .ok_or_else(|| OmemoError::MissingDataError(format!("No encrypted key found for device {}", self.device_id)))?;
+        let encrypted_key = match message.encrypted_keys.get(&self.device_id) {
+            Some(key) => key,
+            None => {
+                warn!("No encrypted key found for our device {} in message from {}:{}", self.device_id, sender, device_id);
+                warn!("Available keys in message: {:?}", message.encrypted_keys.keys().collect::<Vec<_>>());
+                
+                // This could mean the sender is using outdated device lists
+                // Force refresh our own device list to make sure it's published correctly
+                let local_username = self.local_jid.split('@').next().unwrap_or(&self.local_jid);
+                let local_domain = self.local_jid.split('@').nth(1).unwrap_or("");
+                let user_bare_jid = format!("{}@{}", local_username, local_domain);
+                
+                if let Err(e) = self.force_refresh_device_list(&user_bare_jid).await {
+                    warn!("Failed to refresh our own device list: {}", e);
+                }
+                
+                // Also try to refresh the sender's device list in case they have a new device
+                if let Err(e) = self.force_refresh_device_list(sender).await {
+                    warn!("Failed to refresh sender's device list: {}", e);
+                }
+                
+                return Err(OmemoError::MissingDataError(format!(
+                    "No encrypted key found for device {} (our device not in recipient list)", 
+                    self.device_id
+                )));
+            }
+        };
         
         // Get the session for the sender device
         let sender_str = sender.to_string();
@@ -708,7 +739,12 @@ impl OmemoManager {
     
     /// Get the device IDs for a user
     async fn get_device_ids(&self, jid: &str) -> Result<Vec<DeviceId>, OmemoError> {
-        debug!("[OMEMO] get_device_ids: called with jid = {}", jid);
+        self.get_device_ids_with_force_refresh(jid, false).await
+    }
+    
+    /// Get the device IDs for a user with optional force refresh
+    async fn get_device_ids_with_force_refresh(&self, jid: &str, force_refresh: bool) -> Result<Vec<DeviceId>, OmemoError> {
+        debug!("[OMEMO] get_device_ids: called with jid = {}, force_refresh = {}", jid, force_refresh);
         
         // Validate JID format first
         if !jid.contains('@') {
@@ -716,32 +752,36 @@ impl OmemoManager {
             return Err(OmemoError::InvalidInput(format!("Invalid JID format: {}", jid)));
         }
         
-        // First try to get from storage
-        let storage_guard = self.storage.lock().await;
-        if let Ok(device_list) = storage_guard.load_device_list(jid) {
-            debug!("[OMEMO] get_device_ids: Found device list in storage for {}: {:?}", jid, device_list.device_ids);
-            
-            // Check if the list is recent enough (less than 1 hour old)
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64;
-            
-            let list_age = now - device_list.last_update;
-            let max_age = 3600; // 1 hour in seconds
-            
-            if !device_list.device_ids.is_empty() && list_age < max_age {
-                // If the cached list is non-empty and recent, use it
-                debug!("[OMEMO] get_device_ids: Using cached device list (age: {} seconds)", list_age);
-                return Ok(device_list.device_ids);
-            } else if !device_list.device_ids.is_empty() {
-                debug!("[OMEMO] get_device_ids: Cached device list is stale (age: {} seconds), will refresh", list_age);
-                // We'll still return the cached list if server fetch fails
-            } else {
-                debug!("[OMEMO] get_device_ids: Cached device list is empty, will try to fetch from server");
+        // If force refresh is not requested, try to get from storage first
+        if !force_refresh {
+            let storage_guard = self.storage.lock().await;
+            if let Ok(device_list) = storage_guard.load_device_list(jid) {
+                debug!("[OMEMO] get_device_ids: Found device list in storage for {}: {:?}", jid, device_list.device_ids);
+                
+                // Check if the list is recent enough (less than 5 minutes old for better responsiveness)
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                
+                let list_age = now - device_list.last_update;
+                let max_age = 300; // 5 minutes in seconds (reduced from 1 hour)
+                
+                if !device_list.device_ids.is_empty() && list_age < max_age {
+                    // If the cached list is non-empty and recent, use it
+                    debug!("[OMEMO] get_device_ids: Using cached device list (age: {} seconds)", list_age);
+                    return Ok(device_list.device_ids);
+                } else if !device_list.device_ids.is_empty() {
+                    debug!("[OMEMO] get_device_ids: Cached device list is stale (age: {} seconds), will refresh", list_age);
+                    // We'll still return the cached list if server fetch fails
+                } else {
+                    debug!("[OMEMO] get_device_ids: Cached device list is empty, will try to fetch from server");
+                }
             }
+            drop(storage_guard);
+        } else {
+            info!("[OMEMO] get_device_ids: Force refresh requested, skipping cache for {}", jid);
         }
-        drop(storage_guard);
         
         // If not in storage or cached list is empty/stale, fetch from the server
         info!("[OMEMO] get_device_ids: Fetching device list for {} from XMPP server", jid);

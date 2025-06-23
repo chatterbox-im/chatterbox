@@ -737,7 +737,8 @@ pub mod utils {
     use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
     use super::{DeviceIdentity, OmemoMessage};
     use thiserror::Error;
-    use crate::xmpp::custom_ns;
+    // Use the legacy OMEMO namespace that actually works
+    const OMEMO_NAMESPACE: &str = "eu.siacs.conversations.axolotl";
     
     /// Errors that can occur in XML processing
     #[derive(Debug, Error)]
@@ -759,7 +760,7 @@ pub mod utils {
     pub fn device_bundle_to_xml(bundle: &DeviceIdentity) -> Result<String, XmlError> {
         let mut xml = String::new();
         
-        xml.push_str(&format!("<bundle xmlns='{}'>", custom_ns::OMEMO));
+        xml.push_str(&format!("<bundle xmlns='{}'>", OMEMO_NAMESPACE));
         
         // Identity key
         xml.push_str("<identityKey>");
@@ -798,7 +799,7 @@ pub mod utils {
     pub fn device_list_to_xml(device_ids: &[u32]) -> Result<String, XmlError> {
         let mut xml = String::new();
         
-        xml.push_str(&format!("<list xmlns='{}'>", custom_ns::OMEMO));
+        xml.push_str(&format!("<list xmlns='{}'>", OMEMO_NAMESPACE));
         
         for device_id in device_ids {
             xml.push_str(&format!("<device id='{}' />", device_id));
@@ -819,7 +820,7 @@ pub mod utils {
         let encrypted = doc.descendants()
             .find(|n| n.has_tag_name("encrypted") && 
                   n.has_attribute("xmlns") && 
-                  n.attribute("xmlns").unwrap() == custom_ns::OMEMO)
+                  n.attribute("xmlns").unwrap() == OMEMO_NAMESPACE)
             .ok_or(XmlError::MissingElementError("encrypted element not found".to_string()))?;
         
         // Find the header element
@@ -897,7 +898,7 @@ pub mod utils {
     pub fn omemo_message_to_xml(message: &OmemoMessage) -> String {
         let mut xml = String::new();
         
-        xml.push_str(&format!("<encrypted xmlns='{}'>", custom_ns::OMEMO));
+        xml.push_str(&format!("<encrypted xmlns='{}'>", OMEMO_NAMESPACE));
         
         // Header
         xml.push_str(&format!("<header sid='{}'>", message.sender_device_id));
