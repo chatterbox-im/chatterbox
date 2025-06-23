@@ -1172,6 +1172,10 @@ impl XMPPClient {
         encrypted_element.append_child(payload_element);
         message_element.append_child(encrypted_element);
         
+        // Add store hint for offline message delivery (XEP-0334)
+        let store_hint = Element::builder("store", "urn:xmpp:hints").build();
+        message_element.append_child(store_hint);
+        
         // Send the message
         if let Some(client) = &self.client {
             let stanza = message_element.into();
@@ -1792,6 +1796,10 @@ impl XMPPClient {
         encrypted_element.append_child(header_element);
         encrypted_element.append_child(payload_element);
         message_element.append_child(encrypted_element);
+        
+        // Add store hint for offline message delivery (XEP-0334)
+        let store_hint = Element::builder("store", "urn:xmpp:hints").build();
+        message_element.append_child(store_hint);
         
         // Use the message element
         let stanza = message_element;

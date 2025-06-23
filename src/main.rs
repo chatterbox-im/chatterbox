@@ -850,6 +850,29 @@ async fn run_main_loop(
 
         match input_result {
             Some((recipient, content)) => {
+                // For testing offline storage, add a command prefix for unencrypted messages
+                if content.starts_with("/plain ") {
+                    let plain_content = content.trim_start_matches("/plain ");
+                    warn!("⚠️ SENDING UNENCRYPTED MESSAGE: {}", plain_content);
+                    match xmpp_client.send_message_with_receipt(&recipient, plain_content).await {
+                        Ok(_) => {
+                            let message = Message {
+                                id: uuid::Uuid::new_v4().to_string(),
+                                sender_id: "You".to_string(),
+                                recipient_id: recipient.clone(),
+                                content: plain_content.to_string(),
+                                timestamp: chrono::Utc::now().timestamp() as u64,
+                                delivery_status: DeliveryStatus::Sent,
+                            };
+                            chat_ui.add_message(message);
+                        },
+                        Err(e) => {
+                            error!("Failed to send plaintext message: {}", e);
+                        }
+                    }
+                    continue;
+                }
+                
                 if content == "__SHOW_DEVICE_FINGERPRINTS__" {
                     // Handle showing device fingerprints dialog for the user's own devices
                     info!("MAIN: Received request to show device fingerprints dialog (own devices)");
@@ -1313,15 +1336,15 @@ async fn run_main_loop(
                     
                     // Clear existing messages
                     chat_ui.clear_messages();
-                    
-                    // Draw UI to show clear message area
-                    terminal.draw(|f| chat_ui.draw(f))?;
-                    
-                    // Load message history for this contact asynchronously
-                    load_message_history_async(chat_ui, xmpp_client, &recipient);
-                    
-                    // Redraw right away to show loading message
-                    terminal.draw(|f| chat_ui.draw(f))?;
+            
+            // Draw UI to show clear message area
+            terminal.draw(|f| chat_ui.draw(f))?;
+            
+            // Load message history for this contact asynchronously
+            load_message_history_async(chat_ui, xmpp_client, &recipient);
+            
+            // Redraw right away to show loading message
+            terminal.draw(|f| chat_ui.draw(f))?;
                 } else if content == "__KEY_ACCEPTED__" || content == "__KEY_REJECTED__" {
                     // ... existing key verification code ...
                     // Handle key verification response
