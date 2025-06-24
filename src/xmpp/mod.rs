@@ -342,6 +342,16 @@ impl XMPPClient {
                             info!("Processing non-OMEMO message from {}", from);
                             debug!("Non-OMEMO message content: {:?}", stanza);
                             
+                            // Check if there's a body element with different namespace attempts
+                            debug!("Checking for body element...");
+                            if stanza.get_child("body", "jabber:client").is_some() {
+                                debug!("Found body with jabber:client namespace");
+                            } else if stanza.get_child("body", "").is_some() {
+                                debug!("Found body with empty namespace");
+                            } else {
+                                debug!("No body element found");
+                            }
+                            
                             // Check for message delivery receipts
                             if let Err(e) = delivery_receipts::handle_receipt(&stanza, &pending_receipts, &msg_tx).await {
                                 // Just log the error and continue
@@ -398,25 +408,34 @@ impl XMPPClient {
                             }
                             
                             // Process regular chat messages (non-encrypted)
-                            if let Some(body) = stanza.get_child("body", "") {
+                            if let Some(body) = stanza.get_child("body", "jabber:client").or_else(|| stanza.get_child("body", "")) {
                                 let from = stanza.attr("from").unwrap_or("unknown@server.example");
                                 let id: String = stanza.attr("id").map(|s| s.to_string()).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
                                 let content = body.text();
                                 
+                                debug!("Found message body from {}: '{}'", from, content);
+                                
                                 if !content.is_empty() {
+                                    // Strip resource from JID to get bare JID (user@domain)
+                                    let sender_bare_jid = from.split('/').next().unwrap_or(from).to_string();
+                                    
                                     // Create a message for the UI
                                     let message = Message {
                                         id: id.clone(),
-                                        sender_id: from.to_string(),
+                                        sender_id: sender_bare_jid.clone(),
                                         recipient_id: "me".to_string(),
-                                        content,
+                                        content: content.clone(),
                                         timestamp: chrono::Utc::now().timestamp() as u64,
                                         delivery_status: DeliveryStatus::Delivered,
                                     };
                                     
+                                    info!("Sending message to UI: from='{}' (bare: '{}'), content='{}'", from, sender_bare_jid, content);
+                                    
                                     // Send to UI
                                     if let Err(e) = msg_tx.send(message).await {
                                         error!("Failed to send message to UI: {}", e);
+                                    } else {
+                                        info!("Successfully sent message to UI channel");
                                     }
                                     
                                     // Send a receipt if requested
@@ -424,10 +443,12 @@ impl XMPPClient {
                                         let mut client_guard = client.lock().await;
                                         if let Err(e) = delivery_receipts::send_receipt(&mut client_guard, from, &id).await {
                                             error!("Failed to send receipt: {}", e);
-} else {
+                                        } else {
                                             //debug!("Successfully sent receipt for message {}", id);
                                         }
                                     }
+                                } else {
+                                    warn!("Message body was empty after extraction from {}", from);
                                 }
                             }
                         }
