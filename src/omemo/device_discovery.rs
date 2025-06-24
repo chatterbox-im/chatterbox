@@ -165,8 +165,8 @@ fn parse_device_list_response_static(response: &str) -> Result<Vec<u32>, OmemoEr
 
 /// Known OMEMO namespace variations
 pub const OMEMO_NAMESPACES: [&str; 2] = [
-    "eu.siacs.conversations.axolotl",   // Original/legacy namespace
-    "urn:xmpp:omemo:1"                  // Official XEP-0384 namespace
+    "urn:xmpp:omemo:1",                 // Official XEP-0384 namespace (try first)
+    "eu.siacs.conversations.axolotl"    // Original/legacy namespace (fallback)
 ];
 
 /// Known node format patterns

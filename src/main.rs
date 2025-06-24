@@ -198,15 +198,17 @@ async fn main() -> Result<()> {
                 }
             }
             
-            // Initialize OMEMO encryption right after connecting 
-            // This ensures all components that need OMEMO will have it available
+            // Initialize OMEMO encryption first
             info!("Initializing OMEMO encryption...");
             match xmpp_client.initialize_client().await {
-                Ok(_) => info!("OMEMO encryption initialized successfully"),
+                Ok(_) => {
+                    info!("OMEMO encryption initialized successfully");
+                },
                 Err(e) => panic!("Failed to initialize OMEMO encryption: {}, some messages may not be decrypted", e)
             }
             
-            // Register the client in the global registry for OMEMO integration
+            // Register the client in the global registry AFTER OMEMO initialization
+            // This ensures the global client has the OMEMO manager properly set
             chatterbox::xmpp::register_global_client(xmpp_client.clone());
 
             // Initialize Service Discovery (XEP-0030)

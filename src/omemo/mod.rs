@@ -883,27 +883,48 @@ impl OmemoManager {
         if let Some(client) = crate::xmpp::get_global_xmpp_client().await {
             let client_guard = client.lock().await;
             
-            // Try with the standard node format
-            let node = format!("{}:devices", OMEMO_NAMESPACE);
-            info!("[OMEMO] Publishing device list to node: {}", node);
-            let response = client_guard.request_pubsub_items(jid, &node).await;
+            // Try with the standard namespace first
+            let standard_node = format!("{}:devices", OMEMO_NAMESPACE);
+            info!("[OMEMO] Trying standard node: {}", standard_node);
+            match client_guard.request_pubsub_items(jid, &standard_node).await {
+                Ok(xml) => {
+                    match self.parse_device_list_response(&xml) {
+                        Ok(devices) if !devices.is_empty() => {
+                            info!("[OMEMO] Found {} devices with standard namespace: {:?}", devices.len(), devices);
+                            return Ok(devices);
+                        },
+                        Ok(_) => {
+                            info!("[OMEMO] No devices found with standard namespace, trying legacy");
+                        },
+                        Err(e) => {
+                            warn!("[OMEMO] Failed to parse standard namespace response: {}", e);
+                        }
+                    }
+                },
+                Err(e) => {
+                    info!("[OMEMO] Standard namespace failed: {}, trying legacy", e);
+                }
+            }
             
-            match response {
+            // Try with the legacy namespace as fallback
+            let legacy_node = "eu.siacs.conversations.axolotl:devices";
+            info!("[OMEMO] Trying legacy node: {}", legacy_node);
+            match client_guard.request_pubsub_items(jid, &legacy_node).await {
                 Ok(xml) => {
                     match self.parse_device_list_response(&xml) {
                         Ok(devices) => {
-                            info!("[OMEMO] Found {} devices with basic method: {:?}", devices.len(), devices);
+                            info!("[OMEMO] Found {} devices with legacy namespace: {:?}", devices.len(), devices);
                             return Ok(devices);
                         },
                         Err(e) => {
-                            warn!("[OMEMO] Failed to parse device list response: {}", e);
+                            warn!("[OMEMO] Failed to parse legacy namespace response: {}", e);
                             return Err(e);
                         }
                     }
                 },
                 Err(e) => {
-                    error!("[OMEMO] Failed to fetch device list: {}", e);
-                    return Err(OmemoError::ProtocolError(format!("Failed to fetch device list: {}", e)));
+                    error!("[OMEMO] Both standard and legacy namespace failed: {}", e);
+                    return Err(OmemoError::ProtocolError(format!("Failed to fetch device list from both namespaces: {}", e)));
                 }
             }
         } else {
