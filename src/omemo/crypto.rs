@@ -216,6 +216,10 @@ pub fn encrypt_data(
     iv: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
 
+    error!("ADRIAN DEBUG encrypt_data - data len: {}, key len: {}, iv len: {}", data.len(), key.len(), iv.len());
+    error!("ADRIAN DEBUG encrypt_data - key: {}", hex::encode(key));
+    error!("ADRIAN DEBUG encrypt_data - iv: {}", hex::encode(iv));
+    error!("ADRIAN DEBUG encrypt_data - data: {}", hex::encode(data));
     trace!("Encryption key: {}", hex::encode(key));
     trace!("IV: {}", hex::encode(iv));
     
@@ -268,6 +272,10 @@ pub fn decrypt_data(
     iv: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
 
+    error!("ADRIAN DEBUG decrypt_data - data len: {}, key len: {}, iv len: {}", data.len(), key.len(), iv.len());
+    error!("ADRIAN DEBUG decrypt_data - key: {}", hex::encode(key));
+    error!("ADRIAN DEBUG decrypt_data - iv: {}", hex::encode(iv));
+    error!("ADRIAN DEBUG decrypt_data - data: {}", hex::encode(data));
     trace!("Decryption key: {}", hex::encode(key));
     trace!("IV: {}", hex::encode(iv));
     trace!("Ciphertext: {}", hex::encode(data));

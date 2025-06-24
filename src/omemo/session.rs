@@ -195,9 +195,19 @@ impl OmemoSession {
     
     /// Normalize a JID for comparison purposes
     /// This ensures consistent comparison regardless of encoding differences
+    /// For OMEMO sessions, we use bare JIDs (without resources) since OMEMO sessions
+    /// are tied to the account, not the specific client resource
     fn normalize_jid(jid: &str) -> String {
         // Convert to lowercase and trim whitespace for consistent comparison
-        jid.to_lowercase().trim().to_string()
+        let clean_jid = jid.to_lowercase().trim().to_string();
+        
+        // Strip the resource part for OMEMO sessions (everything after the last '/')
+        // OMEMO sessions should be bound to bare JIDs, not full JIDs with resources
+        if let Some(slash_pos) = clean_jid.rfind('/') {
+            clean_jid[..slash_pos].to_string()
+        } else {
+            clean_jid
+        }
     }
     
     /// Get the ratchet state

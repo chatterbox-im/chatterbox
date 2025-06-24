@@ -3,11 +3,11 @@
 //!
 //! This module handles the cryptographic protocol for OMEMO, including X3DH and Double Ratchet.
 
-use serde::{Serialize, Deserialize};
+use anyhow::{anyhow, Result};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use thiserror::Error;
-use anyhow::Result;
-use ed25519_dalek::{Signature, VerifyingKey, Signer, SigningKey, Verifier};
 
 use crate::omemo::crypto;
 use crate::omemo::device_id::DeviceId;
@@ -458,7 +458,7 @@ impl DoubleRatchet {
             skipped_message_keys: std::collections::HashMap::new(),
             local_device_id,
             remote_device_id,
-            remote_jid,
+            remote_jid: normalize_jid_to_bare(&remote_jid),
         };
         
         Ok(state)
@@ -506,7 +506,7 @@ impl DoubleRatchet {
             skipped_message_keys: std::collections::HashMap::new(),
             local_device_id,
             remote_device_id,
-            remote_jid,
+            remote_jid: normalize_jid_to_bare(&remote_jid),
         };
         
         Ok(state)
@@ -733,10 +733,11 @@ impl DoubleRatchet {
 
 /// Utility functions for OMEMO protocol
 pub mod utils {
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
     use roxmltree::Document;
-    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-    use super::{DeviceIdentity, OmemoMessage};
     use thiserror::Error;
+
+    use super::{DeviceIdentity, OmemoMessage};
     // Use the legacy OMEMO namespace that actually works
     const OMEMO_NAMESPACE: &str = "eu.siacs.conversations.axolotl";
     
@@ -923,5 +924,18 @@ pub mod utils {
         xml.push_str("</encrypted>");
         
         xml
+    }
+}
+
+/// Normalize a JID to bare JID for OMEMO session consistency
+/// This ensures OMEMO sessions are bound to accounts, not specific resources
+fn normalize_jid_to_bare(jid: &str) -> String {
+    let clean_jid = jid.to_lowercase().trim().to_string();
+    
+    // Strip the resource part (everything after the last '/')
+    if let Some(slash_pos) = clean_jid.rfind('/') {
+        clean_jid[..slash_pos].to_string()
+    } else {
+        clean_jid
     }
 }
