@@ -292,6 +292,16 @@ impl XMPPClient {
                         // Check for OMEMO encrypted messages
                         let has_omemo_v1 = stanza.has_child("encrypted", custom_ns::OMEMO);
                         let has_omemo_axolotl = stanza.has_child("encrypted", custom_ns::OMEMO_V1);
+                        debug!("OMEMO detection: v1={}, axolotl={}, checking namespaces '{}' and '{}'", 
+                            has_omemo_v1, has_omemo_axolotl, custom_ns::OMEMO, custom_ns::OMEMO_V1);
+                        
+                        // Also check with specific namespace debug
+                        if let Some(encrypted) = stanza.get_child("encrypted", "") {
+                            debug!("Found encrypted element with empty namespace: {:?}", encrypted);
+                        }
+                        if let Some(encrypted) = stanza.get_child("encrypted", "eu.siacs.conversations.axolotl") {
+                            debug!("Found encrypted element with axolotl namespace: {:?}", encrypted);
+                        }
                         
                         if has_omemo_v1 || has_omemo_axolotl {
                             info!("Detected OMEMO encrypted message (v1={}, axolotl={})", has_omemo_v1, has_omemo_axolotl);
