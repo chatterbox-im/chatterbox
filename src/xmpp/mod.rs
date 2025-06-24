@@ -42,7 +42,7 @@ pub mod custom_ns {
     pub const CHATSTATES: &str = "http://jabber.org/protocol/chatstates";
     pub const MAM: &str = "urn:xmpp:mam:2";
     pub const RECEIPTS: &str = "urn:xmpp:receipts";
-    pub const OMEMO: &str = "urn:xmpp:omemo:1";
+    pub const OMEMO: &str = "eu.siacs.conversations.axolotl";
     pub const PUBSUB: &str = "http://jabber.org/protocol/pubsub";
     pub const STANZAS: &str = "urn:ietf:params:xml:ns:xmpp-stanzas";
     pub const CARBONS: &str = "urn:xmpp:carbons:2";
@@ -466,6 +466,44 @@ impl XMPPClient {
                             //debug!("Received service discovery items response");
                             if let Err(e) = service_discovery.handle_disco_response(&stanza).await {
                                 warn!("Failed to process service discovery items response: {}", e);
+                            }
+                        } else if let Some(_pubsub) = stanza.get_child("pubsub", "http://jabber.org/protocol/pubsub") {
+                            // Handle pubsub requests and responses
+                            if stanza.attr("type") == Some("get") {
+                                // Handle pubsub requests (e.g., OMEMO bundle requests)
+                                let stanza_clone = stanza.clone();
+                                let client_clone = client.clone();
+                                
+                                tokio::spawn(async move {
+                                    // Get the global OMEMO manager if available
+                                    let omemo_manager = match get_global_xmpp_client().await {
+                                        Some(global_client) => {
+                                            let client_guard = global_client.lock().await;
+                                            client_guard.omemo_manager.clone()
+                                        },
+                                        None => None,
+                                    };
+                                    
+                                    if let Some(manager) = omemo_manager {
+                                        if let Err(e) = Self::handle_pubsub_request(&stanza_clone, &client_clone, &manager).await {
+                                            error!("Failed to handle pubsub request: {}", e);
+                                        }
+                                    } else {
+                                        warn!("Received pubsub request but OMEMO manager not available");
+                                    }
+                                });
+                            } else if stanza.attr("type") == Some("result") {
+                                // Handle pubsub responses (e.g., OMEMO bundle responses)
+                                // Store the response so the waiting request_pubsub_items can find it
+                                if let Some(stanza_id) = stanza.attr("id") {
+                                    debug!("Received pubsub response with ID: {}", stanza_id);
+                                    
+                                    // Convert stanza to XML string properly
+                                    let xml_string = crate::xmpp::omemo_integration::element_to_xml_string(&stanza);
+                                    
+                                    // Store the response in a global map that request_pubsub_items can check
+                                    crate::xmpp::omemo_integration::store_pubsub_response(stanza_id.to_string(), xml_string).await;
+                                }
                             }
                         }
                     }
@@ -2192,6 +2230,186 @@ impl XMPPClient {
             Err(e) => {
                 error!("Failed to send PubSub request: {}", e);
                 return Err(anyhow!("Failed to send PubSub request: {}", e));
+            }
+        }
+    }
+
+    /// Handle incoming pubsub requests (e.g., OMEMO bundle requests)
+    async fn handle_pubsub_request(
+        stanza: &xmpp_parsers::Element,
+        client: &Arc<TokioMutex<XMPPAsyncClient>>,
+        omemo_manager: &Arc<TokioMutex<crate::omemo::OmemoManager>>,
+    ) -> Result<()> {
+        let from = stanza.attr("from").unwrap_or("unknown");
+        let id = stanza.attr("id").unwrap_or("no-id");
+        let to = stanza.attr("to").unwrap_or("unknown");
+        
+        info!("Handling pubsub request from {} to {} (ID: {})", from, to, id);
+        
+        // Check if this is an OMEMO bundle request
+        if let Some(pubsub) = stanza.get_child("pubsub", "http://jabber.org/protocol/pubsub") {
+            if let Some(items) = pubsub.get_child("items", "http://jabber.org/protocol/pubsub") {
+                if let Some(node) = items.attr("node") {
+                    info!("Pubsub request for node: {}", node);
+                    
+                    // Check if this is an OMEMO bundle request
+                    if node.starts_with("eu.siacs.conversations.axolotl.bundles:") {
+                        let device_id_str = node.trim_start_matches("eu.siacs.conversations.axolotl.bundles:");
+                        if let Ok(device_id) = device_id_str.parse::<u32>() {
+                            info!("Bundle request for device ID: {}", device_id);
+                            
+                            // Get our own device ID to check if this request is for us
+                            let our_device_id = {
+                                let manager_guard = omemo_manager.lock().await;
+                                manager_guard.get_device_id()
+                            };
+                            
+                            if device_id == our_device_id {
+                                info!("Responding to bundle request for our device ID: {}", device_id);
+                                
+                                // Get our bundle data
+                                let bundle_xml = {
+                                    let manager_guard = omemo_manager.lock().await;
+                                    match manager_guard.get_key_bundle_xml() {
+                                        Ok(xml) => xml,
+                                        Err(e) => {
+                                            error!("Failed to get bundle XML: {}", e);
+                                            return Self::send_pubsub_error_response(client, from, id, "internal-server-error").await;
+                                        }
+                                    }
+                                };
+                                
+                                // Send successful response with bundle data
+                                return Self::send_pubsub_bundle_response(client, from, id, node, &bundle_xml).await;
+                            } else {
+                                info!("Bundle request for different device ID: {} (ours: {})", device_id, our_device_id);
+                                return Self::send_pubsub_error_response(client, from, id, "item-not-found").await;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // If we get here, it's not a recognized pubsub request
+        warn!("Unhandled pubsub request from {}: {:?}", from, stanza);
+        Self::send_pubsub_error_response(client, from, id, "feature-not-implemented").await
+    }
+
+    /// Send a pubsub bundle response
+    async fn send_pubsub_bundle_response(
+        client: &Arc<TokioMutex<XMPPAsyncClient>>,
+        to: &str,
+        id: &str,
+        node: &str,
+        bundle_xml: &str,
+    ) -> Result<()> {
+        info!("Sending bundle response to {} for node {}", to, node);
+        
+        // Parse the bundle XML to extract just the bundle element
+        let bundle_element = match bundle_xml.parse::<xmpp_parsers::Element>() {
+            Ok(elem) => elem,
+            Err(e) => {
+                error!("Failed to parse bundle XML: {}", e);
+                return Self::send_pubsub_error_response(client, to, id, "internal-server-error").await;
+            }
+        };
+        
+        // Create the pubsub response structure
+        let item_element = xmpp_parsers::Element::builder("item", "http://jabber.org/protocol/pubsub")
+            .attr("id", "current")
+            .append(bundle_element)
+            .build();
+        
+        let items_element = xmpp_parsers::Element::builder("items", "http://jabber.org/protocol/pubsub")
+            .attr("node", node)
+            .append(item_element)
+            .build();
+        
+        let pubsub_element = xmpp_parsers::Element::builder("pubsub", "http://jabber.org/protocol/pubsub")
+            .append(items_element)
+            .build();
+        
+        let response_iq = xmpp_parsers::Element::builder("iq", "jabber:client")
+            .attr("type", "result")
+            .attr("to", to)
+            .attr("id", id)
+            .append(pubsub_element)
+            .build();
+        
+        let mut client_guard = client.lock().await;
+        match client_guard.send_stanza(response_iq).await {
+            Ok(_) => {
+                info!("Successfully sent bundle response to {}", to);
+                Ok(())
+            }
+            Err(e) => {
+                error!("Failed to send bundle response to {}: {}", to, e);
+                Err(anyhow!("Failed to send bundle response: {}", e))
+            }
+        }
+    }
+
+    /// Send a pubsub error response
+    async fn send_pubsub_error_response(
+        client: &Arc<TokioMutex<XMPPAsyncClient>>,
+        to: &str,
+        id: &str,
+        error_type: &str,
+    ) -> Result<()> {
+        info!("Sending pubsub error response to {}: {}", to, error_type);
+        
+        let error_element = match error_type {
+            "item-not-found" => {
+                xmpp_parsers::Element::builder("error", "jabber:client")
+                    .attr("type", "cancel")
+                    .append(
+                        xmpp_parsers::Element::builder("item-not-found", "urn:ietf:params:xml:ns:xmpp-stanzas").build()
+                    )
+                    .build()
+            }
+            "feature-not-implemented" => {
+                xmpp_parsers::Element::builder("error", "jabber:client")
+                    .attr("type", "cancel")
+                    .append(
+                        xmpp_parsers::Element::builder("feature-not-implemented", "urn:ietf:params:xml:ns:xmpp-stanzas").build()
+                    )
+                    .build()
+            }
+            "internal-server-error" => {
+                xmpp_parsers::Element::builder("error", "jabber:client")
+                    .attr("type", "wait")
+                    .append(
+                        xmpp_parsers::Element::builder("internal-server-error", "urn:ietf:params:xml:ns:xmpp-stanzas").build()
+                    )
+                    .build()
+            }
+            _ => {
+                xmpp_parsers::Element::builder("error", "jabber:client")
+                    .attr("type", "cancel")
+                    .append(
+                        xmpp_parsers::Element::builder("bad-request", "urn:ietf:params:xml:ns:xmpp-stanzas").build()
+                    )
+                    .build()
+            }
+        };
+        
+        let error_iq = xmpp_parsers::Element::builder("iq", "jabber:client")
+            .attr("type", "error")
+            .attr("to", to)
+            .attr("id", id)
+            .append(error_element)
+            .build();
+        
+        let mut client_guard = client.lock().await;
+        match client_guard.send_stanza(error_iq).await {
+            Ok(_) => {
+                info!("Successfully sent error response to {}", to);
+                Ok(())
+            }
+            Err(e) => {
+                error!("Failed to send error response to {}: {}", to, e);
+                Err(anyhow!("Failed to send error response: {}", e))
             }
         }
     }

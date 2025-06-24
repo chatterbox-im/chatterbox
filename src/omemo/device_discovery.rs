@@ -164,9 +164,8 @@ fn parse_device_list_response_static(response: &str) -> Result<Vec<u32>, OmemoEr
 }
 
 /// Known OMEMO namespace variations
-pub const OMEMO_NAMESPACES: [&str; 2] = [
-    "urn:xmpp:omemo:1",                 // Official XEP-0384 namespace (try first)
-    "eu.siacs.conversations.axolotl"    // Original/legacy namespace (fallback)
+pub const OMEMO_NAMESPACES: [&str; 1] = [
+    "eu.siacs.conversations.axolotl"    // Legacy namespace that actually works
 ];
 
 /// Known node format patterns
@@ -206,6 +205,9 @@ pub async fn fetch_device_list_with_fallbacks(jid: &str) -> Result<Vec<DeviceId>
     for namespace in &OMEMO_NAMESPACES {
         debug!("[OMEMO] Trying with namespace: {}", namespace);
         
+        // Track if we got any valid response (even empty) for this namespace
+        let mut namespace_had_valid_response = false;
+        
         // Try each node format
         for format in &NODE_FORMATS {
             let node = format.replace("{}", namespace);
@@ -241,7 +243,9 @@ pub async fn fetch_device_list_with_fallbacks(jid: &str) -> Result<Vec<DeviceId>
                             return Ok(combined_devices);
                         },
                         Ok(_) => {
-                            debug!("[OMEMO] No devices found with node {}", node);
+                            debug!("[OMEMO] No devices found with node {} (empty list or item-not-found)", node);
+                            // This is a valid response but with no devices - continue to next namespace
+                            namespace_had_valid_response = true;
                         },
                         Err(e) => {
                             debug!("[OMEMO] Error parsing device list response from node {}: {}", node, e);
@@ -255,6 +259,12 @@ pub async fn fetch_device_list_with_fallbacks(jid: &str) -> Result<Vec<DeviceId>
                     debug!("[OMEMO] Timeout while fetching from node {}", node);
                 }
             }
+        }
+        
+        // If this namespace had a valid response but no devices, we tried the server
+        // and it doesn't have devices for this namespace - continue to the next one
+        if namespace_had_valid_response {
+            debug!("[OMEMO] Namespace {} had valid response but no devices, trying next namespace", namespace);
         }
     }
     

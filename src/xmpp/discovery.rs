@@ -286,7 +286,7 @@ impl ServiceDiscovery {
         let discovered_features = self.discovered_features.lock().await;
         
         if let Some(features) = discovered_features.get(jid) {
-            features.iter().any(|f| f.namespace == "urn:xmpp:omemo:1" || f.namespace == "eu.siacs.conversations.axolotl")
+            features.iter().any(|f| f.namespace == "eu.siacs.conversations.axolotl")
         } else {
             false
         }
@@ -324,7 +324,7 @@ impl ServiceDiscovery {
         // Add supported features
         let features = vec![
             // Core XMPP and OMEMO
-            "urn:xmpp:omemo:1",  // OMEMO encryption (standard namespace)
+            "eu.siacs.conversations.axolotl", // OMEMO encryption (legacy namespace that actually works)
             "eu.siacs.conversations.axolotl", // Legacy OMEMO namespace for compatibility
             
             // Chat features

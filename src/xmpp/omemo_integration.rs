@@ -27,6 +27,9 @@ use crate::omemo::OmemoError;
 // Global client reference for publishing operations
 lazy_static::lazy_static! {
     static ref CURRENT_CLIENT: std::sync::RwLock<Option<Arc<TokioMutex<XMPPAsyncClient>>>> = std::sync::RwLock::new(None);
+    
+    // Global map for storing pubsub responses by request ID
+    static ref PUBSUB_RESPONSES: TokioMutex<std::collections::HashMap<String, String>> = TokioMutex::new(std::collections::HashMap::new());
 }
 
 /// Set the current client for publishing operations
@@ -2365,167 +2368,71 @@ pub async fn request_pubsub_items(
     let start_time = tokio::time::Instant::now();
     
     while tokio::time::Instant::now().duration_since(start_time) < timeout {
-        // Get the lock for each iteration
-        let mut client_guard = client_ref.lock().await;
-        
-        match tokio::time::timeout(
-            Duration::from_millis(500),
-            client_guard.next()
-        ).await {
-            Ok(Some(tokio_xmpp::Event::Stanza(stanza))) => {
-                if stanza.name() == "iq" && stanza.attr("id") == Some(&request_id) {
-                    //debug!("Received PubSub response for ID: {}", request_id);
-                    
-                    // Log more details about the response for debugging
-                    if stanza.attr("type") == Some("error") {
-                        if let Some(error) = stanza.get_child("error", "") {
-                            let error_type = error.attr("type").unwrap_or("unknown");
-                            warn!("Error in PubSub response: type={}", error_type);
-                            
-                            for child in error.children() {
-                                warn!("Error condition: {}", child.name());
-                            }
-                        }
-                    }
-                    
-                    // Convert to string for return
-                    let mut xml_output = Vec::new();
-                    let mut writer = xml::EmitterConfig::new()
-                        .perform_indent(true)
-                        .create_writer(&mut xml_output);
-                    
-                    writer.write(xml::writer::XmlEvent::StartDocument {
-                        version: xml::common::XmlVersion::Version10,
-                        encoding: Some("utf-8"),
-                        standalone: None,
-                    }).ok();
-                    
-                    // Serialize the element
-                    fn serialize_element<W: std::io::Write>(
-                        element: &xmpp_parsers::Element,
-                        writer: &mut xml::writer::EventWriter<W>,
-                    ) -> Result<()> {
-                        // Start element with namespace
-                        let mut start = xml::writer::XmlEvent::start_element(element.name());
-                        
-                        // Add namespace if not empty
-                        if !element.ns().is_empty() {
-                            start = start.ns("", element.ns());
-                        }
-                        
-                        // Add attributes
-                        for (name, value) in element.attrs() {
-                            start = start.attr(name, value);
-                        }
-                        
-                        writer.write(start).map_err(|e| anyhow!("XML write error: {}", e))?;
-                        
-                        // Process children
-                        for child in element.children() {
-                            serialize_element(child, writer)?;
-                        }
-                        
-                        // Add text content
-                        let text = element.text();
-                        if !text.is_empty() {
-                            writer.write(xml::writer::XmlEvent::Characters(&text))
-                                .map_err(|e| anyhow!("XML write error: {}", e))?;
-                        }
-                        
-                        // End element
-                        writer.write(xml::writer::XmlEvent::end_element())
-                            .map_err(|e| anyhow!("XML write error: {}", e))?;
-                        
-                        Ok(())
-                    }
-                    
-                    serialize_element(&stanza, &mut writer)?;
-                    
-                    let response = String::from_utf8_lossy(&xml_output).to_string();
-                    //debug!("PubSub response serialized: {}", response);
-                    
-                    return Ok(response);
-                }
-            },
-            Ok(Some(tokio_xmpp::Event::Disconnected(reason))) => {
-                return Err(anyhow!("Disconnected while waiting for PubSub response: {:?}", reason));
-            },
-            Ok(None) => {
-                return Err(anyhow!("Stream ended while waiting for PubSub response"));
-            },
-            Err(_) => {
-                // Timeout on this attempt, continue the loop
-            },
-            _ => { /* Ignore other events */ }
+        // Check if we have the response in our global map
+        if let Some(response) = get_pubsub_response(&request_id).await {
+            //debug!("Found response for request ID: {}", request_id);
+            return Ok(response);
         }
         
-        // Drop the guard to avoid holding the lock for too long
-        drop(client_guard);
-        
-        // Small sleep to avoid tight loop
+        // Sleep briefly before checking again
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     
-    // If we timeout, handle it gracefully
-    warn!("Timed out waiting for PubSub response for node {}", node);
-    
-    // Check if we're in development mode
-    let is_development = cfg!(debug_assertions);
-    
-    // For device list queries, return an empty list
-    if node.contains("devicelist") {
-        //debug!("Returning empty device list response as fallback");
-        let empty_list_response = format!(r#"<?xml version="1.0" encoding="utf-8"?>
-<iq type="result" id="{}">
-  <pubsub xmlns="http://jabber.org/protocol/pubsub">
-    <items node="{}">
-      <item id="current">
-        <list xmlns="eu.siacs.conversations.axolotl"/>
-      </item>
-    </items>
-  </pubsub>
-</iq>"#, request_id, node);
+    error!("Timeout waiting for PubSub response for request {}", request_id);
+    Err(anyhow!("Timeout waiting for PubSub response"))
+}
+
+/// Store a pubsub response by request ID
+pub async fn store_pubsub_response(request_id: String, xml_response: String) {
+    let mut responses = PUBSUB_RESPONSES.lock().await;
+    responses.insert(request_id, xml_response);
+}
+
+/// Retrieve a pubsub response by request ID
+pub async fn get_pubsub_response(request_id: &str) -> Option<String> {
+    let mut responses = PUBSUB_RESPONSES.lock().await;
+    responses.remove(request_id)
+}
+
+/// Convert an Element to XML string
+pub fn element_to_xml_string(element: &xmpp_parsers::Element) -> String {
+    // Convert to proper XML string manually since Element doesn't implement Display
+    fn element_to_xml_recursive(element: &xmpp_parsers::Element) -> String {
+        let mut xml = String::new();
         
-        // In production, log this as a warning
-        if !is_development {
-            warn!("Using empty device list fallback in PRODUCTION mode for {}", from);
+        // Start tag with namespace
+        xml.push('<');
+        xml.push_str(element.name());
+        
+        // Add namespace if present
+        if !element.ns().is_empty() {
+            xml.push_str(&format!(" xmlns=\"{}\"", element.ns()));
         }
         
-        return Ok(empty_list_response);
-    }
-    
-    // For bundle requests, provide a mock bundle in development mode
-    // In production, return a proper error for bundle requests
-    if node.contains("bundles") {
-        if is_development {
-            //debug!("Generating mock bundle response as fallback (DEVELOPMENT MODE ONLY)");
-            let mock_bundle_response = format!(r#"<?xml version="1.0" encoding="utf-8"?>
-<iq type="result" id="{}">
-  <pubsub xmlns="http://jabber.org/protocol/pubsub">
-    <items node="{}">
-      <item id="current">
-        <bundle xmlns="eu.siacs.conversations.axolotl">
-          <signedPreKeyPublic signedPreKeyId="1">BFk67IWOxVrpMzwNhIZfGLVCec8QipcTa3q9Fa5l9Bw==</signedPreKeyPublic>
-          <signedPreKeySignature>RQalg0e2XhE7dJM7MB6Te0TrOh1pZ/GzfQmVEnBSB+6oC92rv1sRmXIWk61Gtxl9SPp/UYwIQZ2k1L8iFZEuDA==</signedPreKeySignature>
-          <identityKey>BeLW7HxZNJhGWj6WR4Ia2ypRnxu8xcDIKb8WzYuGZZA=</identityKey>
-          <prekeys>
-            <preKeyPublic preKeyId="1">BSs9Z6C0Qc9yfgzJK3tPw6qzI0S5/2UX+FjImVU31B8=</preKeyPublic>
-            <preKeyPublic preKeyId="2">BP1xx4eFH/LSs1XdTu5XA06qzHIXXaA4nskYCyJE/xg=</preKeyPublic>
-          </prekeys>
-        </bundle>
-      </item>
-    </items>
-  </pubsub>
-</iq>"#, request_id, node);
-            
-            return Ok(mock_bundle_response);
-        } else {
-            // In production, return a proper error for bundle requests
-            error!("Failed to retrieve bundle from {} (timeout)", from);
-            return Err(anyhow!("Failed to retrieve bundle from {} (timeout)", from));
+        // Add attributes
+        for (name, value) in element.attrs() {
+            xml.push_str(&format!(" {}=\"{}\"", name, value));
         }
+        xml.push('>');
+        
+        // Add text content
+        let text_content = element.text();
+        if !text_content.is_empty() {
+            xml.push_str(&text_content);
+        }
+        
+        // Add child elements
+        for child in element.children() {
+            xml.push_str(&element_to_xml_recursive(child));
+        }
+        
+        // End tag
+        xml.push_str("</");
+        xml.push_str(element.name());
+        xml.push('>');
+        
+        xml
     }
     
-    // For other types of requests, return a generic error
-    return Err(anyhow!("Timed out waiting for PubSub response for node {}", node));
+    element_to_xml_recursive(element)
 }
