@@ -877,8 +877,19 @@ pub mod utils {
         let ciphertext = BASE64.decode(payload_text)
             .map_err(|e| XmlError::EncodingError(format!("Failed to decode payload: {}", e)))?;
         
+        // Get the MAC from the header
+        let mac_elem = header.children()
+            .find(|n| n.has_tag_name("mac"))
+            .ok_or(XmlError::MissingElementError("mac element not found".to_string()))?;
+        
+        let mac_text = mac_elem.text()
+            .ok_or(XmlError::MissingElementError("mac text not found".to_string()))?;
+        
+        let mac = BASE64.decode(mac_text)
+            .map_err(|e| XmlError::EncodingError(format!("Failed to decode mac: {}", e)))?;
+        
         // For this simplified implementation, we'll use placeholder values for ratchet_key,
-        // previous_counter, counter, and mac, which would normally be part of the Double Ratchet message
+        // previous_counter, counter which would normally be part of the Double Ratchet message
         
         // Create the OMEMO message
         let message = OmemoMessage {
@@ -887,7 +898,7 @@ pub mod utils {
             previous_counter: 0,      // Placeholder
             counter: 0,               // Placeholder
             ciphertext,
-            mac: vec![0; 16],         // Placeholder
+            mac,                      // Now using the actual MAC from XML
             iv,
             encrypted_keys,
         };
@@ -908,6 +919,11 @@ pub mod utils {
         xml.push_str("<iv>");
         xml.push_str(&BASE64.encode(&message.iv));
         xml.push_str("</iv>");
+        
+        // MAC
+        xml.push_str("<mac>");
+        xml.push_str(&BASE64.encode(&message.mac));
+        xml.push_str("</mac>");
         
         // Keys
         for (device_id, key) in &message.encrypted_keys {

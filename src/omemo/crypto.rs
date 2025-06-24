@@ -216,10 +216,6 @@ pub fn encrypt_data(
     iv: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
 
-    error!("ADRIAN DEBUG encrypt_data - data len: {}, key len: {}, iv len: {}", data.len(), key.len(), iv.len());
-    error!("ADRIAN DEBUG encrypt_data - key: {}", hex::encode(key));
-    error!("ADRIAN DEBUG encrypt_data - iv: {}", hex::encode(iv));
-    error!("ADRIAN DEBUG encrypt_data - data: {}", hex::encode(data));
     trace!("Encryption key: {}", hex::encode(key));
     trace!("IV: {}", hex::encode(iv));
     
@@ -272,10 +268,6 @@ pub fn decrypt_data(
     iv: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
 
-    error!("ADRIAN DEBUG decrypt_data - data len: {}, key len: {}, iv len: {}", data.len(), key.len(), iv.len());
-    error!("ADRIAN DEBUG decrypt_data - key: {}", hex::encode(key));
-    error!("ADRIAN DEBUG decrypt_data - iv: {}", hex::encode(iv));
-    error!("ADRIAN DEBUG decrypt_data - data: {}", hex::encode(data));
     trace!("Decryption key: {}", hex::encode(key));
     trace!("IV: {}", hex::encode(iv));
     trace!("Ciphertext: {}", hex::encode(data));
@@ -662,5 +654,68 @@ mod tests {
         assert_eq!(result_32, result_33);
     }
 
-    // ...existing tests...
+    #[test]
+    fn test_mac_verification_workflow() {
+        // Test the complete MAC generation and verification workflow as used in OMEMO
+        
+        // 1. Generate a random 32-byte message key (as done in encrypt_message)
+        let random_key = generate_message_key();
+        
+        // 2. Use HKDF to derive keys (as done in encrypt_message)
+        let salt = vec![0u8; 32];
+        let info = b"OMEMO Payload";
+        let derived_keys = hkdf_derive(&salt, &random_key, info, 80).unwrap();
+        
+        // 3. Split the derived keys (as done in encrypt_message)
+        let encryption_key = &derived_keys[0..32];
+        let authentication_key = &derived_keys[32..64];
+        let iv = &derived_keys[64..80];
+        
+        // 4. Encrypt some plaintext with AES-CBC
+        let plaintext = b"Hello, this is a test message for MAC verification!";
+        let ciphertext = encrypt_data(plaintext, encryption_key, iv).unwrap();
+        
+        // 5. Generate MAC over ciphertext (as done in encrypt_message)
+        let mac = hmac_sha256(authentication_key, &ciphertext).unwrap();
+        
+        // 6. Verify MAC (as done in decrypt_message)
+        let verified_mac = hmac_sha256(authentication_key, &ciphertext).unwrap();
+        assert!(secure_compare(&mac, &verified_mac), "MAC verification should succeed");
+        
+        // 7. Test that MAC verification fails with wrong key
+        let wrong_key = generate_message_key();
+        let wrong_derived = hkdf_derive(&salt, &wrong_key, info, 80).unwrap();
+        let wrong_auth_key = &wrong_derived[32..64];
+        let wrong_mac = hmac_sha256(wrong_auth_key, &ciphertext).unwrap();
+        assert!(!secure_compare(&mac, &wrong_mac), "MAC verification should fail with wrong key");
+        
+        // 8. Test that MAC verification fails with tampered ciphertext
+        let mut tampered_ciphertext = ciphertext.clone();
+        tampered_ciphertext[0] ^= 0x01; // Flip one bit
+        let tampered_mac = hmac_sha256(authentication_key, &tampered_ciphertext).unwrap();
+        assert!(!secure_compare(&mac, &tampered_mac), "MAC verification should fail with tampered data");
+        
+        // 9. Verify that decryption still works with correct MAC
+        let decrypted = decrypt_data(&ciphertext, encryption_key, iv).unwrap();
+        assert_eq!(decrypted, plaintext, "Decryption should succeed with correct MAC");
+        
+        println!("MAC verification workflow test passed!");
+        println!("Original message: {}", String::from_utf8_lossy(plaintext));
+        println!("MAC: {}", hex::encode(&mac));
+        println!("Ciphertext: {}", hex::encode(&ciphertext));
+    }
+    
+    #[test]
+    fn test_secure_compare() {
+        let data1 = vec![0x01, 0x02, 0x03, 0x04];
+        let data2 = vec![0x01, 0x02, 0x03, 0x04];
+        let data3 = vec![0x01, 0x02, 0x03, 0x05];
+        let data4 = vec![0x01, 0x02, 0x03]; // Different length
+        
+        assert!(secure_compare(&data1, &data2), "Identical data should compare as equal");
+        assert!(!secure_compare(&data1, &data3), "Different data should compare as not equal");
+        assert!(!secure_compare(&data1, &data4), "Different length data should compare as not equal");
+    }
+
+    // ...existing code...
 }

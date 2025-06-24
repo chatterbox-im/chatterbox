@@ -712,10 +712,18 @@ impl OmemoManager {
         debug!("Derived AES key ({} bytes), HMAC key ({} bytes), and CBC IV ({} bytes) using HKDF",
             encryption_key.len(), authentication_key.len(), iv.len());
         
-        // For OMEMO, the MAC verification is not needed when parsing from XML
-        // The MAC is only used internally during encryption/decryption
-        // and is verified through AES-CBC padding validation
-        debug!("Skipping separate HMAC verification (handled by AES-CBC padding)");
+        // Verify the HMAC-SHA256 tag before decryption for message authentication
+        debug!("Verifying HMAC-SHA256 tag for message authentication");
+        let expected_mac = crypto::hmac_sha256(authentication_key, &message.ciphertext)
+            .map_err(|e| OmemoError::CryptoError(e))?;
+        
+        if !crypto::secure_compare(&message.mac, &expected_mac) {
+            error!("HMAC verification failed - message authentication failed");
+            return Err(OmemoError::CryptoError(
+                crypto::CryptoError::HmacError("Message authentication failed - HMAC mismatch".to_string())
+            ));
+        }
+        debug!("HMAC verification successful - message is authentic");
         
         // If HMAC is valid, decrypt the ciphertext using the encryption key and IV
         let plaintext = crypto::decrypt_data(&message.ciphertext, encryption_key, iv)
