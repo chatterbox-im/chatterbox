@@ -192,6 +192,9 @@ pub struct OmemoMessage {
     
     /// Encrypted keys for each recipient device
     pub encrypted_keys: HashMap<DeviceId, Vec<u8>>,
+    
+    /// Whether this message is a PreKey message (forces new session creation)
+    pub is_prekey: bool,
 }
 
 /// Double Ratchet implementation for OMEMO
@@ -302,17 +305,15 @@ impl X3DHProtocol {
         }
     }
     
-    /// Perform X3DH key agreement as the initiator
-    pub fn key_agreement_initiator(
+    /// Perform X3DH key agreement as the initiator with a provided ephemeral key
+    pub fn key_agreement_initiator_with_ephemeral(
         identity_key_pair: &KeyPair,
         their_identity_key: &[u8],
         their_signed_pre_key: &[u8],
         their_one_time_pre_key: Option<&[u8]>,
+        ephemeral_key: &[u8], // Use provided ephemeral key instead of generating
     ) -> Result<Vec<u8>, DoubleRatchetError> {
-        // Generate an ephemeral key pair
-        let ephemeral_key_pair = Self::generate_key_pair()?;
-        
-        // Perform the key agreement
+        // Perform the key agreement using the provided ephemeral key
         let mut dh_values = Vec::new();
         
         // DH1 = DH(IKa, SPKb)
@@ -324,14 +325,14 @@ impl X3DHProtocol {
         
         // DH2 = DH(EKa, IKb)
         let dh2 = crypto::x25519_diffie_hellman(
-            &ephemeral_key_pair.private_key,
+            ephemeral_key,
             their_identity_key,
         ).map_err(DoubleRatchetError::CryptoError)?;
         dh_values.push(dh2);
         
         // DH3 = DH(EKa, SPKb)
         let dh3 = crypto::x25519_diffie_hellman(
-            &ephemeral_key_pair.private_key,
+            ephemeral_key,
             their_signed_pre_key,
         ).map_err(DoubleRatchetError::CryptoError)?;
         dh_values.push(dh3);
@@ -339,7 +340,7 @@ impl X3DHProtocol {
         // DH4 = DH(EKa, OPKb) (if OPKb exists)
         if let Some(their_one_time_pre_key) = their_one_time_pre_key {
             let dh4 = crypto::x25519_diffie_hellman(
-                &ephemeral_key_pair.private_key,
+                ephemeral_key,
                 their_one_time_pre_key,
             ).map_err(DoubleRatchetError::CryptoError)?;
             dh_values.push(dh4);
@@ -354,9 +355,31 @@ impl X3DHProtocol {
         // Use HKDF to derive the shared key
         let salt = vec![0u8; 32]; // Zero salt
         let info = b"OMEMO X3DH";
-        let shared_key = crypto::kdf(&concat_dh, &salt, info);
         
-        Ok(shared_key)
+        let shared_secret = crypto::hkdf_derive(&salt, &concat_dh, info, 32)
+            .map_err(DoubleRatchetError::CryptoError)?;
+        
+        Ok(shared_secret)
+    }
+
+    /// Perform X3DH key agreement as the initiator
+    pub fn key_agreement_initiator(
+        identity_key_pair: &KeyPair,
+        their_identity_key: &[u8],
+        their_signed_pre_key: &[u8],
+        their_one_time_pre_key: Option<&[u8]>,
+    ) -> Result<Vec<u8>, DoubleRatchetError> {
+        // Generate an ephemeral key pair
+        let ephemeral_key_pair = Self::generate_key_pair()?;
+        
+        // Use the new function with the generated ephemeral key
+        Self::key_agreement_initiator_with_ephemeral(
+            identity_key_pair,
+            their_identity_key,
+            their_signed_pre_key,
+            their_one_time_pre_key,
+            &ephemeral_key_pair.private_key,
+        )
     }
     
     /// Perform X3DH key agreement as the recipient
@@ -416,6 +439,57 @@ impl X3DHProtocol {
 }
 
 impl DoubleRatchet {
+    /// Create a new Double Ratchet session as the initiator with deterministic ephemeral key
+    pub fn new_session_initiator_with_ephemeral(
+        local_identity_key_pair: KeyPair,
+        remote_identity_key: Vec<u8>,
+        remote_signed_prekey: Vec<u8>,
+        remote_one_time_prekey: Option<Vec<u8>>,
+        ephemeral_key: Vec<u8>, // Use provided ephemeral key
+        local_device_id: DeviceId,
+        remote_device_id: DeviceId,
+        remote_jid: String,
+    ) -> Result<RatchetState, DoubleRatchetError> {
+        // Perform X3DH key agreement with the provided ephemeral key
+        let shared_secret = X3DHProtocol::key_agreement_initiator_with_ephemeral(
+            &local_identity_key_pair,
+            &remote_identity_key,
+            &remote_signed_prekey,
+            remote_one_time_prekey.as_deref(),
+            &ephemeral_key,
+        )?;
+        
+        // Generate an initial ratchet key pair
+        let ratchet_key_pair = X3DHProtocol::generate_key_pair()?;
+        
+        // Initialize the sending and root chains
+        let root_key = shared_secret;
+        let send_chain_key = crypto::kdf(&root_key, &ratchet_key_pair.public_key, b"send_chain");
+        
+        // Create the state
+        let state = RatchetState {
+            initialized: true,
+            is_initiator: true,
+            remote_identity_key,
+            local_identity_key_pair,
+            root_key,
+            send_chain_key,
+            receive_chain_key: vec![],
+            ratchet_key_pair,
+            remote_ratchet_key: vec![],
+            prev_remote_ratchet_key: vec![],
+            send_message_number: 0,
+            receive_message_number: 0,
+            prev_receive_message_number: 0,
+            skipped_message_keys: std::collections::HashMap::new(),
+            local_device_id,
+            remote_device_id,
+            remote_jid: normalize_jid_to_bare(&remote_jid),
+        };
+        
+        Ok(state)
+    }
+
     /// Create a new Double Ratchet session as the initiator
     pub fn new_session_initiator(
         local_identity_key_pair: KeyPair,
@@ -436,8 +510,6 @@ impl DoubleRatchet {
         
         // Generate an initial ratchet key pair
         let ratchet_key_pair = X3DHProtocol::generate_key_pair()?;
-        
-        // Initialize the sending and root chains
         let root_key = shared_secret;
         let send_chain_key = crypto::kdf(&root_key, &remote_signed_prekey, b"send_chain");
         
@@ -538,6 +610,7 @@ impl DoubleRatchet {
             mac,
             iv,
             encrypted_keys: std::collections::HashMap::new(),
+            is_prekey: false, // Regular message, not a PreKey message
         };
         
         // Increment message counter
@@ -927,6 +1000,7 @@ pub mod utils {
             mac,                      // Now using the actual MAC from XML
             iv,
             encrypted_keys,
+            is_prekey: false,         // Will be determined by the receiver logic
         };
         
         Ok(message)

@@ -249,11 +249,27 @@ pub async fn fetch_device_list_with_fallbacks(jid: &str) -> Result<Vec<DeviceId>
                         },
                         Err(e) => {
                             debug!("[OMEMO] Error parsing device list response from node {}: {}", node, e);
+                            
+                            // If we get feature-not-implemented, the server doesn't support OMEMO at all
+                            // Stop trying and return empty list immediately
+                            if e.to_string().contains("feature-not-implemented") {
+                                warn!("[OMEMO] Server {} doesn't support OMEMO (feature-not-implemented)", jid);
+                                drop(client_guard);
+                                return Ok(Vec::new());
+                            }
                         }
                     }
                 },
                 Ok(Err(e)) => {
                     debug!("[OMEMO] Failed to fetch from node {}: {}", node, e);
+                    
+                    // If we get feature-not-implemented, the server doesn't support OMEMO at all
+                    // Stop trying and return empty list immediately
+                    if e.to_string().contains("feature-not-implemented") {
+                        warn!("[OMEMO] Server {} doesn't support OMEMO (feature-not-implemented)", jid);
+                        drop(client_guard);
+                        return Ok(Vec::new());
+                    }
                 },
                 Err(_) => {
                     debug!("[OMEMO] Timeout while fetching from node {}", node);

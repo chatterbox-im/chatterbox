@@ -875,6 +875,7 @@ impl super::XMPPClient {
                         keys.insert(own_device_id, key);
                         keys
                     },
+                    is_prekey: false,     // Will be determined by session state
                 }
             ).await {
                 Ok(content) => content,

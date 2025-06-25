@@ -579,6 +579,7 @@ impl super::XMPPClient {
                 mac: vec![], // The MAC will be verified by the session
                 iv,
                 encrypted_keys,
+                is_prekey: false,     // Will be determined by session state
             };
             
             // Try to decrypt the message

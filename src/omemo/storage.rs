@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::fs;
 use crate::omemo::protocol::{DeviceIdentity, X3DHKeyBundle, RatchetState};
 use crate::omemo::device_id::DeviceId;
-use log::error;
+use log::{error, debug};
 use once_cell::sync::OnceCell;
 use crate::omemo::device_id;
 use bincode;
@@ -387,6 +387,29 @@ impl OmemoStorage {
         }
     }
     
+    /// Delete a session
+    pub fn delete_session(&self, session_key: &str) -> Result<()> {
+        // Parse session key (format: "jid:device_id")
+        let parts: Vec<&str> = session_key.split(':').collect();
+        if parts.len() != 2 {
+            return Err(anyhow::anyhow!("Invalid session key format: {}", session_key));
+        }
+        
+        let jid = parts[0];
+        let device_id = parts[1].parse::<DeviceId>()
+            .map_err(|_| anyhow::anyhow!("Invalid device ID in session key: {}", parts[1]))?;
+        
+        let jid_dir = self.get_jid_path("sessions", jid);
+        let session_dir = jid_dir.join(device_id.to_string());
+        
+        if session_dir.exists() {
+            fs::remove_dir_all(&session_dir)?;
+            debug!("Deleted session directory: {:?}", session_dir);
+        }
+        
+        Ok(())
+    }
+
     /// Store the timestamp of the last PreKey rotation
     pub fn store_prekey_rotation_time(&self, timestamp: i64) -> Result<()> {
         let metadata_path = self.base_path.join("metadata").join("prekey_rotation_time");
@@ -606,6 +629,102 @@ impl OmemoStorage {
         
         Ok(identities)
     }
+
+    /// Update the last undecryptable message timestamp for a device
+    pub fn update_last_undecryptable_message(&self, jid: &str, device_id: DeviceId, timestamp: i64) -> Result<()> {
+        let device_dir = self.get_device_metadata_dir(jid, device_id)?;
+        fs::create_dir_all(&device_dir)?;
+        
+        let undecryptable_file = device_dir.join("last_undecryptable");
+        fs::write(&undecryptable_file, timestamp.to_string())?;
+        
+        // Also increment failure count
+        let failure_count = self.get_device_failure_count(jid, device_id).unwrap_or(0) + 1;
+        let failure_file = device_dir.join("failure_count");
+        fs::write(&failure_file, failure_count.to_string())?;
+        
+        debug!("Updated undecryptable message timestamp for {}:{} to {}", jid, device_id, timestamp);
+        Ok(())
+    }
+
+    /// Set the ignore-until timestamp for a device
+    pub fn set_device_ignore_until(&self, jid: &str, device_id: DeviceId, ignore_until: std::time::SystemTime) -> Result<()> {
+        let device_dir = self.get_device_metadata_dir(jid, device_id)?;
+        fs::create_dir_all(&device_dir)?;
+        
+        let timestamp = ignore_until.duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64;
+        let ignore_file = device_dir.join("ignore_until");
+        fs::write(&ignore_file, timestamp.to_string())?;
+        
+        debug!("Set device ignore until timestamp for {}:{} to {}", jid, device_id, timestamp);
+        Ok(())
+    }
+
+    /// Get the ignore-until timestamp for a device
+    pub fn get_device_ignore_until(&self, jid: &str, device_id: DeviceId) -> Result<Option<std::time::SystemTime>> {
+        let device_dir = self.get_device_metadata_dir(jid, device_id)?;
+        let ignore_file = device_dir.join("ignore_until");
+        
+        if !ignore_file.exists() {
+            return Ok(None);
+        }
+        
+        let timestamp_str = fs::read_to_string(&ignore_file)?;
+        let timestamp: i64 = timestamp_str.trim().parse()?;
+        let system_time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(timestamp as u64);
+        
+        Ok(Some(system_time))
+    }
+
+    /// Clear the ignore status for a device (remove ignore_until file)
+    pub fn clear_device_ignore_status(&self, jid: &str, device_id: DeviceId) -> Result<()> {
+        let device_dir = self.get_device_metadata_dir(jid, device_id)?;
+        let ignore_file = device_dir.join("ignore_until");
+        
+        if ignore_file.exists() {
+            fs::remove_file(&ignore_file)?;
+            debug!("Cleared ignore status for {}:{}", jid, device_id);
+        }
+        
+        Ok(())
+    }
+
+    /// Get the failure count for a device
+    pub fn get_device_failure_count(&self, jid: &str, device_id: DeviceId) -> Result<u32> {
+        let device_dir = self.get_device_metadata_dir(jid, device_id)?;
+        let failure_file = device_dir.join("failure_count");
+        
+        if !failure_file.exists() {
+            return Ok(0);
+        }
+        
+        let count_str = fs::read_to_string(&failure_file)?;
+        let count: u32 = count_str.trim().parse().unwrap_or(0);
+        
+        Ok(count)
+    }
+
+    /// Reset the failure count for a device
+    pub fn reset_device_failure_count(&self, jid: &str, device_id: DeviceId) -> Result<()> {
+        let device_dir = self.get_device_metadata_dir(jid, device_id)?;
+        let failure_file = device_dir.join("failure_count");
+        
+        if failure_file.exists() {
+            fs::remove_file(&failure_file)?;
+        }
+        
+        debug!("Reset failure count for {}:{}", jid, device_id);
+        Ok(())
+    }
+
+    /// Get the device metadata directory
+    fn get_device_metadata_dir(&self, jid: &str, device_id: DeviceId) -> Result<PathBuf> {
+        let jid_encoded = self.jid_to_alphanumeric(jid);
+        let device_dir = self.base_path.join("metadata").join(jid_encoded).join(device_id.to_string());
+        Ok(device_dir)
+    }
+
+    // ...existing code...
 }
 
 #[cfg(test)]
