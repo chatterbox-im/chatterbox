@@ -517,38 +517,35 @@ impl OmemoManager {
         info!("Found {} devices for recipient {}: {:?}", recipient_device_ids.len(), recipient, recipient_device_ids);
         info!("Found {} own devices: {:?}", own_device_ids.len(), own_device_ids);
         
-        // Per XEP-0384 Section 4.4, Step 1:
-        // Generate a random 32-byte message key
-        let random_key = crypto::generate_message_key();
-        debug!("Generated random 32-byte message key");
+        // Use Dino-compatible AES-GCM format by default
+        // Generate a 16-byte AES key and 12-byte IV (compatible with Dino/Signal)
+        let aes_key = crypto::generate_aes_key(); // 16 bytes
+        let iv = crypto::generate_gcm_iv(); // 12 bytes
+        debug!("Generated 16-byte AES-GCM key and 12-byte IV (Dino-compatible format)");
         
-        // Per XEP-0384 Section 4.4, Step 2:
-        // Use HKDF-SHA256 to derive keys from the random key
-        // Use 32 zero bytes as salt and "OMEMO Payload" as info
-        let salt = vec![0u8; 32];
-        let info = b"OMEMO Payload";
-        let derived_keys = crypto::hkdf_derive(&salt, &random_key, info, 80)
-            .map_err(|e| OmemoError::CryptoError(e))?;
-        
-        // Per XEP-0384 Section 4.4, Step 3:
-        // Split the derived keys into encryption key (32 bytes), authentication key (32 bytes), and IV (16 bytes)
-        let encryption_key = &derived_keys[0..32];
-        let authentication_key = &derived_keys[32..64];
-        let iv = &derived_keys[64..80];
-        debug!("Derived AES key ({} bytes), HMAC key ({} bytes), and CBC IV ({} bytes) using HKDF", 
-            encryption_key.len(), authentication_key.len(), iv.len());
-        
-        // Per XEP-0384 Section 4.4, Step 4:
-        // Encrypt the plaintext with AES-256-CBC using the encryption key and IV
-        let ciphertext = crypto::encrypt_data(plaintext.as_bytes(), encryption_key, iv)
+        // Encrypt the plaintext with AES-GCM
+        let gcm_result = crypto::aes_gcm_encrypt(plaintext.as_bytes(), &aes_key, &iv)
             .map_err(OmemoError::CryptoError)?;
-        debug!("Encrypted payload with AES-256-CBC ({})", ciphertext.len());
         
-        // Per XEP-0384 Section 4.4, Step 5:
-        // Calculate an HMAC-SHA256 tag using the authentication key over the ciphertext
-        let mac = crypto::hmac_sha256(authentication_key, &ciphertext)
-            .map_err(|e| OmemoError::CryptoError(e))?;
-        debug!("Generated HMAC-SHA256 tag ({} bytes)", mac.len());
+        // AES-GCM returns ciphertext + auth_tag combined
+        // We need to split them: the last 16 bytes are the auth tag
+        if gcm_result.len() < 16 {
+            return Err(OmemoError::CryptoError(crypto::CryptoError::InvalidInputError(
+                "AES-GCM result too short".to_string()
+            )));
+        }
+        
+        let ciphertext_len = gcm_result.len() - 16;
+        let ciphertext = gcm_result[0..ciphertext_len].to_vec();
+        let auth_tag = gcm_result[ciphertext_len..].to_vec();
+        
+        debug!("Encrypted payload with AES-GCM: ciphertext {} bytes, auth tag {} bytes", 
+            ciphertext.len(), auth_tag.len());
+        
+        // For Dino compatibility, the message key is aes_key + auth_tag (32 bytes total)
+        let mut message_key = aes_key.clone();
+        message_key.extend_from_slice(&auth_tag);
+        debug!("Created message key: {} bytes (16-byte AES key + 16-byte auth tag)", message_key.len());
         
         // Now encrypt the random key for each recipient device and our own devices
         let mut encrypted_keys = HashMap::new();
@@ -573,9 +570,9 @@ impl OmemoManager {
             }
         }
         
-        info!("Encrypting random key for {} total devices", all_devices.len());
+        info!("Encrypting message key for {} total devices", all_devices.len());
         
-        // Now encrypt the random key (not the derived keys) for all devices
+        // Now encrypt the message key (aes_key + auth_tag, 32 bytes) for all devices
         // Add overall timeout protection to prevent UI hangs
         let overall_timeout = Duration::from_secs(15); // Maximum 15 seconds for all session creations
         let session_creation_future = async {
@@ -586,12 +583,12 @@ impl OmemoManager {
                 
                 match session_result {
                     Ok(Ok(session)) => {
-                        // Encrypt the message key for this device
-                        match session.encrypt_key(&random_key) {
+                        // Encrypt the message key (aes_key + auth_tag) for this device
+                        match session.encrypt_key(&message_key) {
                             Ok(encrypted_key) => {
                                 encrypted_keys.insert(device_id, encrypted_key);
                                 device_list.push(device_id);
-                                debug!("Encrypted random key for {}:{}", jid, device_id);
+                                debug!("Encrypted message key for {}:{}", jid, device_id);
                             },
                             Err(e) => {
                                 warn!("Failed to encrypt message key for {}:{}: {}", jid, device_id, e);
@@ -617,16 +614,15 @@ impl OmemoManager {
             // Continue with whatever sessions we managed to create
         }
         
-        // Create the complete OMEMO message
-        // We're using the IV derived from HKDF for AES-CBC encryption (as per XEP-0384)
+        // Create the complete OMEMO message using Dino-compatible AES-GCM format
         let message = OmemoMessage {
             sender_device_id: self.device_id,
             ratchet_key: self.key_bundle.as_ref().unwrap().signed_pre_key_pair.public_key.clone(),
             previous_counter: 0,
             counter: 0,
             ciphertext,
-            mac,
-            iv: iv.to_vec(), // Using the IV derived from HKDF
+            mac: vec![], // AES-GCM doesn't use separate HMAC, auth tag is embedded in encrypted keys
+            iv: iv.to_vec(), // 12-byte IV for AES-GCM
             encrypted_keys,
         };
         
@@ -694,49 +690,45 @@ impl OmemoManager {
         };
         
         // Decrypt the message key using our session with the sender
-        // This key is the random 32-byte key that was used as input to HKDF
-        let random_key = session.decrypt_key(encrypted_key)?;
-        debug!("Decrypted random 32-byte key from the message");
-        debug!("Random key (hex): {}", hex::encode(&random_key));
+        let decrypted_key_data = session.decrypt_key(encrypted_key)?;
+        debug!("Decrypted key data ({} bytes): {}", decrypted_key_data.len(), hex::encode(&decrypted_key_data));
         
-        // The message format used here sends the IV derived from HKDF
-        // We need to derive the encryption key from the random key but use the IV from the message
-        let salt = vec![0u8; 32];
-        let info = b"OMEMO Payload";
-        let derived_keys = crypto::hkdf_derive(&salt, &random_key, info, 80)
-            .map_err(|e| OmemoError::CryptoError(e))?;
+        // Only support Dino-compatible AES-GCM format
+        // Expected: 32-byte key data (16-byte AES key + 16-byte auth tag) and 12-byte IV
+        if decrypted_key_data.len() != 32 {
+            error!("Invalid key data length: {} (expected 32 bytes for AES-GCM)", decrypted_key_data.len());
+            return Err(OmemoError::CryptoError(crypto::CryptoError::InvalidInputError(
+                format!("Invalid key data length: {} (expected 32 bytes for AES-GCM)", decrypted_key_data.len())
+            )));
+        }
         
-        // Use the derived encryption key and authentication key
-        let encryption_key = &derived_keys[0..32];
-        let authentication_key = &derived_keys[32..64];
-        let derived_iv = &derived_keys[64..80];
-        // But use the IV from the message (which is the same IV that was derived during encryption)
+        if message.iv.len() != 12 {
+            error!("Invalid IV length: {} (expected 12 bytes for AES-GCM)", message.iv.len());
+            return Err(OmemoError::CryptoError(crypto::CryptoError::InvalidIV(
+                format!("Invalid IV length: {} (expected 12 bytes for AES-GCM)", message.iv.len())
+            )));
+        }
+        
+        // Dino/Signal format: 16-byte AES key + 16-byte auth tag, 12-byte IV, AES-GCM
+        debug!("Using Dino/Signal format (AES-GCM): 32-byte key+tag, 12-byte IV");
+        let aes_key = &decrypted_key_data[0..16];
+        let auth_tag = &decrypted_key_data[16..32];
         let iv = &message.iv;
-        debug!("Using derived AES key ({} bytes), derived HMAC key ({} bytes), and message IV ({} bytes)",
-            encryption_key.len(), authentication_key.len(), iv.len());
-        debug!("Encryption key (hex): {}", hex::encode(encryption_key));
-        debug!("Derived IV (hex): {}", hex::encode(derived_iv));
-        debug!("Message IV (hex): {}", hex::encode(iv));
+        
+        debug!("AES-GCM key (hex): {}", hex::encode(aes_key));
+        debug!("Auth tag (hex): {}", hex::encode(auth_tag));
+        debug!("IV (hex): {}", hex::encode(iv));
         debug!("Ciphertext (hex): {}", hex::encode(&message.ciphertext));
         
-        // Verify that the derived IV matches the message IV (they should be identical)
-        if derived_iv != iv {
-            error!("IV mismatch! Derived IV: {}, Message IV: {}", hex::encode(derived_iv), hex::encode(iv));
-            return Err(OmemoError::CryptoError(crypto::CryptoError::InvalidInputError(
-                "IV mismatch between derived and message IV".to_string()
-            )));
-        } else {
-            debug!("IV verification passed - derived and message IVs match");
-        }
-
-        // Since the current message format doesn't include a separate MAC element,
-        // we skip HMAC verification and proceed directly to decryption
-        debug!("Skipping HMAC verification as message format doesn't include MAC element");
+        // Combine ciphertext + auth_tag for AES-GCM decryption
+        let mut gcm_ciphertext = message.ciphertext.clone();
+        gcm_ciphertext.extend_from_slice(auth_tag);
         
-        // Decrypt the ciphertext using the derived encryption key and the IV from the message
-        let plaintext = crypto::decrypt_data(&message.ciphertext, encryption_key, iv)
+        // Decrypt using AES-GCM
+        let plaintext = crypto::aes_gcm_decrypt(&gcm_ciphertext, aes_key, iv)
             .map_err(|e| OmemoError::CryptoError(e))?;
-        debug!("Decrypted payload with AES-256-CBC");
+        
+        debug!("Successfully decrypted payload");
         
         // Store the updated session state
         let ratchet_state = session.ratchet_state.clone();

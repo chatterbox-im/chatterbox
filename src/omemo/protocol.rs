@@ -8,6 +8,7 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use thiserror::Error;
+use log::debug;
 
 use crate::omemo::crypto;
 use crate::omemo::device_id::DeviceId;
@@ -690,41 +691,65 @@ impl DoubleRatchet {
 
     /// Encrypt a message key for transport
     pub fn encrypt_key(state: &mut RatchetState, key: &[u8]) -> Result<Vec<u8>, DoubleRatchetError> {
-        // Generate a random IV for CBC mode (16 bytes)
-        let iv = crypto::generate_cbc_iv();
+        debug!("Double Ratchet encrypt_key: key length: {}", key.len());
+        debug!("Double Ratchet encrypt_key: key hex: {}", hex::encode(key));
+        debug!("Double Ratchet encrypt_key: root_key: {}", hex::encode(&state.root_key));
         
-        // Derive a transport key from the root key
-        let transport_key = crypto::kdf(&state.root_key, &iv, b"transport");
+        // Generate a random IV for AES-GCM mode (12 bytes) - Dino compatible
+        let iv = crypto::generate_gcm_iv();
         
-        // Encrypt the key
-        let encrypted_key = crypto::encrypt_data(key, &transport_key, &iv)
+        debug!("Double Ratchet encrypt_key: IV: {}", hex::encode(&iv));
+        
+        // Derive a transport key from the root key (16 bytes for AES-128-GCM)
+        let transport_key_material = crypto::kdf(&state.root_key, &iv, b"transport");
+        let transport_key = &transport_key_material[0..16]; // Use first 16 bytes for AES-128
+        
+        debug!("Double Ratchet encrypt_key: transport_key: {}", hex::encode(transport_key));
+        
+        // Encrypt the key using AES-GCM
+        let encrypted_key = crypto::aes_gcm_encrypt(key, transport_key, &iv)
             .map_err(DoubleRatchetError::CryptoError)?;
+        
+        debug!("Double Ratchet encrypt_key: encrypted_key: {}", hex::encode(&encrypted_key));
         
         // Concatenate IV and encrypted key for storage/transport
         let mut result = Vec::new();
         result.extend_from_slice(&iv);
         result.extend_from_slice(&encrypted_key);
         
+        debug!("Double Ratchet encrypt_key: result length: {}", result.len());
+        debug!("Double Ratchet encrypt_key: result hex: {}", hex::encode(&result));
+        
         Ok(result)
     }
     
     /// Decrypt a message key from transport
     pub fn decrypt_key(state: &mut RatchetState, encrypted_key: &[u8]) -> Result<Vec<u8>, DoubleRatchetError> {
-        // Split IV and encrypted key (first 16 bytes are the IV for CBC mode)
-        if encrypted_key.len() < 16 {
+        debug!("Double Ratchet decrypt_key: encrypted_key length: {}", encrypted_key.len());
+        debug!("Double Ratchet decrypt_key: encrypted_key hex: {}", hex::encode(encrypted_key));
+        
+        // Split IV and encrypted key (first 12 bytes are the IV for AES-GCM mode)
+        if encrypted_key.len() < 12 {
             return Err(DoubleRatchetError::InvalidMessageFormatError(
-                "Encrypted key too short".to_string()
+                "Encrypted key too short for AES-GCM".to_string()
             ));
         }
         
-        let iv = &encrypted_key[0..16];
-        let cipher = &encrypted_key[16..];
+        let iv = &encrypted_key[0..12];
+        let cipher = &encrypted_key[12..];
         
-        // Derive the transport key
-        let transport_key = crypto::kdf(&state.root_key, iv, b"transport");
+        debug!("Double Ratchet decrypt_key: IV: {}", hex::encode(iv));
+        debug!("Double Ratchet decrypt_key: cipher: {}", hex::encode(cipher));
+        debug!("Double Ratchet decrypt_key: root_key: {}", hex::encode(&state.root_key));
         
-        // Decrypt the key
-        let key = crypto::decrypt_data(cipher, &transport_key, iv)
+        // Derive the transport key (16 bytes for AES-128-GCM)
+        let transport_key_material = crypto::kdf(&state.root_key, iv, b"transport");
+        let transport_key = &transport_key_material[0..16]; // Use first 16 bytes for AES-128
+        
+        debug!("Double Ratchet decrypt_key: transport_key: {}", hex::encode(transport_key));
+        
+        // Decrypt the key using AES-GCM
+        let key = crypto::aes_gcm_decrypt(cipher, transport_key, iv)
             .map_err(DoubleRatchetError::CryptoError)?;
         
         Ok(key)

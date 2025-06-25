@@ -5,21 +5,17 @@
 
 use aes_gcm::{
     aead::{Aead, KeyInit},
-    Aes256Gcm, Nonce,
+    Aes128Gcm, Nonce,
 };
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use rand::{rngs::OsRng, RngCore};
-use sha2::{Sha256, Digest};
+use sha2::Sha256;
 use thiserror::Error;
 use x25519_dalek::{PublicKey, StaticSecret};
 use log::{trace, error};
 
-use aes::Aes256; // Add imports for AES-CBC with PKCS#7 padding
 
-use aes::cipher::{KeyIvInit, BlockEncryptMut, BlockDecryptMut};
-use cbc::{Encryptor, Decryptor};
-use block_padding::Pkcs7;
 
 /// Errors related to cryptographic operations
 #[derive(Debug, Error)]
@@ -50,13 +46,10 @@ pub enum CryptoError {
 }
 
 /// The size of the AES key in bytes (256 bits)
-pub const AES_KEY_SIZE: usize = 32;
+pub const AES_KEY_SIZE: usize = 16;
 
 /// The size of the IV in bytes for AES-GCM (96 bits)
 pub const AES_IV_SIZE: usize = 12;
-
-/// The size of the IV in bytes for AES-CBC (128 bits)
-pub const AES_CBC_IV_SIZE: usize = 16;
 
 /// Generate a random initialization vector for AES-GCM
 pub fn generate_iv() -> Vec<u8> {
@@ -68,24 +61,101 @@ pub fn generate_iv() -> Vec<u8> {
     iv
 }
 
-/// Generate a random initialization vector for AES-CBC
-pub fn generate_cbc_iv() -> Vec<u8> {
-    trace!("Generating random {}-bit IV for AES-CBC", AES_CBC_IV_SIZE * 8);
-    let mut iv = vec![0u8; AES_CBC_IV_SIZE];
-    let mut rng = rand::thread_rng();
-    rng.fill_bytes(&mut iv);
-    trace!("Generated CBC IV: {}", hex::encode(&iv));
-    iv
-}
 
 /// Generate a random key for message encryption
 pub fn generate_message_key() -> Vec<u8> {
-    trace!("Generating random 256-bit message key");
-    let mut bytes = vec![0u8; 32]; // 256 bits for AES-256
+    trace!("Generating random 128-bit message key");
+    let mut bytes = vec![0u8; 16]; // 128 bits for AES-128
     let mut rng = rand::thread_rng();
     rng.fill_bytes(&mut bytes);
     trace!("Generated message key: {}", hex::encode(&bytes));
     bytes
+}
+
+// Constants for Dino-compatible AES-GCM
+pub const AES_GCM_KEY_SIZE: usize = 16; // 128-bit key for Dino compatibility
+pub const AES_GCM_IV_SIZE: usize = 12;  // 96-bit IV for AES-GCM
+
+/// Generate a 16-byte AES key for Dino-compatible encryption
+pub fn generate_aes_key() -> Vec<u8> {
+    let mut key = vec![0u8; AES_GCM_KEY_SIZE];
+    OsRng.fill_bytes(&mut key);
+    trace!("Generated {}-byte AES key for GCM", AES_GCM_KEY_SIZE);
+    key
+}
+
+/// Generate a 12-byte IV for AES-GCM (Dino-compatible)
+pub fn generate_gcm_iv() -> Vec<u8> {
+    let mut iv = vec![0u8; AES_GCM_IV_SIZE];
+    OsRng.fill_bytes(&mut iv);
+    trace!("Generated {}-byte IV for AES-GCM", AES_GCM_IV_SIZE);
+    iv
+}
+
+/// Encrypt data using AES-128-GCM (Dino-compatible format)
+/// Returns ciphertext + auth_tag combined
+pub fn aes_gcm_encrypt(plaintext: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    use aes_gcm::Aes128Gcm; // Use AES-128 for Dino compatibility
+    
+    if key.len() != AES_GCM_KEY_SIZE {
+        return Err(CryptoError::InvalidInputError(format!(
+            "Invalid key size for AES-GCM: {} (expected {} bytes)",
+            key.len(), AES_GCM_KEY_SIZE
+        )));
+    }
+    
+    if iv.len() != AES_GCM_IV_SIZE {
+        return Err(CryptoError::InvalidIV(format!(
+            "Invalid IV size for AES-GCM: {} (expected {} bytes)",
+            iv.len(), AES_GCM_IV_SIZE
+        )));
+    }
+    
+    let cipher = Aes128Gcm::new_from_slice(key)
+        .map_err(|e| CryptoError::AesGcmError(format!("Failed to create AES-128-GCM cipher: {}", e)))?;
+    
+    let nonce = Nonce::from_slice(iv);
+    
+    let ciphertext = cipher.encrypt(nonce, plaintext)
+        .map_err(|e| CryptoError::AesGcmError(format!("AES-128-GCM encryption failed: {}", e)))?;
+    
+    trace!("AES-128-GCM encryption successful: {} bytes plaintext -> {} bytes ciphertext+tag", 
+        plaintext.len(), ciphertext.len());
+    
+    Ok(ciphertext)
+}
+
+/// Decrypt data using AES-128-GCM (Dino-compatible format)
+/// Expects ciphertext + auth_tag combined
+pub fn aes_gcm_decrypt(ciphertext: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    use aes_gcm::Aes128Gcm; // Use AES-128 for Dino compatibility
+    
+    if key.len() != AES_GCM_KEY_SIZE {
+        return Err(CryptoError::InvalidInputError(format!(
+            "Invalid key size for AES-GCM: {} (expected {} bytes)",
+            key.len(), AES_GCM_KEY_SIZE
+        )));
+    }
+    
+    if iv.len() != AES_GCM_IV_SIZE {
+        return Err(CryptoError::InvalidIV(format!(
+            "Invalid IV size for AES-GCM: {} (expected {} bytes)",
+            iv.len(), AES_GCM_IV_SIZE
+        )));
+    }
+    
+    let cipher = Aes128Gcm::new_from_slice(key)
+        .map_err(|e| CryptoError::AesGcmError(format!("Failed to create AES-128-GCM cipher: {}", e)))?;
+    
+    let nonce = Nonce::from_slice(iv);
+    
+    let plaintext = cipher.decrypt(nonce, ciphertext)
+        .map_err(|e| CryptoError::AesGcmError(format!("AES-128-GCM decryption failed: {}", e)))?;
+    
+    trace!("AES-128-GCM decryption successful: {} bytes ciphertext+tag -> {} bytes plaintext", 
+        ciphertext.len(), plaintext.len());
+    
+    Ok(plaintext)
 }
 
 /// Validate an OMEMO initialization vector (IV)
@@ -112,13 +182,10 @@ pub fn encrypt(
     plaintext: &[u8],
     key: &[u8],
     iv: &[u8],
-    associated_data: &[u8],
+    _associated_data: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
     trace!("Encryption key: {}", hex::encode(key));
     trace!("IV: {}", hex::encode(iv));
-    if !associated_data.is_empty() {
-        trace!("Associated data: {}", hex::encode(associated_data));
-    }
     
     // Validate key and IV sizes
     if key.len() != AES_KEY_SIZE {
@@ -133,7 +200,7 @@ pub fn encrypt(
     validate_iv(iv)?;
     
     // Create the cipher
-    let cipher = match Aes256Gcm::new_from_slice(key) {
+    let cipher = match Aes128Gcm::new_from_slice(key) {
         Ok(c) => c,
         Err(e) => {
             error!("Failed to create AES-GCM cipher: {}", e);
@@ -163,13 +230,10 @@ pub fn decrypt(
     ciphertext: &[u8],
     key: &[u8],
     iv: &[u8],
-    associated_data: &[u8],
+    _associated_data: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
     trace!("Decryption key: {}", hex::encode(key));
     trace!("IV: {}", hex::encode(iv));
-    if !associated_data.is_empty() {
-        trace!("Associated data: {}", hex::encode(associated_data));
-    }
     trace!("Ciphertext: {}", hex::encode(ciphertext));
     
     // Validate key and IV sizes
@@ -185,7 +249,7 @@ pub fn decrypt(
     validate_iv(iv)?;
     
     // Create the cipher
-    let cipher = match Aes256Gcm::new_from_slice(key) {
+    let cipher = match Aes128Gcm::new_from_slice(key) {
         Ok(c) => c,
         Err(e) => {
             error!("Failed to create AES-GCM cipher: {}", e);
@@ -208,112 +272,7 @@ pub fn decrypt(
     Ok(plaintext)
 }
 
-/// Encrypt data using AES-256-CBC with PKCS#7 padding
-/// This function is used for key wrapping in OMEMO
-pub fn encrypt_data(
-    data: &[u8],
-    key: &[u8],
-    iv: &[u8],
-) -> Result<Vec<u8>, CryptoError> {
-
-    trace!("Encryption key: {}", hex::encode(key));
-    trace!("IV: {}", hex::encode(iv));
-    
-    // Validate key and IV sizes
-    if key.len() != AES_KEY_SIZE {
-        error!("Invalid key size: {} (expected {} bytes)", key.len(), AES_KEY_SIZE);
-        return Err(CryptoError::InvalidInputError(format!(
-            "Invalid key size: {} (expected {} bytes)",
-            key.len(), AES_KEY_SIZE
-        )));
-    }
-    
-    if iv.len() != 16 {  // AES-CBC requires a 16-byte IV (128 bits)
-        error!("Invalid IV size for CBC: {} (expected 16 bytes)", iv.len());
-        return Err(CryptoError::InvalidInputError(format!(
-            "Invalid IV size for CBC: {} (expected 16 bytes)",
-            iv.len()
-        )));
-    }
-    
-    // Create a CBC mode encryptor with PKCS#7 padding
-    // Note: This uses the KeyIvInit trait's new method
-    let mut buffer = vec![0u8; data.len() + 16]; // Add space for padding
-    
-    // Create a new scope to ensure the mutable borrow is dropped
-    let pos_len = {
-        let pos = Encryptor::<Aes256>::new(key.into(), iv.into())
-            .encrypt_padded_b2b_mut::<Pkcs7>(data, &mut buffer)
-            .map_err(|e| {
-                error!("AES-CBC encryption failed: {}", e);
-                CryptoError::AesGcmError(format!("AES-CBC encryption failed: {}", e))
-            })?;
-        
-        pos.len() // Return the length to use after the borrow is released
-    };
-    
-    // Now we can safely truncate the buffer
-    buffer.truncate(pos_len);
-    
-    trace!("Ciphertext: {}", hex::encode(&buffer));
-    
-    Ok(buffer)
-}
-
-/// Decrypt data using AES-256-CBC with PKCS#7 padding
-/// This function is used for key unwrapping in OMEMO
-pub fn decrypt_data(
-    data: &[u8],
-    key: &[u8],
-    iv: &[u8],
-) -> Result<Vec<u8>, CryptoError> {
-
-    trace!("Decryption key: {}", hex::encode(key));
-    trace!("IV: {}", hex::encode(iv));
-    trace!("Ciphertext: {}", hex::encode(data));
-    
-    // Validate key and IV sizes
-    if key.len() != AES_KEY_SIZE {
-        error!("Invalid key size: {} (expected {} bytes)", key.len(), AES_KEY_SIZE);
-        return Err(CryptoError::InvalidInputError(format!(
-            "Invalid key size: {} (expected {} bytes)",
-            key.len(), AES_KEY_SIZE
-        )));
-    }
-    
-    if iv.len() != 16 {  // AES-CBC requires a 16-byte IV (128 bits)
-        error!("Invalid IV size for CBC: {} (expected 16 bytes)", iv.len());
-        return Err(CryptoError::InvalidInputError(format!(
-            "Invalid IV size for CBC: {} (expected 16 bytes)",
-            iv.len()
-        )));
-    }
-    
-    // Create a CBC mode decryptor with PKCS#7 padding
-    // Note: This uses the KeyIvInit trait's new method
-    let mut buffer = vec![0u8; data.len()];
-    
-    // Create a new scope to ensure the mutable borrow is dropped
-    let pos_len = {
-        let pos = Decryptor::<Aes256>::new(key.into(), iv.into())
-            .decrypt_padded_b2b_mut::<Pkcs7>(data, &mut buffer)
-            .map_err(|e| {
-                error!("AES-CBC decryption failed: {}", e);
-                CryptoError::AesGcmError(format!("AES-CBC decryption failed: {}", e))
-            })?;
-        
-        pos.len() // Return the length to use after the borrow is released
-    };
-    
-    // Now we can safely truncate the buffer
-    buffer.truncate(pos_len);
-    
-    //debug!("AES-CBC decryption successful: {} bytes decrypted in {:?}", buffer.len(), duration);
-    
-    Ok(buffer)
-}
-
-/// Calculate an HMAC using SHA-256
+/// HMAC-SHA256 for message authentication
 pub fn hmac_sha256(key: &[u8], data: &[u8]) -> Result<Vec<u8>, CryptoError> {
 
     //debug!("Calculating HMAC-SHA256 for {} bytes of data", data.len());
@@ -358,7 +317,7 @@ pub fn kdf(ikm: &[u8], salt: &[u8], info: &[u8]) -> Vec<u8> {
 
 /// Calculate a SHA-256 hash
 pub fn sha256_hash(data: &[u8]) -> Vec<u8> {
-
+    use sha2::Digest;
     trace!("Calculating SHA-256 hash of {} bytes of data", data.len());
     
     let mut hasher = Sha256::new();
@@ -655,57 +614,6 @@ mod tests {
     }
 
     #[test]
-    fn test_mac_verification_workflow() {
-        // Test the complete MAC generation and verification workflow as used in OMEMO
-        
-        // 1. Generate a random 32-byte message key (as done in encrypt_message)
-        let random_key = generate_message_key();
-        
-        // 2. Use HKDF to derive keys (as done in encrypt_message)
-        let salt = vec![0u8; 32];
-        let info = b"OMEMO Payload";
-        let derived_keys = hkdf_derive(&salt, &random_key, info, 80).unwrap();
-        
-        // 3. Split the derived keys (as done in encrypt_message)
-        let encryption_key = &derived_keys[0..32];
-        let authentication_key = &derived_keys[32..64];
-        let iv = &derived_keys[64..80];
-        
-        // 4. Encrypt some plaintext with AES-CBC
-        let plaintext = b"Hello, this is a test message for MAC verification!";
-        let ciphertext = encrypt_data(plaintext, encryption_key, iv).unwrap();
-        
-        // 5. Generate MAC over ciphertext (as done in encrypt_message)
-        let mac = hmac_sha256(authentication_key, &ciphertext).unwrap();
-        
-        // 6. Verify MAC (as done in decrypt_message)
-        let verified_mac = hmac_sha256(authentication_key, &ciphertext).unwrap();
-        assert!(secure_compare(&mac, &verified_mac), "MAC verification should succeed");
-        
-        // 7. Test that MAC verification fails with wrong key
-        let wrong_key = generate_message_key();
-        let wrong_derived = hkdf_derive(&salt, &wrong_key, info, 80).unwrap();
-        let wrong_auth_key = &wrong_derived[32..64];
-        let wrong_mac = hmac_sha256(wrong_auth_key, &ciphertext).unwrap();
-        assert!(!secure_compare(&mac, &wrong_mac), "MAC verification should fail with wrong key");
-        
-        // 8. Test that MAC verification fails with tampered ciphertext
-        let mut tampered_ciphertext = ciphertext.clone();
-        tampered_ciphertext[0] ^= 0x01; // Flip one bit
-        let tampered_mac = hmac_sha256(authentication_key, &tampered_ciphertext).unwrap();
-        assert!(!secure_compare(&mac, &tampered_mac), "MAC verification should fail with tampered data");
-        
-        // 9. Verify that decryption still works with correct MAC
-        let decrypted = decrypt_data(&ciphertext, encryption_key, iv).unwrap();
-        assert_eq!(decrypted, plaintext, "Decryption should succeed with correct MAC");
-        
-        println!("MAC verification workflow test passed!");
-        println!("Original message: {}", String::from_utf8_lossy(plaintext));
-        println!("MAC: {}", hex::encode(&mac));
-        println!("Ciphertext: {}", hex::encode(&ciphertext));
-    }
-    
-    #[test]
     fn test_secure_compare() {
         let data1 = vec![0x01, 0x02, 0x03, 0x04];
         let data2 = vec![0x01, 0x02, 0x03, 0x04];
@@ -717,5 +625,5 @@ mod tests {
         assert!(!secure_compare(&data1, &data4), "Different length data should compare as not equal");
     }
 
-    // ...existing code...
+
 }
