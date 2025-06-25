@@ -1348,6 +1348,31 @@ impl OmemoManager {
         Ok(true)
     }
 
+    /// Force reset all broken sessions (useful for debugging and fixing stuck sessions)
+    pub async fn force_reset_broken_sessions(&mut self) -> Result<Vec<String>, OmemoError> {
+        let mut reset_sessions = Vec::new();
+        
+        // Get all sessions that are in pending_prekey_sends (stuck waiting to send PreKey)
+        let stuck_sessions: Vec<_> = self.pending_prekey_sends.iter().cloned().collect();
+        
+        for (bare_jid, device_id) in stuck_sessions {
+            warn!("Force resetting stuck session with {}:{}", bare_jid, device_id);
+            if let Err(e) = self.reset_session(&bare_jid, device_id).await {
+                error!("Failed to force reset session {}:{}: {}", bare_jid, device_id, e);
+            } else {
+                reset_sessions.push(format!("{}:{}", bare_jid, device_id));
+            }
+        }
+        
+        if !reset_sessions.is_empty() {
+            info!("Force reset {} broken sessions: {:?}", reset_sessions.len(), reset_sessions);
+        } else {
+            info!("No broken sessions found to reset");
+        }
+        
+        Ok(reset_sessions)
+    }
+
 
     
     /// Get the device ID for this OMEMO manager
@@ -1624,29 +1649,39 @@ impl OmemoManager {
         }
     }
 
-    /// Reset a session with a specific device (less aggressive approach)
+    /// Reset a session with a specific device (aggressive approach for broken sessions)
     pub async fn reset_session(&mut self, remote_jid: &str, remote_device_id: u32) -> Result<(), OmemoError> {
         let bare_jid = Self::normalize_jid_to_bare(remote_jid);
         let key = (bare_jid.clone(), remote_device_id);
         
-        warn!("Resetting OMEMO session with {}:{} due to repeated failures", bare_jid, remote_device_id);
+        warn!("Aggressively resetting OMEMO session with {}:{} due to repeated failures", bare_jid, remote_device_id);
         
-        // Remove from memory only (keep in storage for potential recovery)
+        // Remove from memory
         self.sessions.remove(&key);
         
-        // Clear the ignore status so this device can be contacted for PreKey exchange
+        // Also remove from storage to force complete rebuild
+        let session_key = format!("{}:{}", bare_jid, remote_device_id);
         let storage_guard = self.storage.lock().await;
+        if let Err(e) = storage_guard.delete_session(&session_key) {
+            warn!("Failed to delete stored session for {}:{}: {}", bare_jid, remote_device_id, e);
+        }
+        
+        // Clear the ignore status so this device can be contacted for PreKey exchange
         if let Err(e) = storage_guard.clear_device_ignore_status(&bare_jid, remote_device_id) {
             warn!("Failed to clear ignore status for {}:{}: {}", bare_jid, remote_device_id, e);
         }
+        
+        // Reset failure count to give the session a fresh start
+        if let Err(e) = storage_guard.reset_device_failure_count(&bare_jid, remote_device_id) {
+            warn!("Failed to reset failure count for {}:{}: {}", bare_jid, remote_device_id, e);
+        }
         drop(storage_guard);
         
-        // Mark this device as needing a fresh session rebuild
-        self.pending_session_rebuilds.insert(key.clone());
+        // Clear any pending flags
+        self.pending_session_rebuilds.remove(&key);
+        self.pending_prekey_sends.remove(&key);
         
-        // Mark this device as needing a PreKey message from us
-        self.pending_prekey_sends.insert(key.clone());
-        info!("Marked {}:{} for session rebuild and PreKey send on next encryption", bare_jid, remote_device_id);
+        info!("Completely reset session with {}:{} - fresh start on next encryption/decryption", bare_jid, remote_device_id);
         
         info!("Successfully reset session with {}:{}", bare_jid, remote_device_id);
         Ok(())
@@ -1706,6 +1741,7 @@ impl OmemoManager {
         debug!("Parsing device list response - XML parsed successfully, checking for errors");
         
         // Check for error responses first
+       
         if let Some(error) = document.descendants().find(|n| n.has_tag_name("error")) {
             let error_type = error.attribute("type").unwrap_or("unknown");
             
@@ -2018,8 +2054,8 @@ impl OmemoManager {
                         let failure_count = self.get_device_failure_count(&bare_jid, device_id).await;
                         warn!("Double Ratchet state mismatch detected from {}:{} (failure count: {})", sender_jid, device_id, failure_count);
                         
-                        // Only reset after multiple consecutive failures (less aggressive than before)
-                        if failure_count >= 5 {
+                        // Only reset after multiple consecutive failures, but be more aggressive
+                        if failure_count >= 3 {
                             warn!("Multiple consecutive failures ({}) from {}:{}, resetting session", failure_count, sender_jid, device_id);
                             if let Err(reset_err) = self.reset_session(&bare_jid, device_id).await {
                                 error!("Failed to reset session: {}", reset_err);
