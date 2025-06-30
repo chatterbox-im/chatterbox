@@ -136,6 +136,36 @@ impl OmemoSession {
         })
     }
     
+    /// Create a new initiator session with deterministic ephemeral key
+    pub fn new_initiator_with_ephemeral(
+        remote_jid: String,
+        remote_device_id: DeviceId,
+        local_identity_key_pair: KeyPair,
+        remote_identity_key: Vec<u8>,
+        remote_signed_prekey: Vec<u8>,
+        remote_one_time_prekey: Option<Vec<u8>>,
+        ephemeral_key: Vec<u8>,
+        local_device_id: DeviceId,
+    ) -> Result<Self, SessionError> {
+        let ratchet_state = DoubleRatchet::new_session_initiator_with_ephemeral(
+            local_identity_key_pair,
+            remote_identity_key,
+            remote_signed_prekey,
+            remote_one_time_prekey,
+            ephemeral_key,
+            local_device_id,
+            remote_device_id,
+            remote_jid.clone(),
+        )?;
+        
+        Ok(Self {
+            remote_jid,
+            remote_device_id,
+            local_device_id,
+            ratchet_state,
+        })
+    }
+    
     /// Create a new recipient session
     pub fn new_recipient(
         remote_jid: String,

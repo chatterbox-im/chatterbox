@@ -408,22 +408,26 @@ impl super::XMPPClient {
     /// Request an OMEMO device list from a peer
     /// This is the first step in the key discovery process
     pub async fn request_omemo_devicelist(&self, peer_jid: &str) -> Result<()> {
-        //debug!("Sending OMEMO device list request to {}", peer_jid);
+        debug!("Sending OMEMO device list request to {}", peer_jid);
         
-        // Validate and normalize the JID first
-        let normalized_jid = match self.ensure_full_jid(peer_jid).await {
-            Ok(jid) => {
-                //debug!("Normalized JID for device list request: {} -> {}", peer_jid, jid);
-                jid
-            },
-            Err(e) => {
-                error!("Invalid JID format for device list request: {}: {}", peer_jid, e);
-                return Err(anyhow!("Invalid JID format: {}: {}", peer_jid, e));
+        // For device list queries, we must use the BARE JID (without resource)
+        // According to XEP-0384, device lists are stored under the bare JID
+        let bare_jid = if peer_jid.contains('/') {
+            // Extract bare JID by removing resource
+            peer_jid.split('/').next().unwrap_or(peer_jid).to_string()
+        } else {
+            // Already a bare JID, validate it has domain
+            if !peer_jid.contains('@') {
+                error!("Invalid JID format for device list request: {} (missing domain)", peer_jid);
+                return Err(anyhow!("Invalid JID format: {} (missing domain)", peer_jid));
             }
+            peer_jid.to_string()
         };
         
+        info!("Requesting device list for bare JID: {}", bare_jid);
+        
         // Try with standard namespace and node format first (per XEP-0384)
-        let standard_result = self.request_pubsub_items(&normalized_jid, &format!("{}:devices", custom_ns::OMEMO)).await;
+        let standard_result = crate::xmpp::omemo_integration::request_pubsub_items(&bare_jid, &format!("{}:devices", custom_ns::OMEMO)).await;
         
         if standard_result.is_ok() {
             info!("Successfully retrieved device list with standard format ({}:devices)", custom_ns::OMEMO);
@@ -431,7 +435,7 @@ impl super::XMPPClient {
         }
         
         // Try with legacy v1 namespace but standard node format
-        let v1_standard_result = self.request_pubsub_items(&normalized_jid, &format!("{}:devices", custom_ns::OMEMO_V1)).await;
+        let v1_standard_result = crate::xmpp::omemo_integration::request_pubsub_items(&bare_jid, &format!("{}:devices", custom_ns::OMEMO_V1)).await;
         
         if v1_standard_result.is_ok() {
             info!("Successfully retrieved device list with v1 namespace and standard format ({}:devices)", custom_ns::OMEMO_V1);
@@ -439,7 +443,7 @@ impl super::XMPPClient {
         }
         
         // Try with legacy node format (devicelist) for both namespaces
-        let legacy_v2_result = self.request_pubsub_items(&normalized_jid, &format!("{}:devicelist", custom_ns::OMEMO)).await;
+        let legacy_v2_result = crate::xmpp::omemo_integration::request_pubsub_items(&bare_jid, &format!("{}:devicelist", custom_ns::OMEMO)).await;
         
         if legacy_v2_result.is_ok() {
             info!("Successfully retrieved device list with legacy format ({}:devicelist)", custom_ns::OMEMO);
@@ -447,7 +451,7 @@ impl super::XMPPClient {
         }
         
         // Final attempt with the most legacy combination
-        let legacy_v1_result = self.request_pubsub_items(&normalized_jid, &format!("{}:devicelist", custom_ns::OMEMO_V1)).await;
+        let legacy_v1_result = crate::xmpp::omemo_integration::request_pubsub_items(&bare_jid, &format!("{}:devicelist", custom_ns::OMEMO_V1)).await;
         
         if let Err(e) = &legacy_v1_result {
             warn!("Failed to retrieve device list with all namespace and node combinations: {}", e);

@@ -14,6 +14,7 @@ use sha2::Sha256;
 use thiserror::Error;
 use x25519_dalek::{PublicKey, StaticSecret};
 use log::{trace, error};
+use hex;
 
 
 
@@ -97,6 +98,15 @@ pub fn generate_gcm_iv() -> Vec<u8> {
 pub fn aes_gcm_encrypt(plaintext: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>, CryptoError> {
     use aes_gcm::Aes128Gcm; // Use AES-128 for Dino compatibility
     
+    // Add detailed debugging for AES-GCM encryption to match decryption analysis
+    error!("AES-GCM encrypt input analysis:");
+    error!("  Key length: {} bytes", key.len());
+    error!("  Key (hex): {}", hex::encode(key));
+    error!("  IV length: {} bytes", iv.len());
+    error!("  IV (hex): {}", hex::encode(iv));
+    error!("  Plaintext length: {} bytes", plaintext.len());
+    error!("  Plaintext (hex): {}", hex::encode(plaintext));
+    
     if key.len() != AES_GCM_KEY_SIZE {
         return Err(CryptoError::InvalidInputError(format!(
             "Invalid key size for AES-GCM: {} (expected {} bytes)",
@@ -119,6 +129,10 @@ pub fn aes_gcm_encrypt(plaintext: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8
     let ciphertext = cipher.encrypt(nonce, plaintext)
         .map_err(|e| CryptoError::AesGcmError(format!("AES-128-GCM encryption failed: {}", e)))?;
     
+    error!("AES-GCM encrypt output analysis:");
+    error!("  Ciphertext+tag length: {} bytes", ciphertext.len());
+    error!("  Ciphertext+tag (hex): {}", hex::encode(&ciphertext));
+    
     trace!("AES-128-GCM encryption successful: {} bytes plaintext -> {} bytes ciphertext+tag", 
         plaintext.len(), ciphertext.len());
     
@@ -129,6 +143,15 @@ pub fn aes_gcm_encrypt(plaintext: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8
 /// Expects ciphertext + auth_tag combined
 pub fn aes_gcm_decrypt(ciphertext: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>, CryptoError> {
     use aes_gcm::Aes128Gcm; // Use AES-128 for Dino compatibility
+    
+    // Add detailed debugging for AES-GCM decryption failure analysis
+    error!("AES-GCM decrypt input analysis:");
+    error!("  Key length: {} bytes", key.len());
+    error!("  Key (hex): {}", hex::encode(key));
+    error!("  IV length: {} bytes", iv.len());
+    error!("  IV (hex): {}", hex::encode(iv));
+    error!("  Ciphertext+tag length: {} bytes", ciphertext.len());
+    error!("  Ciphertext+tag (hex): {}", hex::encode(ciphertext));
     
     if key.len() != AES_GCM_KEY_SIZE {
         return Err(CryptoError::InvalidInputError(format!(
@@ -150,7 +173,10 @@ pub fn aes_gcm_decrypt(ciphertext: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u
     let nonce = Nonce::from_slice(iv);
     
     let plaintext = cipher.decrypt(nonce, ciphertext)
-        .map_err(|e| CryptoError::AesGcmError(format!("AES-128-GCM decryption failed: {}", e)))?;
+        .map_err(|e| {
+            error!("AES-128-GCM decryption failed with detailed input logged above");
+            CryptoError::AesGcmError(format!("AES-128-GCM decryption failed: {}", e))
+        })?;
     
     trace!("AES-128-GCM decryption successful: {} bytes ciphertext+tag -> {} bytes plaintext", 
         ciphertext.len(), plaintext.len());
@@ -476,6 +502,31 @@ pub fn calculate_dh(
 pub fn generate_dh_keypair() -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
     // Just use our generate_x25519_keypair function
     generate_x25519_keypair()
+}
+
+/// Derive X25519 public key from private key
+pub fn x25519_public_key_from_private(private_key: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    trace!("Deriving X25519 public key from private key");
+    
+    // Validate private key length
+    if private_key.len() != 32 {
+        error!("Invalid X25519 private key length: {}", private_key.len());
+        return Err(CryptoError::InvalidInputError(
+            format!("X25519 private key must be 32 bytes, got {}", private_key.len())
+        ));
+    }
+    
+    // Convert to the appropriate type for x25519-dalek
+    let mut private_bytes = [0u8; 32];
+    private_bytes.copy_from_slice(private_key);
+    
+    // Create the StaticSecret from bytes
+    let static_secret = StaticSecret::from(private_bytes);
+    
+    // Derive the public key
+    let public_key = PublicKey::from(&static_secret);
+    
+    Ok(public_key.as_bytes().to_vec())
 }
 
 /// Compute SHA-256 hash

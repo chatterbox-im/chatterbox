@@ -408,7 +408,15 @@ impl super::XMPPClient {
         debug!("Carbon OMEMO message from: {},: to:: {}", from, to);
         
         // Get the OMEMO manager
-        let omemo_manager = match Self::get_global_omemo_manager().await {
+        let omemo_manager = match crate::xmpp::get_global_xmpp_client().await {
+            Some(client) => {
+                let client_guard = client.lock().await;
+                client_guard.get_omemo_manager().map(|arc| arc.clone())
+            },
+            None => None,
+        };
+        
+        let omemo_manager = match omemo_manager {
             Some(m) => m,
             None => {
                 warn!("OMEMO manager not initialized for processing carbon");
@@ -580,6 +588,7 @@ impl super::XMPPClient {
                 iv,
                 encrypted_keys,
                 is_prekey: false,     // Will be determined by session state
+                ephemeral_key: None,  // Will be extracted from XML if present
             };
             
             // Try to decrypt the message

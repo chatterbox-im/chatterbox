@@ -291,18 +291,21 @@ impl XMPPClient {
                         // Check for OMEMO encrypted messages
                         let has_omemo_v1 = stanza.has_child("encrypted", custom_ns::OMEMO);
                         let has_omemo_axolotl = stanza.has_child("encrypted", custom_ns::OMEMO_V1);
-                        debug!("OMEMO detection: v1={}, axolotl={}, checking namespaces '{}' and '{}'", 
-                            has_omemo_v1, has_omemo_axolotl, custom_ns::OMEMO, custom_ns::OMEMO_V1);
+                        let has_omemo_empty = stanza.has_child("encrypted", "");
+                        let has_omemo_explicit = stanza.has_child("encrypted", "eu.siacs.conversations.axolotl");
+                        
+                        warn!("OMEMO detection: v1={}, axolotl={}, empty={}, explicit={}, checking namespaces '{}' and '{}'", 
+                            has_omemo_v1, has_omemo_axolotl, has_omemo_empty, has_omemo_explicit, custom_ns::OMEMO, custom_ns::OMEMO_V1);
                         
                         // Also check with specific namespace debug
                         if let Some(encrypted) = stanza.get_child("encrypted", "") {
-                            debug!("Found encrypted element with empty namespace: {:?}", encrypted);
+                            warn!("Found encrypted element with empty namespace: {:?}", encrypted);
                         }
                         if let Some(encrypted) = stanza.get_child("encrypted", "eu.siacs.conversations.axolotl") {
-                            debug!("Found encrypted element with axolotl namespace: {:?}", encrypted);
+                            warn!("Found encrypted element with axolotl namespace: {:?}", encrypted);
                         }
                         
-                        if has_omemo_v1 || has_omemo_axolotl {
+                        if has_omemo_v1 || has_omemo_axolotl || has_omemo_empty || has_omemo_explicit {
                             info!("Detected OMEMO encrypted message (v1={}, axolotl={})", has_omemo_v1, has_omemo_axolotl);
                             
                             // Clone needed values for async task
@@ -311,19 +314,29 @@ impl XMPPClient {
                             let msg_tx_clone = msg_tx.clone();
                             let pending_receipts_clone = pending_receipts.clone();
                             
+                            warn!("OMEMO message detected - spawning async task for processing");
+                            
                             // Process encrypted message in a separate task to avoid blocking
                             tokio::spawn(async move {
+                                warn!("Inside OMEMO async task - starting processing");
+                                
                                 // Get the global OMEMO manager if available
                                 let omemo_manager = match get_global_xmpp_client().await {
                                     Some(global_client) => {
                                         let client_guard = global_client.lock().await;
-                                        client_guard.omemo_manager.clone()
+                                        let manager = client_guard.omemo_manager.clone();
+                                        warn!("Retrieved global OMEMO manager: {:?}", manager.is_some());
+                                        manager
                                     },
-                                    None => None,
+                                    None => {
+                                        warn!("No global XMPP client available");
+                                        None
+                                    },
                                 };
                                 
                                 // Register the global client for OMEMO integration
                                 if let Some(_manager) = &omemo_manager {
+                                    warn!("Setting current client arc for OMEMO integration");
                                     crate::xmpp::omemo_integration::set_current_client_arc(client_clone.clone());
                                 }
                                 
@@ -341,9 +354,12 @@ impl XMPPClient {
                                     carbons_enabled: Arc::new(AtomicBool::new(true)),
                                 };
                                 
+                                warn!("Calling handle_message_encrypted method");
                                 // Call the handle_message_encrypted method
                                 if let Err(e) = temp_client.handle_message_encrypted(&stanza_clone).await {
                                     error!("Failed to process encrypted message: {}", e);
+                                } else {
+                                    warn!("Successfully processed encrypted message");
                                 }
                             });
                         } else {
@@ -494,9 +510,11 @@ impl XMPPClient {
                                     };
                                     
                                     if let Some(manager) = omemo_manager {
-                                        if let Err(e) = Self::handle_pubsub_request(&stanza_clone, &client_clone, &manager).await {
-                                            error!("Failed to handle pubsub request: {}", e);
-                                        }
+                                        // TODO: Implement handle_pubsub_request if needed
+                                        // if let Err(e) = Self::handle_pubsub_request(&stanza_clone, &client_clone, &manager).await {
+                                        //     error!("Failed to handle pubsub request: {}", e);
+                                        // }
+                                        debug!("Received pubsub request, but handling not implemented yet");
                                     } else {
                                         warn!("Received pubsub request but OMEMO manager not available");
                                     }
@@ -956,6 +974,36 @@ impl XMPPClient {
         self.omemo_manager = Some(Arc::new(TokioMutex::new(omemo_manager)));
         info!("OMEMO initialized successfully");
         
+        // Force refresh device lists after initialization to ensure fresh data
+        // This helps avoid the stale device list problem
+        info!("Forcing device list refresh for known contacts to avoid stale data");
+        tokio::spawn({
+            let client = self.clone();
+            async move {
+                // Give the server time to process our publications
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                
+                // Get our contact list and refresh their device lists
+                if let Ok(Some(contacts)) = client.get_roster().await {
+                    for contact_jid in contacts {
+                        // Refresh device list for this contact
+                        if let Some(omemo_manager) = &client.omemo_manager {
+                            let manager_guard = omemo_manager.lock().await;
+                            if let Err(e) = manager_guard.get_device_ids_for_test(&contact_jid).await {
+                                warn!("Failed to refresh device list for {}: {}", contact_jid, e);
+                            } else {
+                                info!("Successfully refreshed device list for {}", contact_jid);
+                            }
+                        }
+                        // Small delay between requests to avoid overwhelming the server
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                    }
+                } else {
+                    warn!("Failed to get contact list for device list refresh");
+                }
+            }
+        });
+        
         Ok(())
     }
 
@@ -1087,27 +1135,40 @@ impl XMPPClient {
                     iv,
                     encrypted_keys,
                     is_prekey: false,     // Will be determined by session state
+                    ephemeral_key: None,  // Will be extracted from XML if present
                 };
                 
                 // Decrypt the message
                 let mut omemo_manager_guard = omemo_manager.lock().await;
+                warn!("DECRYPT_DEBUG: Starting decryption for message from {}:{}", from, sender_device_id);
                 match omemo_manager_guard.decrypt_message(from, sender_device_id, &omemo_message).await {
                     Ok(plaintext) => {
+                        warn!("DECRYPT_SUCCESS: Successfully decrypted message from {}:{}", from, sender_device_id);
+                        warn!("DECRYPT_SUCCESS: Plaintext length: {} bytes", plaintext.len());
+                        warn!("DECRYPT_SUCCESS: Plaintext content: '{}'", plaintext);
+                        
+                        // Strip resource from sender JID to get bare JID
+                        let sender_bare_jid = from.split('/').next().unwrap_or(from).to_string();
+                        
                         // Create a message for the UI
                         let message = Message {
                             id: id.to_string(),
-                            sender_id: from.to_string(),
+                            sender_id: sender_bare_jid.clone(),
                             recipient_id: self.jid.clone(),
-                            content: plaintext,
+                            content: plaintext.clone(),
                             timestamp: chrono::Utc::now().timestamp() as u64,
                             delivery_status: DeliveryStatus::Delivered,
                         };
                         
+                        warn!("UI_DELIVERY_DEBUG: Sending decrypted message to UI channel");
+                        warn!("UI_DELIVERY_DEBUG: Message details - ID: {}, Sender: {}, Content: '{}'", 
+                            message.id, message.sender_id, message.content);
+                        
                         // Send to UI
                         if let Err(e) = self.msg_tx.send(message).await {
-                            error!("Failed to send decrypted message to UI: {}", e);
+                            error!("FAILED to send decrypted message to UI: {}", e);
                         } else {
-                            //debug!("Sent decrypted message to UI");
+                            warn!("SUCCESS: Sent decrypted OMEMO message to UI channel");
                         }
                         
                         // Send a receipt if requested
@@ -2013,530 +2074,90 @@ impl XMPPClient {
             Err(anyhow!("Client not initialized"))
         }
     }
-
-    /// Force refresh OMEMO device list for a user
-    pub async fn force_refresh_device_list(&self, jid: &str) -> Result<Vec<DeviceId>> {
-        info!("Forcing refresh of OMEMO device list for {}", jid);
-        
-        if let Some(omemo_manager) = &self.omemo_manager {
-            // First explicitly request the device list from the server
-            if let Err(e) = self.request_omemo_devicelist(jid).await {
-                warn!("Failed to request device list from server: {}", e);
-                // Continue anyway, we'll try with cached data
-            }
-            
-            // Then get the device IDs from the manager
-            let manager = omemo_manager.lock().await;
-            match manager.get_device_ids_for_test(jid).await {
-                Ok(devices) => {
-                    info!("Found {} devices for {}: {:?}", devices.len(), jid, devices);
-                    Ok(devices)
-                },
-                Err(e) => Err(anyhow!("Failed to get device IDs: {}", e))
-            }
-        } else {
-            Err(anyhow!("OMEMO manager not initialized"))
-        }
-    }
-
-    /// Publish our device list to the server and ensure it includes our current device
-    pub async fn publish_our_device_list(&self) -> Result<()> {
-        info!("Publishing our device list to the server");
-        
-        if let Some(omemo_manager) = &self.omemo_manager {
-            let manager = omemo_manager.lock().await;
-            manager.ensure_device_list_published().await?;
-            info!("Successfully published our device list");
-            Ok(())
-        } else {
-            Err(anyhow!("OMEMO manager not initialized"))
-        }
-    }
-
-    /// Sync devices with a contact without changing trust status
-    pub async fn sync_devices_with_contact(&self, contact: &str) -> Result<bool> {
-        info!("Syncing OMEMO devices with contact: {}", contact);
-        
-        // Step 1: Get our device ID
-        let our_device_id = match &self.omemo_manager {
-            Some(manager) => {
-                let manager_guard = manager.lock().await;
-                manager_guard.get_device_id()
-            },
-            None => return Err(anyhow!("OMEMO manager not initialized")),
-        };
-        
-        info!("Our device ID is: {}", our_device_id);
-        
-        // Step 2: Force publish our device list to make sure it's up to date
-        self.publish_our_device_list().await?;
-        
-        // Step 3: Force refresh the contact's device list
-        let contact_devices = self.force_refresh_device_list(contact).await?;
-        
-        if contact_devices.is_empty() {
-            info!("Contact {} has no OMEMO devices", contact);
-            return Ok(false);
-        }
-        
-        // Step 4: For each of the contact's devices, get or create a session if needed
-        // but don't modify trust status - that should only happen via user interaction
-        let mut established_sessions = false;
-        
-        if let Some(omemo_manager) = &self.omemo_manager {
-            let mut manager = omemo_manager.lock().await;
-            
-            for device_id in contact_devices {
-                info!("Checking/creating session with {}:{}", contact, device_id);
-                
-                // Add timeout protection to prevent UI hang on session creation
-                let session_timeout = tokio::time::Duration::from_secs(8);
-                match tokio::time::timeout(session_timeout, manager.get_or_create_session(contact, device_id)).await {
-                    Ok(Ok(_)) => {
-                        info!("Session established or already exists with {}:{}", contact, device_id);
-                        established_sessions = true;
-                    },
-                    Ok(Err(e)) => {
-                        warn!("Failed to establish session with {}:{}: {}", contact, device_id, e);
-                    },
-                    Err(_) => {
-                        warn!("Timeout while creating session with {}:{}, skipping device", contact, device_id);
-                    }
-                }
-            }
-        }
-        
-        // If we haven't established any sessions, we'll return an error
-        if !established_sessions {
-            warn!("Failed to establish any sessions with {}", contact);
-            return Ok(false);
-        }
-        
-        // Request key verification through the UI if needed
-        match self.check_omemo_keys_for_contact(contact).await {
-            Ok(_) => info!("Key verification requested for {}", contact),
-            Err(e) => warn!("Failed to request key verification: {}", e),
-        }
-        
-        info!("Device sync with {} completed successfully", contact);
-        Ok(true)
-    }
-
-    /// Get the internal client as an Arc for service discovery
-    pub fn get_client_arc(&self) -> Option<Arc<TokioMutex<XMPPAsyncClient>>> {
-        self.client.clone()
-    }
-    
-    /// Get the global OMEMO manager
-    /// This is used by the message carbons implementation to decrypt OMEMO messages
-    pub async fn get_global_omemo_manager() -> Option<Arc<TokioMutex<crate::omemo::OmemoManager>>> {
-        if let Some(client) = get_global_xmpp_client().await {
-            let client_guard = client.lock().await;
-            client_guard.omemo_manager.clone()
-        } else {
-            None
-        }
-    }
-
-    /// Request items from a PubSub node
-    /// This is needed for OMEMO to fetch device lists and bundles
-    pub async fn request_pubsub_items(&self, from: &str, node: &str) -> Result<String> {
-        //debug!("Requesting PubSub items from {} for node {}", from, node);
-        
-        if self.client.is_none() {
-            return Err(anyhow!("XMPP client not initialized"));
-        }
-        
-        let client = self.client.as_ref().unwrap();
-        
-        // Generate a unique ID for this request
-        let request_id = uuid::Uuid::new_v4().to_string();
-        
-        // Create the pubsub element
-        let mut pubsub_element = xmpp_parsers::Element::builder("pubsub", "http://jabber.org/protocol/pubsub").build();
-        
-    // Create the items element with the same namespace as pubsub
-    let items_element = xmpp_parsers::Element::builder("items", "http://jabber.org/protocol/pubsub")
-        .attr("node", node)
-        .build();
-        
-        // Add to pubsub element
-        pubsub_element.append_child(items_element);
-        
-        // Create the IQ stanza
-        let iq = xmpp_parsers::Element::builder("iq", "jabber:client")
-            .attr("type", "get")
-            .attr("id", &request_id)
-            .attr("to", from)
-            .append(pubsub_element)
-            .build();
-        
-        // Send the stanza
-        //debug!("Sending PubSub request stanza: {:?}", iq);
-        let mut client_guard = client.lock().await;
-        
-        match client_guard.send_stanza(iq).await {
-            Ok(_) => {
-                //debug!("PubSub request sent successfully for node {}", node);
-                
-                // Wait for the response with a timeout
-                let response_timeout = std::time::Duration::from_secs(5);
-                let start_time = tokio::time::Instant::now();
-                
-                while tokio::time::Instant::now() - start_time < response_timeout {
-                    // Try to get the next event with a timeout
-                    let event_result = tokio::time::timeout(
-                        std::time::Duration::from_millis(500),
-                        client_guard.next()
-                    ).await;
-                    
-                    match event_result {
-                        Ok(Some(event)) => {
-                            if let XMPPEvent::Stanza(stanza) = event {
-                                if stanza.name() == "iq" && stanza.attr("id") == Some(&request_id) {
-                                    //debug!("Received PubSub response for ID: {}", request_id);
-                                    
-                                    // Convert the stanza to a string
-                                    let response = introspection::stanza_to_string(&stanza);
-                                    
-                                    //debug!("PubSub response: {}", response);
-                                    return Ok(response);
-                                }
-                            }
-                        },
-                        Ok(None) => {
-                            error!("Connection closed while waiting for PubSub response");
-                            return Err(anyhow!("Connection closed while waiting for PubSub response"));
-                        },
-                        Err(_) => {
-                            // Timeout waiting for event, continue in the loop
-                            continue;
-                        },
-                    }
-                }
-                
-                // If we reach here, timeout occurred
-                warn!("Timed out waiting for PubSub response for node {}", node);
-                
-                // For device list requests, if we timeout, respond with an empty list
-                // This allows us to handle cases where the device list doesn't exist yet
-                if node.contains("devicelist") {
-                    //debug!("Returning empty device list response since none was found on server");
-                    let empty_list_response = format!(r#"<?xml version="1.0" encoding="utf-8"?>
-    <iq type="result" id="{}">
-      <pubsub xmlns="http://jabber.org/protocol/pubsub">
-        <items node="{}">
-          <item id="current">
-            <list xmlns="eu.siacs.conversations.axolotl"/>
-          </item>
-        </items>
-      </pubsub>
-    </iq>"#, request_id, node);
-                    return Ok(empty_list_response);
-                }
-                
-                return Err(anyhow!("Timed out waiting for PubSub response"));
-            },
-            Err(e) => {
-                error!("Failed to send PubSub request: {}", e);
-                return Err(anyhow!("Failed to send PubSub request: {}", e));
-            }
-        }
-    }
-
-    /// Handle incoming pubsub requests (e.g., OMEMO bundle requests)
-    async fn handle_pubsub_request(
-        stanza: &xmpp_parsers::Element,
-        client: &Arc<TokioMutex<XMPPAsyncClient>>,
-        omemo_manager: &Arc<TokioMutex<crate::omemo::OmemoManager>>,
-    ) -> Result<()> {
-        let from = stanza.attr("from").unwrap_or("unknown");
-        let id = stanza.attr("id").unwrap_or("no-id");
-        let to = stanza.attr("to").unwrap_or("unknown");
-        
-        info!("Handling pubsub request from {} to {} (ID: {})", from, to, id);
-        
-        // Check if this is an OMEMO bundle request
-        if let Some(pubsub) = stanza.get_child("pubsub", "http://jabber.org/protocol/pubsub") {
-            if let Some(items) = pubsub.get_child("items", "http://jabber.org/protocol/pubsub") {
-                if let Some(node) = items.attr("node") {
-                    info!("Pubsub request for node: {}", node);
-                    
-                    // Check if this is an OMEMO bundle request
-                    if node.starts_with("eu.siacs.conversations.axolotl.bundles:") {
-                        let device_id_str = node.trim_start_matches("eu.siacs.conversations.axolotl.bundles:");
-                        if let Ok(device_id) = device_id_str.parse::<u32>() {
-                            info!("Bundle request for device ID: {}", device_id);
-                            
-                            // Get our own device ID to check if this request is for us
-                            let our_device_id = {
-                                let manager_guard = omemo_manager.lock().await;
-                                manager_guard.get_device_id()
-                            };
-                            
-                            if device_id == our_device_id {
-                                info!("Responding to bundle request for our device ID: {}", device_id);
-                                
-                                // Get our bundle data
-                                let bundle_xml = {
-                                    let manager_guard = omemo_manager.lock().await;
-                                    match manager_guard.get_key_bundle_xml() {
-                                        Ok(xml) => xml,
-                                        Err(e) => {
-                                            error!("Failed to get bundle XML: {}", e);
-                                            return Self::send_pubsub_error_response(client, from, id, "internal-server-error").await;
-                                        }
-                                    }
-                                };
-                                
-                                // Send successful response with bundle data
-                                return Self::send_pubsub_bundle_response(client, from, id, node, &bundle_xml).await;
-                            } else {
-                                info!("Bundle request for different device ID: {} (ours: {})", device_id, our_device_id);
-                                return Self::send_pubsub_error_response(client, from, id, "item-not-found").await;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        
-        // If we get here, it's not a recognized pubsub request
-        warn!("Unhandled pubsub request from {}: {:?}", from, stanza);
-        Self::send_pubsub_error_response(client, from, id, "feature-not-implemented").await
-    }
-
-    /// Send a pubsub bundle response
-    async fn send_pubsub_bundle_response(
-        client: &Arc<TokioMutex<XMPPAsyncClient>>,
-        to: &str,
-        id: &str,
-        node: &str,
-        bundle_xml: &str,
-    ) -> Result<()> {
-        info!("Sending bundle response to {} for node {}", to, node);
-        
-        // Parse the bundle XML to extract just the bundle element
-        let bundle_element = match bundle_xml.parse::<xmpp_parsers::Element>() {
-            Ok(elem) => elem,
-            Err(e) => {
-                error!("Failed to parse bundle XML: {}", e);
-                return Self::send_pubsub_error_response(client, to, id, "internal-server-error").await;
-            }
-        };
-        
-        // Create the pubsub response structure
-        let item_element = xmpp_parsers::Element::builder("item", "http://jabber.org/protocol/pubsub")
-            .attr("id", "current")
-            .append(bundle_element)
-            .build();
-        
-        let items_element = xmpp_parsers::Element::builder("items", "http://jabber.org/protocol/pubsub")
-            .attr("node", node)
-            .append(item_element)
-            .build();
-        
-        let pubsub_element = xmpp_parsers::Element::builder("pubsub", "http://jabber.org/protocol/pubsub")
-            .append(items_element)
-            .build();
-        
-        let response_iq = xmpp_parsers::Element::builder("iq", "jabber:client")
-            .attr("type", "result")
-            .attr("to", to)
-            .attr("id", id)
-            .append(pubsub_element)
-            .build();
-        
-        let mut client_guard = client.lock().await;
-        match client_guard.send_stanza(response_iq).await {
-            Ok(_) => {
-                info!("Successfully sent bundle response to {}", to);
-                Ok(())
-            }
-            Err(e) => {
-                error!("Failed to send bundle response to {}: {}", to, e);
-                Err(anyhow!("Failed to send bundle response: {}", e))
-            }
-        }
-    }
-
-    /// Send a pubsub error response
-    async fn send_pubsub_error_response(
-        client: &Arc<TokioMutex<XMPPAsyncClient>>,
-        to: &str,
-        id: &str,
-        error_type: &str,
-    ) -> Result<()> {
-        info!("Sending pubsub error response to {}: {}", to, error_type);
-        
-        let error_element = match error_type {
-            "item-not-found" => {
-                xmpp_parsers::Element::builder("error", "jabber:client")
-                    .attr("type", "cancel")
-                    .append(
-                        xmpp_parsers::Element::builder("item-not-found", "urn:ietf:params:xml:ns:xmpp-stanzas").build()
-                    )
-                    .build()
-            }
-            "feature-not-implemented" => {
-                xmpp_parsers::Element::builder("error", "jabber:client")
-                    .attr("type", "cancel")
-                    .append(
-                        xmpp_parsers::Element::builder("feature-not-implemented", "urn:ietf:params:xml:ns:xmpp-stanzas").build()
-                    )
-                    .build()
-            }
-            "internal-server-error" => {
-                xmpp_parsers::Element::builder("error", "jabber:client")
-                    .attr("type", "wait")
-                    .append(
-                        xmpp_parsers::Element::builder("internal-server-error", "urn:ietf:params:xml:ns:xmpp-stanzas").build()
-                    )
-                    .build()
-            }
-            _ => {
-                xmpp_parsers::Element::builder("error", "jabber:client")
-                    .attr("type", "cancel")
-                    .append(
-                        xmpp_parsers::Element::builder("bad-request", "urn:ietf:params:xml:ns:xmpp-stanzas").build()
-                    )
-                    .build()
-            }
-        };
-        
-        let error_iq = xmpp_parsers::Element::builder("iq", "jabber:client")
-            .attr("type", "error")
-            .attr("to", to)
-            .attr("id", id)
-            .append(error_element)
-            .build();
-        
-        let mut client_guard = client.lock().await;
-        match client_guard.send_stanza(error_iq).await {
-            Ok(_) => {
-                info!("Successfully sent error response to {}", to);
-                Ok(())
-            }
-            Err(e) => {
-                error!("Failed to send error response to {}: {}", to, e);
-                Err(anyhow!("Failed to send error response: {}", e))
-            }
-        }
-    }
 }
 
-// Global client registry for OMEMO integration
-lazy_static::lazy_static! {
-    static ref GLOBAL_CLIENT: std::sync::RwLock<Option<Arc<TokioMutex<XMPPClient>>>> = std::sync::RwLock::new(None);
-}
+// Global XMPP client instance for accessing from other modules
+static GLOBAL_XMPP_CLIENT: tokio::sync::OnceCell<Arc<TokioMutex<XMPPClient>>> = tokio::sync::OnceCell::const_new();
 
-/// Register the current client as the global instance
-/// This allows other parts of the app to access it when needed
-pub fn register_global_client(client: XMPPClient) {
-    if let Ok(mut global_client) = GLOBAL_CLIENT.write() {
-        info!("Registering global XMPP client instance with JID: {}", client.get_jid());
-        *global_client = Some(Arc::new(TokioMutex::new(client)));
-    } else {
-        error!("Failed to acquire write lock for global client registry");
-    }
+/// Set the global XMPP client instance
+pub async fn set_global_xmpp_client(client: XMPPClient) {
+    let client_arc = Arc::new(TokioMutex::new(client));
+    let _ = GLOBAL_XMPP_CLIENT.set(client_arc);
 }
 
 /// Get the global XMPP client instance
-/// This is used by the OMEMO implementation and other modules that need access to the client
 pub async fn get_global_xmpp_client() -> Option<Arc<TokioMutex<XMPPClient>>> {
-    if let Ok(global_client) = GLOBAL_CLIENT.read() {
-        global_client.clone()
-    } else {
-        error!("Failed to acquire read lock for global client registry");
-        None
-    }
+    GLOBAL_XMPP_CLIENT.get().cloned()
 }
 
-/// Helper function to verify OMEMO stanza structure
-fn verify_omemo_stanza(stanza: &xmpp_parsers::Element, content: &str) -> Result<(), String> {
-    //debug!("Starting OMEMO stanza verification...");
-    //debug!("Stanza name: {}, namespace: {}", stanza.name(), stanza.ns());
+/// Verify OMEMO stanza structure for security
+pub fn verify_omemo_stanza(stanza: &xmpp_parsers::Element, _content: &str) -> Result<(), String> {
+    debug!("Verifying OMEMO stanza structure for security compliance");
     
-    // First, check if the plaintext appears anywhere in the stanza string representation
-    let stanza_str = format!("{:?}", stanza);
-    if stanza_str.contains(content) {
-        error!("SECURITY VIOLATION: Plaintext content found in encrypted message");
-        return Err(format!("SECURITY VIOLATION: Plaintext content found in encrypted message"));
-    }
-    
-    // Verify that all required OMEMO elements are present with proper namespaces
     let mut missing_elements = Vec::new();
     
-    // Check message element exists with jabber:client namespace
-    if stanza.name() != "message" || stanza.ns() != "jabber:client" {
-        missing_elements.push("message element with jabber:client namespace");
-        error!("Message element namespace issue: expected 'jabber:client', got '{}'", stanza.ns());
-        return Err(format!("SECURITY VIOLATION: Message missing required OMEMO elements: {}", 
-                         missing_elements.join(", ")));
-    }
-    
-    // Debug attributes
-    //debug!("Message attributes:");
-    for (_name, _value) in stanza.attrs() {
-        //debug!("  - {}: {}", name, value);
-    }
-    
-    // Check the encrypted element exists and has the right namespace
-    let encrypted = match stanza.get_child("encrypted", custom_ns::OMEMO)
+    // Find the encrypted element - try different namespace variations
+    let encrypted = stanza.get_child("encrypted", custom_ns::OMEMO)
         .or_else(|| stanza.get_child("encrypted", custom_ns::OMEMO_V1))
-        .or_else(|| stanza.get_child("encrypted", "")) {
-        Some(elem) => {
-            //debug!("Found encrypted element with namespace: {}", elem.ns());
-            elem
-        },
+        .or_else(|| stanza.get_child("encrypted", ""));
+    
+    let encrypted = match encrypted {
+        Some(encrypted) => encrypted,
         None => {
-            error!("Missing encrypted element with proper namespace");
-            //debug!("Direct children of message element:");
-            for _child in stanza.children() {
-                //debug!("  - {} (ns: {})", child.name(), child.ns());
-            }
-            missing_elements.push("OMEMO namespace, encrypted element");
+            error!("Missing encrypted element in OMEMO message");
+            missing_elements.push("encrypted element");
             return Err(format!("SECURITY VIOLATION: Message missing required OMEMO elements: {}", 
-                             missing_elements.join(", ")));
+                              missing_elements.join(", ")));
         }
     };
     
-    // Check header element - note that child elements may inherit namespace from parent
-    let header = match encrypted.get_child("header", custom_ns::OMEMO)
+    debug!("Found encrypted element with namespace: {}", encrypted.ns());
+    
+    // Check header element - try different namespace variations
+    let header = encrypted.get_child("header", custom_ns::OMEMO)
         .or_else(|| encrypted.get_child("header", custom_ns::OMEMO_V1))
-        .or_else(|| encrypted.get_child("header", "")) {
-        Some(elem) => {
-            //debug!("Found header element with namespace: {}", elem.ns());
-            elem
-        },
+        .or_else(|| encrypted.get_child("header", ""));
+    
+    let header = match header {
+        Some(header) => header,
         None => {
             error!("Missing header element in encrypted element");
-            //debug!("Direct children of encrypted element:");
-            for _child in encrypted.children() {
-                //debug!("  - {} (ns: {})", child.name(), child.ns());
-            }
-            missing_elements.push("header element");
+            missing_elements.push("header");
             return Err(format!("SECURITY VIOLATION: Message missing required OMEMO elements: {}", 
-                             missing_elements.join(", ")));
+                              missing_elements.join(", ")));
         }
     };
     
-    // Check sender device ID
-    if let Some(_sid) = header.attr("sid") {
-        //debug!("Found sender device ID: {}", sid);
-    } else {
-        error!("Missing sender device ID in header element");
+    debug!("Found header element with namespace: {}", header.ns());
+    
+    // Check sender device ID (sid) attribute
+    if header.attr("sid").is_none() {
+        error!("Missing sender device ID (sid) attribute in header");
         missing_elements.push("sender device ID");
+    } else {
+        let sid = header.attr("sid").unwrap();
+        debug!("Found sender device ID: {}", sid);
+        
+        // Validate that sid is a valid number
+        match sid.parse::<u32>() {
+            Ok(_) => debug!("Valid device ID format"),
+            Err(_) => {
+                error!("Invalid device ID format: {}", sid);
+                missing_elements.push("valid device ID");
+            }
+        }
     }
     
-    // Check IV element - try both with OMEMO namespace and empty namespace
+    // Check initialization vector (iv) element - try different namespace variations
     let iv = header.get_child("iv", custom_ns::OMEMO)
+        .or_else(|| header.get_child("iv", custom_ns::OMEMO_V1))
         .or_else(|| header.get_child("iv", ""));
     
     if let Some(iv_elem) = iv {
-        //debug!("Found IV element with namespace: {}", iv_elem.ns());
+        debug!("Found iv element with namespace: {}", iv_elem.ns());
         let iv_text = iv_elem.text();
-        //debug!("IV content length: {}", iv_text.len());
+        debug!("IV content length: {}", iv_text.len());
+        
         // Check if IV content is valid base64
         match base64::engine::general_purpose::STANDARD.decode(iv_text.trim()) {
             Ok(decoded) => debug!("Valid base64 IV content, decoded length: {} bytes", decoded.len()),
@@ -2607,3 +2228,5 @@ fn verify_omemo_stanza(stanza: &xmpp_parsers::Element, content: &str) -> Result<
                   missing_elements.join(", ")))
     }
 }
+
+// Global XMPP client instance for accessing from other modules

@@ -195,6 +195,9 @@ pub struct OmemoMessage {
     
     /// Whether this message is a PreKey message (forces new session creation)
     pub is_prekey: bool,
+    
+    /// Ephemeral public key used for X3DH (only present in PreKey messages)
+    pub ephemeral_key: Option<Vec<u8>>,
 }
 
 /// Double Ratchet implementation for OMEMO
@@ -313,6 +316,16 @@ impl X3DHProtocol {
         their_one_time_pre_key: Option<&[u8]>,
         ephemeral_key: &[u8], // Use provided ephemeral key instead of generating
     ) -> Result<Vec<u8>, DoubleRatchetError> {
+        log::debug!("X3DH initiator: identity_key_pair.public_key: {}", hex::encode(&identity_key_pair.public_key));
+        log::debug!("X3DH initiator: their_identity_key: {}", hex::encode(their_identity_key));
+        log::debug!("X3DH initiator: their_signed_pre_key: {}", hex::encode(their_signed_pre_key));
+        log::debug!("X3DH initiator: ephemeral_key (first 16 bytes): {}", hex::encode(&ephemeral_key[..16]));
+        if let Some(otpk) = their_one_time_pre_key {
+            log::debug!("X3DH initiator: their_one_time_pre_key: {}", hex::encode(otpk));
+        } else {
+            log::debug!("X3DH initiator: their_one_time_pre_key: None");
+        }
+        
         // Perform the key agreement using the provided ephemeral key
         let mut dh_values = Vec::new();
         
@@ -359,6 +372,7 @@ impl X3DHProtocol {
         let shared_secret = crypto::hkdf_derive(&salt, &concat_dh, info, 32)
             .map_err(DoubleRatchetError::CryptoError)?;
         
+        log::debug!("X3DH initiator: derived shared_secret: {}", hex::encode(&shared_secret));
         Ok(shared_secret)
     }
 
@@ -390,6 +404,16 @@ impl X3DHProtocol {
         one_time_pre_key_pair: Option<&KeyPair>,
         their_ephemeral_key: &[u8],
     ) -> Result<Vec<u8>, DoubleRatchetError> {
+        log::debug!("X3DH recipient: identity_key_pair.public_key: {}", hex::encode(&identity_key_pair.public_key));
+        log::debug!("X3DH recipient: their_identity_key: {}", hex::encode(their_identity_key));
+        log::debug!("X3DH recipient: signed_pre_key_pair.public_key: {}", hex::encode(&signed_pre_key_pair.public_key));
+        log::debug!("X3DH recipient: their_ephemeral_key (first 16 bytes): {}", hex::encode(&their_ephemeral_key[..16]));
+        if let Some(otpk) = one_time_pre_key_pair {
+            log::debug!("X3DH recipient: one_time_pre_key_pair.public_key: {}", hex::encode(&otpk.public_key));
+        } else {
+            log::debug!("X3DH recipient: one_time_pre_key_pair: None");
+        }
+        
         // Perform the key agreement
         let mut dh_values = Vec::new();
         
@@ -429,11 +453,13 @@ impl X3DHProtocol {
             concat_dh.extend_from_slice(&dh);
         }
         
-        // Use HKDF to derive the shared key
+        // Use HKDF to derive the shared key (same as initiator)
         let salt = vec![0u8; 32]; // Zero salt
         let info = b"OMEMO X3DH";
-        let shared_key = crypto::kdf(&concat_dh, &salt, info);
+        let shared_key = crypto::hkdf_derive(&salt, &concat_dh, info, 32)
+            .map_err(DoubleRatchetError::CryptoError)?;
         
+        log::debug!("X3DH recipient: derived shared_key: {}", hex::encode(&shared_key));
         Ok(shared_key)
     }
 }
@@ -459,24 +485,56 @@ impl DoubleRatchet {
             &ephemeral_key,
         )?;
         
+        // Create symmetric session state for both initiator and recipient
+        Self::create_symmetric_session_state(
+            shared_secret,
+            local_identity_key_pair,
+            remote_identity_key,
+            remote_signed_prekey,
+            ephemeral_key,
+            true, // is_initiator
+            local_device_id,
+            remote_device_id,
+            remote_jid,
+        )
+    }
+
+    /// Create a symmetric session state that both initiator and recipient can use
+    fn create_symmetric_session_state(
+        shared_secret: Vec<u8>,
+        local_identity_key_pair: KeyPair,
+        remote_identity_key: Vec<u8>,
+        remote_signed_prekey: Vec<u8>,
+        ephemeral_key: Vec<u8>,
+        is_initiator: bool,
+        local_device_id: DeviceId,
+        remote_device_id: DeviceId,
+        remote_jid: String,
+    ) -> Result<RatchetState, DoubleRatchetError> {
         // Generate an initial ratchet key pair
         let ratchet_key_pair = X3DHProtocol::generate_key_pair()?;
         
-        // Initialize the sending and root chains
+        // Initialize the root key from the shared secret
         let root_key = shared_secret;
-        let send_chain_key = crypto::kdf(&root_key, &ratchet_key_pair.public_key, b"send_chain");
+        
+        // Initialize both sending and receiving chains symmetrically
+        // Use the shared secret itself as the basis for both chains to ensure consistency
+        // Both sides will derive the same chain keys from the same shared secret
+        let chain_seed = crypto::sha256_hash(&root_key); // Deterministic seed from shared secret
+        let send_chain_key = crypto::kdf(&chain_seed, b"chain_key_base", b"send_chain");
+        let receive_chain_key = crypto::kdf(&chain_seed, b"chain_key_base", b"receive_chain");
         
         // Create the state
         let state = RatchetState {
             initialized: true,
-            is_initiator: true,
+            is_initiator,
             remote_identity_key,
             local_identity_key_pair,
             root_key,
             send_chain_key,
-            receive_chain_key: vec![],
+            receive_chain_key,
             ratchet_key_pair,
-            remote_ratchet_key: vec![],
+            remote_ratchet_key: remote_signed_prekey, // Both sides use the recipient's signed prekey as initial ratchet key
             prev_remote_ratchet_key: vec![],
             send_message_number: 0,
             receive_message_number: 0,
@@ -500,41 +558,20 @@ impl DoubleRatchet {
         remote_device_id: DeviceId,
         remote_jid: String,
     ) -> Result<RatchetState, DoubleRatchetError> {
-        // Perform X3DH key agreement
-        let shared_secret = X3DHProtocol::key_agreement_initiator(
-            &local_identity_key_pair,
-            &remote_identity_key,
-            &remote_signed_prekey,
-            remote_one_time_prekey.as_deref(),
-        )?;
+        // Generate a random ephemeral key pair for this session
+        let ephemeral_key_pair = X3DHProtocol::generate_key_pair()?;
         
-        // Generate an initial ratchet key pair
-        let ratchet_key_pair = X3DHProtocol::generate_key_pair()?;
-        let root_key = shared_secret;
-        let send_chain_key = crypto::kdf(&root_key, &remote_signed_prekey, b"send_chain");
-        
-        // Create the state
-        let state = RatchetState {
-            initialized: true,
-            is_initiator: true,
-            remote_identity_key,
+        // Use the with_ephemeral version with the generated ephemeral key
+        Self::new_session_initiator_with_ephemeral(
             local_identity_key_pair,
-            root_key,
-            send_chain_key,
-            receive_chain_key: vec![],
-            ratchet_key_pair,
-            remote_ratchet_key: remote_signed_prekey.clone(),
-            prev_remote_ratchet_key: vec![],
-            send_message_number: 0,
-            receive_message_number: 0,
-            prev_receive_message_number: 0,
-            skipped_message_keys: std::collections::HashMap::new(),
+            remote_identity_key,
+            remote_signed_prekey,
+            remote_one_time_prekey,
+            ephemeral_key_pair.private_key,
             local_device_id,
             remote_device_id,
-            remote_jid: normalize_jid_to_bare(&remote_jid),
-        };
-        
-        Ok(state)
+            remote_jid,
+        )
     }
     
     /// Create a new Double Ratchet session as the recipient
@@ -557,32 +594,18 @@ impl DoubleRatchet {
             &remote_ephemeral_key,
         )?;
         
-        // Initialize the receiving and root chains
-        let root_key = shared_secret;
-        let receive_chain_key = crypto::kdf(&root_key, &remote_ephemeral_key, b"receive_chain");
-        
-        // Create the state
-        let state = RatchetState {
-            initialized: true,
-            is_initiator: false,
-            remote_identity_key,
+        // Create symmetric session state for both initiator and recipient
+        Self::create_symmetric_session_state(
+            shared_secret,
             local_identity_key_pair,
-            root_key,
-            send_chain_key: vec![],
-            receive_chain_key,
-            ratchet_key_pair: local_signed_prekey_pair,
-            remote_ratchet_key: remote_ephemeral_key,
-            prev_remote_ratchet_key: vec![],
-            send_message_number: 0,
-            receive_message_number: 0,
-            prev_receive_message_number: 0,
-            skipped_message_keys: std::collections::HashMap::new(),
+            remote_identity_key,
+            local_signed_prekey_pair.public_key,
+            remote_ephemeral_key,
+            false, // is_initiator
             local_device_id,
             remote_device_id,
-            remote_jid: normalize_jid_to_bare(&remote_jid),
-        };
-        
-        Ok(state)
+            remote_jid,
+        )
     }
     
     /// Encrypt a message
@@ -611,6 +634,7 @@ impl DoubleRatchet {
             iv,
             encrypted_keys: std::collections::HashMap::new(),
             is_prekey: false, // Regular message, not a PreKey message
+            ephemeral_key: None, // Only present in PreKey messages
         };
         
         // Increment message counter
@@ -964,6 +988,18 @@ pub mod utils {
             encrypted_keys.insert(device_id, key);
         }
         
+        // Try to get the ephemeral key (for PreKey messages)
+        let ephemeral_key = if let Some(eph_elem) = header.children().find(|n| n.has_tag_name("ephemeral")) {
+            if let Some(eph_text) = eph_elem.text() {
+                Some(BASE64.decode(eph_text)
+                    .map_err(|e| XmlError::EncodingError(format!("Failed to decode ephemeral key: {}", e)))?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        
         // Get the payload
         let payload = encrypted.children()
             .find(|n| n.has_tag_name("payload"))
@@ -1000,7 +1036,8 @@ pub mod utils {
             mac,                      // Now using the actual MAC from XML
             iv,
             encrypted_keys,
-            is_prekey: false,         // Will be determined by the receiver logic
+            is_prekey: ephemeral_key.is_some(), // This is a PreKey message if ephemeral key is present
+            ephemeral_key,            // Extracted from XML
         };
         
         Ok(message)
@@ -1019,6 +1056,13 @@ pub mod utils {
         xml.push_str("<iv>");
         xml.push_str(&BASE64.encode(&message.iv));
         xml.push_str("</iv>");
+        
+        // Ephemeral key (only for PreKey messages)
+        if let Some(ephemeral_key) = &message.ephemeral_key {
+            xml.push_str("<ephemeral>");
+            xml.push_str(&BASE64.encode(ephemeral_key));
+            xml.push_str("</ephemeral>");
+        }
         
         // Keys
         for (device_id, key) in &message.encrypted_keys {

@@ -102,6 +102,10 @@ pub enum OmemoError {
     /// Publication error
     #[error("Publication error: {0}")]
     PublicationError(String),
+    
+    /// Timeout error
+    #[error("Timeout error: {0}")]
+    TimeoutError(String),
 }
 
 // OmemoError already derives Error from thiserror which provides the std::error::Error trait
@@ -158,6 +162,9 @@ pub struct OmemoManager {
     
     /// Set of devices that we've reset sessions with and need to send PreKey messages to
     pub pending_prekey_sends: HashSet<(String, DeviceId)>,
+    
+    /// Ephemeral keys for pending PreKey messages to specific devices
+    pub prekey_ephemeral_keys: HashMap<(String, DeviceId), Vec<u8>>,
 }
 
 impl OmemoManager {
@@ -242,6 +249,7 @@ impl OmemoManager {
             prekey_rotation_config: PreKeyRotationConfig::default(),
             pending_session_rebuilds: HashSet::new(),
             pending_prekey_sends: HashSet::new(),
+            prekey_ephemeral_keys: HashMap::new(),
         };
         
         // Load the last PreKey rotation time from storage
@@ -419,10 +427,14 @@ impl OmemoManager {
         // Check if we already have a session (early return, no borrow held)
         let session_exists_and_initialized = self.sessions.get(&key).map(|s| s.is_initialized()).unwrap_or(false);
         if session_exists_and_initialized && !needs_rebuild {
+            debug!("Reusing existing session for {}:{}", bare_jid, remote_device_id);
             return self.sessions.get_mut(&key).ok_or_else(|| OmemoError::SessionError(
                 session::SessionError::InvalidStateError("Session not found after check".to_string())
             ));
         }
+
+        debug!("Creating new session for {}:{} (exists: {}, needs_rebuild: {})", 
+            bare_jid, remote_device_id, session_exists_and_initialized, needs_rebuild);
 
         // Determine session role based on device IDs for consistency
         // Device with lower ID becomes initiator, device with higher ID becomes recipient
@@ -444,7 +456,15 @@ impl OmemoManager {
 
         let session = if we_are_initiator {
             // We have the lower device ID, so we are the initiator
-            OmemoSession::new_initiator(
+            // Generate a random ephemeral key pair for X3DH (standard OMEMO)
+            let ephemeral_key_pair = protocol::X3DHProtocol::generate_key_pair()
+                .map_err(|e| OmemoError::CryptoError(crypto::CryptoError::KdfError(e.to_string())))?;
+            
+            // Store the ephemeral public key for this device to include in PreKey messages
+            let device_key = (bare_jid.clone(), remote_device_id);
+            self.prekey_ephemeral_keys.insert(device_key, ephemeral_key_pair.public_key.clone());
+            
+            OmemoSession::new_initiator_with_ephemeral(
                 bare_jid.clone(),
                 remote_device_id,
                 our_identity_key_pair,
@@ -455,35 +475,32 @@ impl OmemoManager {
                 } else {
                     Some(remote_identity.pre_keys[0].public_key.clone())
                 },
+                ephemeral_key_pair.private_key,
                 self.device_id
             )?
         } else {
             // We have the higher device ID, so we are the recipient
-            let our_signed_prekey_pair = match &self.key_bundle {
-                Some(bundle) => bundle.signed_pre_key_pair.clone(),
-                None => return Err(OmemoError::SessionError(
-                    session::SessionError::InvalidStateError("Key bundle not initialized".to_string())
-                )),
-            };
+            // For recipients, we should also create a session proactively to enable bidirectional messaging
+            // The first message we receive will establish the proper session state
+            warn!("Creating recipient session proactively for {}:{} (device {} > {})", bare_jid, remote_device_id, self.device_id, remote_device_id);
             
-            // For recipient, we need the remote's ephemeral key
-            // Since we don't have real ephemeral keys, use a deterministic approach:
-            // Both sides will use the same "ephemeral" key derived from their identity keys
-            let remote_ephemeral_key = Self::derive_deterministic_ephemeral_key(
-                &our_identity_key_pair.public_key,
-                &remote_identity.identity_key,
-                self.device_id,
-                remote_device_id
-            )?;
+            // For now, create a minimal session that can be updated when we receive the first message
+            // This allows us to send messages before receiving any
+            let ephemeral_key_pair = protocol::X3DHProtocol::generate_key_pair()
+                .map_err(|e| OmemoError::CryptoError(crypto::CryptoError::KdfError(e.to_string())))?;
             
-            OmemoSession::new_recipient(
+            OmemoSession::new_initiator_with_ephemeral(
                 bare_jid.clone(),
                 remote_device_id,
                 our_identity_key_pair,
                 remote_identity.identity_key,
-                our_signed_prekey_pair,
-                None, // No one-time PreKey for simplicity
-                remote_ephemeral_key,
+                remote_identity.signed_pre_key.public_key,
+                if remote_identity.pre_keys.is_empty() {
+                    None
+                } else {
+                    Some(remote_identity.pre_keys[0].public_key.clone())
+                },
+                ephemeral_key_pair.private_key,
                 self.device_id
             )?
         };
@@ -531,6 +548,10 @@ impl OmemoManager {
             .map_err(|e| OmemoError::CryptoError(e))?;
         
         debug!("Derived deterministic ephemeral key: {}", hex::encode(&derived_key));
+        // Log the inputs to help debug session consistency
+        debug!("Ephemeral key derivation inputs - local_device_id: {}, remote_device_id: {}", local_device_id, remote_device_id);
+        debug!("Ephemeral key derivation inputs - local_identity: {}", hex::encode(local_identity));
+        debug!("Ephemeral key derivation inputs - remote_identity: {}", hex::encode(remote_identity));
         Ok(derived_key)
     }
     
@@ -554,7 +575,7 @@ impl OmemoManager {
         let bundle_node = format!("{}.bundles:{}", OMEMO_NAMESPACE, device_id);
         
         // Make the request
-        let response = match self.request_pubsub_items(remote_jid, &bundle_node).await {
+        let response = match crate::xmpp::omemo_integration::request_pubsub_items(remote_jid, &bundle_node).await {
             Ok(resp) => resp,
             Err(e) => {
                 warn!("Failed to fetch device bundle for {}:{}: {}", remote_jid, device_id, e);
@@ -579,13 +600,18 @@ impl OmemoManager {
         info!("Encrypting message for {}", recipient);
         
         // Get the device list for the recipient with timeout protection
-        let device_discovery_timeout = Duration::from_secs(10); // 10 seconds max for device discovery
-        let recipient_device_ids = match timeout(device_discovery_timeout, self.get_device_ids(recipient)).await {
+        // ALWAYS force refresh to avoid stale device list issues - NO CACHED FALLBACK
+        let device_discovery_timeout = Duration::from_secs(15); // Increased timeout for fresh fetches
+        info!("Forcing fresh device list fetch for {} (NO CACHE FALLBACK)", recipient);
+        let recipient_device_ids = match timeout(device_discovery_timeout, self.get_device_ids_with_force_refresh(recipient, true)).await {
             Ok(Ok(devices)) => devices,
-            Ok(Err(e)) => return Err(e),
+            Ok(Err(e)) => {
+                error!("Fresh device list fetch failed for {}: {} - NO FALLBACK, failing fast", recipient, e);
+                return Err(e);
+            },
             Err(_) => {
-                warn!("Timeout while fetching device list for {}, assuming no OMEMO devices", recipient);
-                Vec::new()
+                error!("Timeout while fetching fresh device list for {} - NO FALLBACK, failing fast", recipient);
+                return Err(OmemoError::TimeoutError("Device list fetch timeout".to_string()));
             }
         };
         
@@ -594,17 +620,21 @@ impl OmemoManager {
         }
         
         // Get our own device IDs (important for message carbons) with timeout
+        // Also force refresh for our own devices to ensure consistency - NO CACHED FALLBACK
         let local_username = self.local_jid.split('@').next().unwrap_or(&self.local_jid);
         let local_domain = self.local_jid.split('@').nth(1).unwrap_or("");
         let user_bare_jid = format!("{}@{}", local_username, local_domain);
-        let own_device_ids = match timeout(device_discovery_timeout, self.get_device_ids(&user_bare_jid)).await {
+        info!("Forcing fresh device list fetch for own JID {} (NO CACHE FALLBACK)", user_bare_jid);
+        let own_device_ids = match timeout(device_discovery_timeout, self.get_device_ids_with_force_refresh(&user_bare_jid, true)).await {
             Ok(Ok(devices)) => devices,
             Ok(Err(e)) => {
-                warn!("Failed to get own device list: {}, continuing with recipient devices only", e);
+                warn!("Failed to get fresh own device list: {} - continuing with recipient devices only", e);
+                // Don't fail for own devices - just continue with empty list
                 Vec::new()
             },
             Err(_) => {
-                warn!("Timeout while fetching own device list, continuing with recipient devices only");
+                warn!("Timeout while fetching fresh own device list - continuing with recipient devices only");
+                // Don't fail for own devices - just continue with empty list
                 Vec::new()
             }
         };
@@ -644,7 +674,6 @@ impl OmemoManager {
         
         // Now encrypt the random key for each recipient device and our own devices
         let mut encrypted_keys = HashMap::new();
-        let mut device_list = Vec::new();
         
         // Merge device lists (removing duplicates if our own device ID appears in both lists)
         let mut all_devices = Vec::new();
@@ -656,16 +685,24 @@ impl OmemoManager {
             }
         }
         
-        // Add our own devices (for message carbons)
-        // Note: We include ALL our devices, including the current one
-        // This ensures message carbons can be decrypted by all our devices
+        // Add our own devices (for message carbons), but exclude our current device
+        // to avoid session state conflicts with self-encryption
         for device_id in own_device_ids {
+            // Skip our current device to avoid creating sessions with ourselves
+            if device_id == self.device_id {
+                debug!("Skipping our current device {} for message encryption", device_id);
+                continue;
+            }
+            
             if !all_devices.contains(&(user_bare_jid.clone(), device_id)) {
                 all_devices.push((user_bare_jid.clone(), device_id));
             }
         }
         
         info!("Encrypting message key for {} total devices", all_devices.len());
+        
+        // Clone the device list for use after the async operations
+        let device_list_copy = all_devices.clone();
         
         // Now encrypt the message key (aes_key + auth_tag, 32 bytes) for all devices
         // Add overall timeout protection to prevent UI hangs
@@ -699,7 +736,6 @@ impl OmemoManager {
                         match session.encrypt_key(&message_key) {
                             Ok(encrypted_key) => {
                                 encrypted_keys.insert(device_id, encrypted_key);
-                                device_list.push(device_id);
                                 debug!("Encrypted message key for {}:{}", jid, device_id);
                                 
                                 // If this device was waiting for a PreKey message, mark it as sent
@@ -732,6 +768,26 @@ impl OmemoManager {
             // Continue with whatever sessions we managed to create
         }
         
+        info!("Message encrypted successfully for {} devices", encrypted_keys.len());
+        
+        // Check if this message contains any PreKey messages (devices with stored ephemeral keys)
+        let has_prekey_devices = device_list_copy.iter().any(|(jid, device_id)| {
+            let device_key = (jid.clone(), *device_id);
+            self.prekey_ephemeral_keys.contains_key(&device_key)
+        });
+        
+        // If this is a PreKey message, we need to include an ephemeral key
+        // For simplicity, use the first ephemeral key if multiple devices need PreKey messages
+        let ephemeral_key = if has_prekey_devices {
+            device_list_copy.iter()
+                .find_map(|(jid, device_id)| {
+                    let device_key = (jid.clone(), *device_id);
+                    self.prekey_ephemeral_keys.get(&device_key).cloned()
+                })
+        } else {
+            None
+        };
+        
         // Create the complete OMEMO message using Dino-compatible AES-GCM format
         let message = OmemoMessage {
             sender_device_id: self.device_id,
@@ -742,10 +798,17 @@ impl OmemoManager {
             mac: vec![], // AES-GCM doesn't use separate HMAC, auth tag is embedded in encrypted keys
             iv: iv.to_vec(), // 12-byte IV for AES-GCM
             encrypted_keys,
-            is_prekey: false, // Will be determined per-device during session creation
+            is_prekey: has_prekey_devices,
+            ephemeral_key,
         };
         
-        info!("Message encrypted successfully for {} devices", device_list.len());
+        // Clear the ephemeral keys for devices that got PreKey messages
+        if has_prekey_devices {
+            for (jid, device_id) in &device_list_copy {
+                let device_key = (jid.clone(), *device_id);
+                self.prekey_ephemeral_keys.remove(&device_key);
+            }
+        }
         
         Ok(message)
     }
@@ -759,6 +822,52 @@ impl OmemoManager {
     /// Decrypt a message from a sender
     pub async fn decrypt_message(&mut self, sender: &str, device_id: u32, message: &OmemoMessage) -> Result<String, OmemoError> {
         info!("Decrypting message from {}:{}", sender, device_id);
+        
+        // Check if this is a PreKey message (has ephemeral key)
+        if message.is_prekey && message.ephemeral_key.is_some() {
+            info!("Received PreKey message from {}:{}, creating recipient session", sender, device_id);
+            
+            // Create session as recipient using the ephemeral key from the message
+            let ephemeral_key = message.ephemeral_key.as_ref().unwrap();
+            let bare_jid = Self::normalize_jid_to_bare(sender);
+            
+            // Get our identity and signed prekey
+            let our_identity_key_pair = match &self.key_bundle {
+                Some(bundle) => bundle.identity_key_pair.clone(),
+                None => return Err(OmemoError::SessionError(
+                    session::SessionError::InvalidStateError("Key bundle not initialized".to_string())
+                )),
+            };
+            let our_signed_prekey_pair = match &self.key_bundle {
+                Some(bundle) => bundle.signed_pre_key_pair.clone(),
+                None => return Err(OmemoError::SessionError(
+                    session::SessionError::InvalidStateError("Key bundle not initialized".to_string())
+                )),
+            };
+            
+            // Get sender's identity key
+            let sender_identity = self.get_device_identity(&bare_jid, device_id).await?;
+            
+            // Create recipient session
+            let session = OmemoSession::new_recipient(
+                bare_jid.clone(),
+                device_id,
+                our_identity_key_pair,
+                sender_identity.identity_key,
+                our_signed_prekey_pair,
+                None, // No one-time PreKey for simplicity
+                ephemeral_key.clone(),
+                self.device_id
+            )?;
+            
+            // Store the session
+            let key = (bare_jid.clone(), device_id);
+            let ratchet_state = session.ratchet_state.clone();
+            self.sessions.insert(key.clone(), session);
+            self.store_session_state(&bare_jid, device_id, &ratchet_state).await?;
+            
+            info!("Created new recipient session for {}:{}", bare_jid, device_id);
+        }
         
         // Check if we're waiting to send a PreKey message to this device
         let bare_jid = Self::normalize_jid_to_bare(sender);
@@ -911,36 +1020,9 @@ impl OmemoManager {
             return Err(OmemoError::InvalidInput(format!("Invalid JID format: {}", jid)));
         }
         
-        // If force refresh is not requested, try to get from storage first
-        if !force_refresh {
-            let storage_guard = self.storage.lock().await;
-            if let Ok(device_list) = storage_guard.load_device_list(jid) {
-                debug!("[OMEMO] get_device_ids: Found device list in storage for {}: {:?}", jid, device_list.device_ids);
-                
-                // Check if the list is recent enough (less than 5 minutes old for better responsiveness)
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs() as i64;
-                
-                let list_age = now - device_list.last_update;
-                let max_age = 300; // 5 minutes in seconds (reduced from 1 hour)
-                
-                if !device_list.device_ids.is_empty() && list_age < max_age {
-                    // If the cached list is non-empty and recent, use it
-                    debug!("[OMEMO] get_device_ids: Using cached device list (age: {} seconds)", list_age);
-                    return Ok(device_list.device_ids);
-                } else if !device_list.device_ids.is_empty() {
-                    debug!("[OMEMO] get_device_ids: Cached device list is stale (age: {} seconds), will refresh", list_age);
-                    // We'll still return the cached list if server fetch fails
-                } else {
-                    debug!("[OMEMO] get_device_ids: Cached device list is empty, will try to fetch from server");
-                }
-            }
-            drop(storage_guard);
-        } else {
-            info!("[OMEMO] get_device_ids: Force refresh requested, skipping cache for {}", jid);
-        }
+        // AGGRESSIVE FIX: Always fetch fresh from server to eliminate stale device list issues
+        // This bypasses all caching to ensure we always have the latest device information
+        warn!("[OMEMO] get_device_ids: ALWAYS fetching fresh from server (no caching) for {}", jid);
         
         // If not in storage or cached list is empty/stale, fetch from the server
         info!("[OMEMO] get_device_ids: Fetching device list for {} from XMPP server", jid);
@@ -998,24 +1080,12 @@ impl OmemoManager {
                     
                     return Ok(vec![]); // Return empty list
                 }
+                
+                // NO FALLBACK TO CACHED DATA - fail fast to surface the real issue
+                error!("[OMEMO] get_device_ids: Fetch failed for {}, NO CACHE FALLBACK - failing fast", jid);
+                return Err(e);
             }
         }
-        
-        // If we get here, all retries failed
-        
-        // Try to get the cached list again, even if it's stale or empty
-        let storage_guard = self.storage.lock().await;
-        if let Ok(device_list) = storage_guard.load_device_list(jid) {
-            if !device_list.device_ids.is_empty() {
-                warn!("[OMEMO] get_device_ids: Using stale cached device list after failed fetch attempts");
-                return Ok(device_list.device_ids);
-            }
-        }
-        drop(storage_guard);
-        
-        // If we have no cached list, return empty list for better UX
-        warn!("[OMEMO] get_device_ids: No device list available for {}, returning empty list", jid);
-        return Ok(vec![]);
     }
     
     /// Fetch device list from the XMPP server
@@ -1045,7 +1115,7 @@ impl OmemoManager {
             // Try with the standard namespace first
             let standard_node = format!("{}:devices", OMEMO_NAMESPACE);
             info!("[OMEMO] Trying standard node: {}", standard_node);
-            match client_guard.request_pubsub_items(jid, &standard_node).await {
+            match crate::xmpp::omemo_integration::request_pubsub_items(jid, &standard_node).await {
                 Ok(xml) => {
                     match self.parse_device_list_response(&xml) {
                         Ok(devices) if !devices.is_empty() => {
@@ -1068,7 +1138,7 @@ impl OmemoManager {
             // Try with the legacy namespace as fallback
             let legacy_node = "eu.siacs.conversations.axolotl:devices";
             info!("[OMEMO] Trying legacy node: {}", legacy_node);
-            match client_guard.request_pubsub_items(jid, &legacy_node).await {
+            match crate::xmpp::omemo_integration::request_pubsub_items(jid, &legacy_node).await {
                 Ok(xml) => {
                     match self.parse_device_list_response(&xml) {
                         Ok(devices) => {
@@ -2050,19 +2120,26 @@ impl OmemoManager {
             if let crate::omemo::protocol::DoubleRatchetError::CryptoError(crypto_error) = ratchet_error {
                 if let crate::omemo::crypto::CryptoError::AesGcmError(aes_error) = crypto_error {
                     if aes_error.contains("aead::Error") {
-                        // Use bare JID for consistent failure count tracking
-                        let failure_count = self.get_device_failure_count(&bare_jid, device_id).await;
-                        warn!("Double Ratchet state mismatch detected from {}:{} (failure count: {})", sender_jid, device_id, failure_count);
+                        // AEAD failures indicate session state mismatch - be aggressive about fixing this
+                        warn!("AEAD decryption failure from {}:{} - triggering immediate session reset", sender_jid, device_id);
                         
-                        // Only reset after multiple consecutive failures, but be more aggressive
-                        if failure_count >= 3 {
-                            warn!("Multiple consecutive failures ({}) from {}:{}, resetting session", failure_count, sender_jid, device_id);
-                            if let Err(reset_err) = self.reset_session(&bare_jid, device_id).await {
-                                error!("Failed to reset session: {}", reset_err);
-                            }
+                        // Use the new aggressive session reset handler
+                        if let Err(reset_err) = self.handle_aead_decryption_failure(&sender_jid, device_id).await {
+                            error!("Failed to handle AEAD decryption failure: {}", reset_err);
                         }
+                        
+                        return Err(OmemoError::SessionError(session_error));
                     }
                 }
+            }
+        }
+        
+        // Fallback logic for other types of errors
+        let failure_count = self.get_device_failure_count(&bare_jid, device_id).await;
+        if failure_count >= 3 {
+            warn!("Multiple consecutive failures ({}) from {}:{}, resetting session", failure_count, sender_jid, device_id);
+            if let Err(reset_err) = self.reset_session(&bare_jid, device_id).await {
+                error!("Failed to reset session: {}", reset_err);
             }
         }
         
@@ -2070,8 +2147,80 @@ impl OmemoManager {
         Err(OmemoError::SessionError(session_error))
     }
 
-}
+    /// Handle AEAD decryption failures by aggressively resetting sessions
+    /// This is critical for OMEMO reliability when sessions get out of sync
+    async fn handle_aead_decryption_failure(&mut self, sender_jid: &str, device_id: u32) -> Result<(), OmemoError> {
+        let bare_jid = Self::normalize_jid_to_bare(sender_jid);
+        warn!("AEAD decryption failure detected for {}:{} - implementing aggressive session reset", bare_jid, device_id);
+        
+        // Immediately reset the session to clear any corrupted state
+        if let Err(e) = self.reset_session(&bare_jid, device_id).await {
+            error!("Failed to reset session during AEAD failure handling: {}", e);
+        }
+        
+        // Mark this device as needing a fresh PreKey exchange
+        let key = (bare_jid.clone(), device_id);
+        self.pending_prekey_sends.insert(key.clone());
+        
+        // Clear any existing session state to prevent continued failures
+        self.sessions.remove(&key);
+        
+        // CRITICAL: Also clear our own session with this contact to force mutual session reset
+        // This ensures that when we send a message back, it will be a PreKey message
+        let our_device_ids = match self.get_own_device_ids().await {
+            Ok(ids) => ids,
+            Err(e) => {
+                warn!("Failed to get own device IDs during session reset: {}", e);
+                vec![]
+            }
+        };
+        
+        for our_device_id in our_device_ids {
+            let reverse_key = (bare_jid.clone(), our_device_id);
+            if self.sessions.contains_key(&reverse_key) {
+                warn!("Clearing our session with {}:{} to force mutual PreKey exchange", bare_jid, our_device_id);
+                self.sessions.remove(&reverse_key);
+            }
+        }
+        
+        // Force refresh of device bundles for fresh key material
+        if let Err(e) = self.force_refresh_device_list(&bare_jid).await {
+            warn!("Failed to refresh device list during session reset: {}", e);
+        }
+        
+        // Mark all devices of this contact for PreKey message sending
+        let target_device_ids = match self.get_device_ids(&bare_jid).await {
+            Ok(devices) => devices,
+            Err(_) => vec![device_id], // At minimum, mark the problematic device
+        };
+        
+        for target_device_id in target_device_ids {
+            let device_key = (bare_jid.clone(), target_device_id);
+            self.pending_prekey_sends.insert(device_key.clone());
+            info!("Marked device {}:{} for PreKey message sending after session reset", bare_jid, target_device_id);
+        }
+        
+        // Mark that this contact needs fresh session establishment from both sides
+        warn!("Mutual session reset initiated for {} - both parties will send PreKey messages", bare_jid);
+        
+        info!("Session reset complete for {}:{} - waiting for new PreKey message", bare_jid, device_id);
+        Ok(())
+    }
 
+    /// Get our own device IDs for session management
+    async fn get_own_device_ids(&self) -> Result<Vec<u32>, OmemoError> {
+        let bare_jid = Self::normalize_jid_to_bare(&self.local_jid);
+        match self.get_device_ids(&bare_jid).await {
+            Ok(device_ids) => Ok(device_ids),
+            Err(e) => {
+                warn!("Failed to get own device IDs: {}", e);
+                // Return our device ID as fallback
+                Ok(vec![self.device_id])
+            }
+        }
+    }
+
+}
 /// OMEMO Encryption Verification Error
 #[derive(Debug, Error)]
 pub enum EncryptionVerificationError {

@@ -738,7 +738,15 @@ impl super::XMPPClient {
         };
         
         // Retrieve our OMEMO manager instance
-        let omemo_manager = match super::XMPPClient::get_global_omemo_manager().await {
+        let omemo_manager = match crate::xmpp::get_global_xmpp_client().await {
+            Some(client) => {
+                let client_guard = client.lock().await;
+                client_guard.get_omemo_manager().map(|arc| arc.clone())
+            },
+            None => None,
+        };
+        
+        let omemo_manager = match omemo_manager {
             Some(m) => m,
             None => {
                 warn!("OMEMO manager not initialized");
@@ -876,6 +884,7 @@ impl super::XMPPClient {
                         keys
                     },
                     is_prekey: false,     // Will be determined by session state
+                    ephemeral_key: None,  // Will be extracted from XML if present
                 }
             ).await {
                 Ok(content) => content,
@@ -894,7 +903,15 @@ impl super::XMPPClient {
 
     // Helper method to check if OMEMO is fully initialized
     pub async fn is_omemo_fully_initialized() -> bool {
-        if let Some(omemo_manager) = super::XMPPClient::get_global_omemo_manager().await {
+        let omemo_manager = match crate::xmpp::get_global_xmpp_client().await {
+            Some(client) => {
+                let client_guard = client.lock().await;
+                client_guard.get_omemo_manager().map(|arc| arc.clone())
+            },
+            None => None,
+        };
+        
+        if let Some(omemo_manager) = omemo_manager {
             let manager = omemo_manager.lock().await;
             // Consider OMEMO fully initialized if we have a device ID and bundle published
             if manager.get_device_id() > 0 {

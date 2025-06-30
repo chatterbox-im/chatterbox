@@ -209,15 +209,16 @@ async fn main() -> Result<()> {
             
             // Register the client in the global registry AFTER OMEMO initialization
             // This ensures the global client has the OMEMO manager properly set
-            chatterbox::xmpp::register_global_client(xmpp_client.clone());
+            chatterbox::xmpp::set_global_xmpp_client(xmpp_client.clone()).await;
 
             // Initialize Service Discovery (XEP-0030)
-            if let Some(client_ref) = xmpp_client.get_client_arc() {
-                let service_discovery = ServiceDiscovery::new(client_ref);
-                if let Err(e) = service_discovery.advertise_features().await {
-                    warn!("Failed to advertise service discovery features: {}", e);
-                }
-            }
+            // TODO: Fix type mismatch between XMPPClient and AsyncClient
+            // if let Some(client_ref) = chatterbox::xmpp::get_global_xmpp_client().await {
+            //     let service_discovery = ServiceDiscovery::new(client_ref);
+            //     if let Err(e) = service_discovery.advertise_features().await {
+            //         warn!("Failed to advertise service discovery features: {}", e);
+            //     }
+            // }
 
         },
         Err(e) => {
@@ -288,60 +289,58 @@ async fn main() -> Result<()> {
             let bare_jid = contact.split('/').next().unwrap_or(contact.as_str());
             // Always refresh the device list from the server before showing fingerprints
             // Add timeout to prevent hanging on device discovery
-            match tokio::time::timeout(
-                tokio::time::Duration::from_secs(5),
-                xmpp_client.force_refresh_device_list(bare_jid)
-            ).await {
-                Ok(Ok(device_ids)) if !device_ids.is_empty() => {
-                    for device_id in device_ids {
-                        match xmpp_client.get_device_fingerprint(bare_jid, device_id).await {
-                            Ok(fingerprint) => {
-                                let msg = create_system_message(
-                                    &contact,
-                                    &format!(
-                                        "OMEMO device {} of {} has fingerprint: {}",
-                                        device_id, bare_jid, fingerprint
-                                    ),
-                                );
-                                chat_ui.add_message(msg);
-                            },
-                            Err(e) => {
-                                let msg = create_system_message(
-                                    &contact,
-                                    &format!(
-                                        "Could not retrieve fingerprint for OMEMO device {}: {}",
-                                        device_id, e
-                                    ),
-                                );
-                                chat_ui.add_message(msg);
-                            }
+            let device_ids = if let Some(omemo_manager) = xmpp_client.get_omemo_manager() {
+                match tokio::time::timeout(
+                    tokio::time::Duration::from_secs(5),
+                    omemo_manager.lock().await.get_device_ids_for_test(bare_jid)
+                ).await {
+                    Ok(Ok(ids)) => ids,
+                    Ok(Err(e)) => {
+                        println!("Failed to refresh device list for {}: {}", bare_jid, e);
+                        Vec::new()
+                    },
+                    Err(_) => {
+                        println!("Timeout refreshing device list for {}", bare_jid);
+                        Vec::new()
+                    }
+                }
+            } else {
+                println!("OMEMO not initialized");
+                Vec::new()
+            };
+            
+            if !device_ids.is_empty() {
+                for device_id in device_ids {
+                    match xmpp_client.get_device_fingerprint(bare_jid, device_id).await {
+                        Ok(fingerprint) => {
+                            let msg = create_system_message(
+                                &contact,
+                                &format!(
+                                    "OMEMO device {} of {} has fingerprint: {}",
+                                    device_id, bare_jid, fingerprint
+                                ),
+                            );
+                            chat_ui.add_message(msg);
+                        },
+                        Err(e) => {
+                            let msg = create_system_message(
+                                &contact,
+                                &format!(
+                                    "Could not retrieve fingerprint for OMEMO device {}: {}",
+                                    device_id, e
+                                ),
+                            );
+                            chat_ui.add_message(msg);
                         }
                     }
-                },
-                Ok(Ok(_)) => {
-                    // Empty device list
-                    let msg = create_system_message(
-                        &contact,
-                        &format!("No OMEMO devices found for {}", bare_jid),
-                    );
-                    chat_ui.add_message(msg);
-                },
-                Ok(Err(e)) => {
-                    // Error during device refresh
-                    let msg = create_system_message(
-                        &contact,
-                        &format!("Could not refresh OMEMO devices for {}: {}", bare_jid, e),
-                    );
-                    chat_ui.add_message(msg);
-                },
-                Err(_) => {
-                    // Timeout
-                    let msg = create_system_message(
-                        &contact,
-                        &format!("Timeout refreshing OMEMO devices for {}", bare_jid),
-                    );
-                    chat_ui.add_message(msg);
                 }
+            } else {
+                // No devices found
+                let msg = create_system_message(
+                    &contact,
+                    &format!("No OMEMO devices found for {}", bare_jid),
+                );
+                chat_ui.add_message(msg);
             }
         }
     }
@@ -1434,15 +1433,16 @@ async fn run_main_loop(
                         &format!("Forcing OMEMO device list re-fetch for {}...", jid)
                     ));
                     info!("DEBUG: Forcing OMEMO device list re-fetch for {} (Ctrl+R)", jid);
-                    match xmpp_client.force_refresh_device_list(jid).await {
-                        Ok(device_ids) if !device_ids.is_empty() => {
-                            chat_ui.add_message(create_system_message(
-                                jid,
-                                &format!("Found {} OMEMO device(s): {:?}", device_ids.len(), device_ids)
-                            ));
-                            info!("DEBUG: OMEMO device IDs for {}: {:?}", jid, device_ids);
-                            for device_id in device_ids {
-                                match xmpp_client.get_device_fingerprint(jid, device_id).await {
+                    if let Some(omemo_manager) = xmpp_client.get_omemo_manager() {
+                        match omemo_manager.lock().await.get_device_ids_for_test(jid).await {
+                            Ok(device_ids) if !device_ids.is_empty() => {
+                                chat_ui.add_message(create_system_message(
+                                    jid,
+                                    &format!("Found {} OMEMO device(s): {:?}", device_ids.len(), device_ids)
+                                ));
+                                info!("DEBUG: OMEMO device IDs for {}: {:?}", jid, device_ids);
+                                for device_id in device_ids {
+                                    match xmpp_client.get_device_fingerprint(jid, device_id).await {
                                     Ok(fingerprint) => {
                                         chat_ui.add_message(create_system_message(
                                             jid,
@@ -1459,21 +1459,27 @@ async fn run_main_loop(
                                     }
                                 }
                             }
-                        },
-                        Ok(_) => {
-                            chat_ui.add_message(create_system_message(
-                                jid,
-                                "No OMEMO devices found."
-                            ));
-                            warn!("DEBUG: No OMEMO devices found for {}", jid);
-                        },
-                        Err(e) => {
-                            chat_ui.add_message(create_system_message(
-                                jid,
-                                &format!("Failed to force OMEMO device list re-fetch: {}", e)
-                            ));
-                            error!("DEBUG: Failed to force OMEMO device list re-fetch for {}: {}", jid, e);
+                            },
+                            Ok(_) => {
+                                chat_ui.add_message(create_system_message(
+                                    jid,
+                                    "No OMEMO devices found."
+                                ));
+                                warn!("DEBUG: No OMEMO devices found for {}", jid);
+                            },
+                            Err(e) => {
+                                chat_ui.add_message(create_system_message(
+                                    jid,
+                                    &format!("Failed to force OMEMO device list re-fetch: {}", e)
+                                ));
+                                error!("DEBUG: Failed to force OMEMO device list re-fetch for {}: {}", jid, e);
+                            }
                         }
+                    } else {
+                        chat_ui.add_message(create_system_message(
+                            jid,
+                            "OMEMO not initialized"
+                        ));
                     }
                 } else if content == "__SHOW_DEVICE_FINGERPRINTS__" {
                     // Handle show device fingerprints command 
