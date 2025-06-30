@@ -3,8 +3,7 @@ name: Cargo Build
 on:
   push:
     branches:
-      - main
-      - action
+      - *
 
 jobs:
   build:
