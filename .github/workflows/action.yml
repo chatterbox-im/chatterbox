@@ -1,10 +1,6 @@
 name: Cargo Build
 
-on:
-  push:
-    branches:
-      - *
-
+on: push
 jobs:
   build:
     runs-on: ubuntu-latest
