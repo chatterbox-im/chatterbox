@@ -782,11 +782,21 @@ impl OmemoManager {
             device_list_copy.iter()
                 .find_map(|(jid, device_id)| {
                     let device_key = (jid.clone(), *device_id);
-                    self.prekey_ephemeral_keys.get(&device_key).cloned()
+                    let ephemeral = self.prekey_ephemeral_keys.get(&device_key).cloned();
+                    log::debug!("EPHEMERAL_DEBUG: Checking device {}:{}, has ephemeral: {}", 
+                        jid, device_id, ephemeral.is_some());
+                    if let Some(ref eph) = ephemeral {
+                        log::debug!("EPHEMERAL_DEBUG: Ephemeral key length: {}, first 16 bytes: {}", 
+                            eph.len(), hex::encode(&eph[..16.min(eph.len())]));
+                    }
+                    ephemeral
                 })
         } else {
             None
         };
+        
+        log::debug!("EPHEMERAL_DEBUG: Final ephemeral key is_some: {}, has_prekey_devices: {}", 
+            ephemeral_key.is_some(), has_prekey_devices);
         
         // Create the complete OMEMO message using Dino-compatible AES-GCM format
         let message = OmemoMessage {
@@ -799,7 +809,7 @@ impl OmemoManager {
             iv: iv.to_vec(), // 12-byte IV for AES-GCM
             encrypted_keys,
             is_prekey: has_prekey_devices,
-            ephemeral_key,
+            ephemeral_key: ephemeral_key.clone(),
         };
         
         // Clear the ephemeral keys for devices that got PreKey messages
@@ -869,14 +879,14 @@ impl OmemoManager {
             info!("Created new recipient session for {}:{}", bare_jid, device_id);
         }
         
-        // Check if we're waiting to send a PreKey message to this device
+        // Note: We used to block messages when waiting to send PreKey messages, but this
+        // prevented proper PreKey message reception. Now we always allow message processing
+        // and let the session logic determine if it's a valid PreKey message or not.
         let bare_jid = Self::normalize_jid_to_bare(sender);
         let key = (bare_jid.clone(), device_id);
+        
         if self.pending_prekey_sends.contains(&key) {
-            warn!("Refusing to decrypt message from {}:{} - waiting to send PreKey message first", bare_jid, device_id);
-            return Err(OmemoError::SessionError(session::SessionError::InvalidStateError(
-                format!("Session with {}:{} was reset, waiting to send PreKey message", bare_jid, device_id)
-            )));
+            info!("Receiving message from {}:{} while waiting to send PreKey message - processing normally", bare_jid, device_id);
         }
         
         // First, check if we have an encrypted key for our device
@@ -2109,6 +2119,21 @@ impl OmemoManager {
         
         // Track this as an undecryptable message (Dino-style approach)
         warn!("Failed to decrypt message key from {}:{}: {}", sender_jid, device_id, session_error);
+        
+        // **NEW: Check if this could be a PreKey message that we should handle as a recipient**
+        // If the decryption failed with an AEAD error, it might be because we're using the wrong session
+        // Try to detect if this is a PreKey message and create a recipient session
+        if let crate::omemo::session::SessionError::DoubleRatchetError(ratchet_error) = &session_error {
+            if let crate::omemo::protocol::DoubleRatchetError::CryptoError(crypto_error) = ratchet_error {
+                if let crate::omemo::crypto::CryptoError::AesGcmError(aes_error) = crypto_error {
+                    if aes_error.contains("aead::Error") {
+                        warn!("AEAD decryption failure from {}:{} - this might be a PreKey message", sender_jid, device_id);
+                        // For now, we'll continue with the existing reset logic, but in the future
+                        // we could try to create a recipient session here
+                    }
+                }
+            }
+        }
         
         // Track the undecryptable message
         if let Err(e) = self.track_undecryptable_message(&sender_jid, device_id).await {

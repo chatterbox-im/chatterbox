@@ -288,28 +288,78 @@ impl XMPPClient {
                         info!("Received message stanza from='{}', to='{}'", from, to);
                         debug!("Message stanza content: {:?}", stanza);
                         
-                        // Check for OMEMO encrypted messages
-                        let has_omemo_v1 = stanza.has_child("encrypted", custom_ns::OMEMO);
-                        let has_omemo_axolotl = stanza.has_child("encrypted", custom_ns::OMEMO_V1);
-                        let has_omemo_empty = stanza.has_child("encrypted", "");
-                        let has_omemo_explicit = stanza.has_child("encrypted", "eu.siacs.conversations.axolotl");
-                        
-                        warn!("OMEMO detection: v1={}, axolotl={}, empty={}, explicit={}, checking namespaces '{}' and '{}'", 
-                            has_omemo_v1, has_omemo_axolotl, has_omemo_empty, has_omemo_explicit, custom_ns::OMEMO, custom_ns::OMEMO_V1);
-                        
-                        // Also check with specific namespace debug
-                        if let Some(encrypted) = stanza.get_child("encrypted", "") {
-                            warn!("Found encrypted element with empty namespace: {:?}", encrypted);
-                        }
-                        if let Some(encrypted) = stanza.get_child("encrypted", "eu.siacs.conversations.axolotl") {
-                            warn!("Found encrypted element with axolotl namespace: {:?}", encrypted);
+                        // Helper function to check for OMEMO elements in a message stanza
+                        fn has_omemo_encryption(msg_stanza: &xmpp_parsers::Element) -> (bool, bool, bool, bool) {
+                            let has_omemo_v1 = msg_stanza.has_child("encrypted", custom_ns::OMEMO);
+                            let has_omemo_axolotl = msg_stanza.has_child("encrypted", custom_ns::OMEMO_V1);
+                            let has_omemo_empty = msg_stanza.has_child("encrypted", "");
+                            let has_omemo_explicit = msg_stanza.has_child("encrypted", "eu.siacs.conversations.axolotl");
+                            (has_omemo_v1, has_omemo_axolotl, has_omemo_empty, has_omemo_explicit)
                         }
                         
-                        if has_omemo_v1 || has_omemo_axolotl || has_omemo_empty || has_omemo_explicit {
-                            info!("Detected OMEMO encrypted message (v1={}, axolotl={})", has_omemo_v1, has_omemo_axolotl);
+                        // Check for OMEMO encrypted messages in the outer stanza
+                        let (has_omemo_v1, has_omemo_axolotl, has_omemo_empty, has_omemo_explicit) = has_omemo_encryption(&stanza);
+                        
+                        // Also check for MAM forwarded messages that might contain OMEMO
+                        let mut mam_message_stanza = None;
+                        if let Some(result) = stanza.get_child("result", custom_ns::MAM) {
+                            if let Some(forwarded) = result.get_child("forwarded", custom_ns::FORWARD) {
+                                if let Some(inner_msg) = forwarded.get_child("message", "jabber:client") {
+                                    mam_message_stanza = Some(inner_msg);
+                                }
+                            }
+                        }
+                        
+                        // Check for OMEMO in MAM forwarded message if present
+                        let (mam_has_omemo_v1, mam_has_omemo_axolotl, mam_has_omemo_empty, mam_has_omemo_explicit) = 
+                            if let Some(mam_msg) = &mam_message_stanza {
+                                has_omemo_encryption(mam_msg)
+                            } else {
+                                (false, false, false, false)
+                            };
+                        
+                        let has_any_omemo = has_omemo_v1 || has_omemo_axolotl || has_omemo_empty || has_omemo_explicit;
+                        let has_mam_omemo = mam_has_omemo_v1 || mam_has_omemo_axolotl || mam_has_omemo_empty || mam_has_omemo_explicit;
+                        
+                        warn!("OMEMO detection: outer(v1={}, axolotl={}, empty={}, explicit={}), MAM(v1={}, axolotl={}, empty={}, explicit={})", 
+                            has_omemo_v1, has_omemo_axolotl, has_omemo_empty, has_omemo_explicit,
+                            mam_has_omemo_v1, mam_has_omemo_axolotl, mam_has_omemo_empty, mam_has_omemo_explicit);
+                        
+                        // Debug logging for found encrypted elements
+                        if has_any_omemo {
+                            if let Some(encrypted) = stanza.get_child("encrypted", "") {
+                                warn!("Found encrypted element in outer stanza with empty namespace: {:?}", encrypted);
+                            }
+                            if let Some(encrypted) = stanza.get_child("encrypted", "eu.siacs.conversations.axolotl") {
+                                warn!("Found encrypted element in outer stanza with axolotl namespace: {:?}", encrypted);
+                            }
+                        }
+                        if has_mam_omemo {
+                            if let Some(mam_msg) = &mam_message_stanza {
+                                if let Some(encrypted) = mam_msg.get_child("encrypted", "") {
+                                    warn!("Found encrypted element in MAM message with empty namespace: {:?}", encrypted);
+                                }
+                                if let Some(encrypted) = mam_msg.get_child("encrypted", "eu.siacs.conversations.axolotl") {
+                                    warn!("Found encrypted element in MAM message with axolotl namespace: {:?}", encrypted);
+                                }
+                            }
+                        }
+                        
+                        if has_any_omemo || has_mam_omemo {
+                            info!("Detected OMEMO encrypted message (outer: v1={}, axolotl={}, MAM: v1={}, axolotl={})", 
+                                has_omemo_v1, has_omemo_axolotl, mam_has_omemo_v1, mam_has_omemo_axolotl);
+                            
+                            // Determine which stanza to process: MAM message takes priority if present
+                            let target_stanza = if has_mam_omemo && mam_message_stanza.is_some() {
+                                warn!("Processing OMEMO from MAM forwarded message");
+                                mam_message_stanza.unwrap().clone()
+                            } else {
+                                warn!("Processing OMEMO from outer message stanza");
+                                stanza.clone()
+                            };
                             
                             // Clone needed values for async task
-                            let stanza_clone = stanza.clone();
+                            let target_stanza_clone = target_stanza.clone();
                             let client_clone = client.clone();
                             let msg_tx_clone = msg_tx.clone();
                             let pending_receipts_clone = pending_receipts.clone();
@@ -356,7 +406,7 @@ impl XMPPClient {
                                 
                                 warn!("Calling handle_message_encrypted method");
                                 // Call the handle_message_encrypted method
-                                if let Err(e) = temp_client.handle_message_encrypted(&stanza_clone).await {
+                                if let Err(e) = temp_client.handle_message_encrypted(&target_stanza_clone).await {
                                     error!("Failed to process encrypted message: {}", e);
                                 } else {
                                     warn!("Successfully processed encrypted message");

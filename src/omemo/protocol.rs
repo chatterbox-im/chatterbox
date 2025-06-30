@@ -316,63 +316,90 @@ impl X3DHProtocol {
         their_one_time_pre_key: Option<&[u8]>,
         ephemeral_key: &[u8], // Use provided ephemeral key instead of generating
     ) -> Result<Vec<u8>, DoubleRatchetError> {
-        log::debug!("X3DH initiator: identity_key_pair.public_key: {}", hex::encode(&identity_key_pair.public_key));
-        log::debug!("X3DH initiator: their_identity_key: {}", hex::encode(their_identity_key));
-        log::debug!("X3DH initiator: their_signed_pre_key: {}", hex::encode(their_signed_pre_key));
-        log::debug!("X3DH initiator: ephemeral_key (first 16 bytes): {}", hex::encode(&ephemeral_key[..16]));
+        log::error!("=== X3DH INITIATOR KEY AGREEMENT START ===");
+        log::error!("X3DH initiator: identity_key_pair.public_key: {}", hex::encode(&identity_key_pair.public_key));
+        log::error!("X3DH initiator: identity_key_pair.private_key: {}", hex::encode(&identity_key_pair.private_key));
+        log::error!("X3DH initiator: their_identity_key: {}", hex::encode(their_identity_key));
+        log::error!("X3DH initiator: their_signed_pre_key: {}", hex::encode(their_signed_pre_key));
+        log::error!("X3DH initiator: ephemeral_key (full): {}", hex::encode(ephemeral_key));
         if let Some(otpk) = their_one_time_pre_key {
-            log::debug!("X3DH initiator: their_one_time_pre_key: {}", hex::encode(otpk));
+            log::error!("X3DH initiator: their_one_time_pre_key: {}", hex::encode(otpk));
         } else {
-            log::debug!("X3DH initiator: their_one_time_pre_key: None");
+            log::error!("X3DH initiator: their_one_time_pre_key: None");
         }
         
         // Perform the key agreement using the provided ephemeral key
         let mut dh_values = Vec::new();
         
         // DH1 = DH(IKa, SPKb)
+        log::error!("X3DH initiator: Computing DH1 = DH(IKa, SPKb)");
+        log::error!("X3DH initiator: DH1 input - IKa (private): {}", hex::encode(&identity_key_pair.private_key));
+        log::error!("X3DH initiator: DH1 input - SPKb (public): {}", hex::encode(their_signed_pre_key));
         let dh1 = crypto::x25519_diffie_hellman(
             &identity_key_pair.private_key,
             their_signed_pre_key,
         ).map_err(DoubleRatchetError::CryptoError)?;
+        log::error!("X3DH initiator: DH1 result: {}", hex::encode(&dh1));
         dh_values.push(dh1);
         
         // DH2 = DH(EKa, IKb)
+        log::error!("X3DH initiator: Computing DH2 = DH(EKa, IKb)");
+        log::error!("X3DH initiator: DH2 input - EKa (private): {}", hex::encode(ephemeral_key));
+        log::error!("X3DH initiator: DH2 input - IKb (public): {}", hex::encode(their_identity_key));
         let dh2 = crypto::x25519_diffie_hellman(
             ephemeral_key,
             their_identity_key,
         ).map_err(DoubleRatchetError::CryptoError)?;
+        log::error!("X3DH initiator: DH2 result: {}", hex::encode(&dh2));
         dh_values.push(dh2);
         
         // DH3 = DH(EKa, SPKb)
+        log::error!("X3DH initiator: Computing DH3 = DH(EKa, SPKb)");
+        log::error!("X3DH initiator: DH3 input - EKa (private): {}", hex::encode(ephemeral_key));
+        log::error!("X3DH initiator: DH3 input - SPKb (public): {}", hex::encode(their_signed_pre_key));
         let dh3 = crypto::x25519_diffie_hellman(
             ephemeral_key,
             their_signed_pre_key,
         ).map_err(DoubleRatchetError::CryptoError)?;
+        log::error!("X3DH initiator: DH3 result: {}", hex::encode(&dh3));
         dh_values.push(dh3);
         
         // DH4 = DH(EKa, OPKb) (if OPKb exists)
         if let Some(their_one_time_pre_key) = their_one_time_pre_key {
+            log::error!("X3DH initiator: Computing DH4 = DH(EKa, OPKb)");
+            log::error!("X3DH initiator: DH4 input - EKa (private): {}", hex::encode(ephemeral_key));
+            log::error!("X3DH initiator: DH4 input - OPKb (public): {}", hex::encode(their_one_time_pre_key));
             let dh4 = crypto::x25519_diffie_hellman(
                 ephemeral_key,
                 their_one_time_pre_key,
             ).map_err(DoubleRatchetError::CryptoError)?;
+            log::error!("X3DH initiator: DH4 result: {}", hex::encode(&dh4));
             dh_values.push(dh4);
+        } else {
+            log::error!("X3DH initiator: Skipping DH4 - no one-time pre-key");
         }
         
         // Concatenate all DH values
         let mut concat_dh = Vec::new();
-        for dh in dh_values {
-            concat_dh.extend_from_slice(&dh);
+        for (i, dh) in dh_values.iter().enumerate() {
+            log::error!("X3DH initiator: DH{} value ({}): {}", i+1, dh.len(), hex::encode(dh));
+            concat_dh.extend_from_slice(dh);
         }
+        log::error!("X3DH initiator: Concatenated DH ({} bytes): {}", concat_dh.len(), hex::encode(&concat_dh));
         
         // Use HKDF to derive the shared key
         let salt = vec![0u8; 32]; // Zero salt
         let info = b"OMEMO X3DH";
+        log::error!("X3DH initiator: HKDF inputs:");
+        log::error!("X3DH initiator: - salt ({} bytes): {}", salt.len(), hex::encode(&salt));
+        log::error!("X3DH initiator: - ikm ({} bytes): {}", concat_dh.len(), hex::encode(&concat_dh));
+        log::error!("X3DH initiator: - info ({} bytes): {:?}", info.len(), String::from_utf8_lossy(info));
         
         let shared_secret = crypto::hkdf_derive(&salt, &concat_dh, info, 32)
             .map_err(DoubleRatchetError::CryptoError)?;
         
-        log::debug!("X3DH initiator: derived shared_secret: {}", hex::encode(&shared_secret));
+        log::error!("X3DH initiator: Final shared_secret: {}", hex::encode(&shared_secret));
+        log::error!("=== X3DH INITIATOR KEY AGREEMENT END ===");
         Ok(shared_secret)
     }
 
@@ -404,62 +431,92 @@ impl X3DHProtocol {
         one_time_pre_key_pair: Option<&KeyPair>,
         their_ephemeral_key: &[u8],
     ) -> Result<Vec<u8>, DoubleRatchetError> {
-        log::debug!("X3DH recipient: identity_key_pair.public_key: {}", hex::encode(&identity_key_pair.public_key));
-        log::debug!("X3DH recipient: their_identity_key: {}", hex::encode(their_identity_key));
-        log::debug!("X3DH recipient: signed_pre_key_pair.public_key: {}", hex::encode(&signed_pre_key_pair.public_key));
-        log::debug!("X3DH recipient: their_ephemeral_key (first 16 bytes): {}", hex::encode(&their_ephemeral_key[..16]));
+        log::error!("=== X3DH RECIPIENT KEY AGREEMENT START ===");
+        log::error!("X3DH recipient: identity_key_pair.public_key: {}", hex::encode(&identity_key_pair.public_key));
+        log::error!("X3DH recipient: identity_key_pair.private_key: {}", hex::encode(&identity_key_pair.private_key));
+        log::error!("X3DH recipient: their_identity_key: {}", hex::encode(their_identity_key));
+        log::error!("X3DH recipient: signed_pre_key_pair.public_key: {}", hex::encode(&signed_pre_key_pair.public_key));
+        log::error!("X3DH recipient: signed_pre_key_pair.private_key: {}", hex::encode(&signed_pre_key_pair.private_key));
+        log::error!("X3DH recipient: their_ephemeral_key (full): {}", hex::encode(their_ephemeral_key));
         if let Some(otpk) = one_time_pre_key_pair {
-            log::debug!("X3DH recipient: one_time_pre_key_pair.public_key: {}", hex::encode(&otpk.public_key));
+            log::error!("X3DH recipient: one_time_pre_key_pair.public_key: {}", hex::encode(&otpk.public_key));
+            log::error!("X3DH recipient: one_time_pre_key_pair.private_key: {}", hex::encode(&otpk.private_key));
         } else {
-            log::debug!("X3DH recipient: one_time_pre_key_pair: None");
+            log::error!("X3DH recipient: one_time_pre_key_pair: None");
         }
         
         // Perform the key agreement
         let mut dh_values = Vec::new();
         
         // DH1 = DH(SPKb, IKa)
+        log::error!("X3DH recipient: Computing DH1 = DH(SPKb, IKa)");
+        log::error!("X3DH recipient: DH1 input - SPKb (private): {}", hex::encode(&signed_pre_key_pair.private_key));
+        log::error!("X3DH recipient: DH1 input - IKa (public): {}", hex::encode(their_identity_key));
         let dh1 = crypto::x25519_diffie_hellman(
             &signed_pre_key_pair.private_key,
             their_identity_key,
         ).map_err(DoubleRatchetError::CryptoError)?;
+        log::error!("X3DH recipient: DH1 result: {}", hex::encode(&dh1));
         dh_values.push(dh1);
         
         // DH2 = DH(IKb, EKa)
+        log::error!("X3DH recipient: Computing DH2 = DH(IKb, EKa)");
+        log::error!("X3DH recipient: DH2 input - IKb (private): {}", hex::encode(&identity_key_pair.private_key));
+        log::error!("X3DH recipient: DH2 input - EKa (public): {}", hex::encode(their_ephemeral_key));
         let dh2 = crypto::x25519_diffie_hellman(
             &identity_key_pair.private_key,
             their_ephemeral_key,
         ).map_err(DoubleRatchetError::CryptoError)?;
+        log::error!("X3DH recipient: DH2 result: {}", hex::encode(&dh2));
         dh_values.push(dh2);
         
         // DH3 = DH(SPKb, EKa)
+        log::error!("X3DH recipient: Computing DH3 = DH(SPKb, EKa)");
+        log::error!("X3DH recipient: DH3 input - SPKb (private): {}", hex::encode(&signed_pre_key_pair.private_key));
+        log::error!("X3DH recipient: DH3 input - EKa (public): {}", hex::encode(their_ephemeral_key));
         let dh3 = crypto::x25519_diffie_hellman(
             &signed_pre_key_pair.private_key,
             their_ephemeral_key,
         ).map_err(DoubleRatchetError::CryptoError)?;
+        log::error!("X3DH recipient: DH3 result: {}", hex::encode(&dh3));
         dh_values.push(dh3);
         
         // DH4 = DH(OPKb, EKa) (if OPKb exists)
         if let Some(one_time_pre_key_pair) = one_time_pre_key_pair {
+            log::error!("X3DH recipient: Computing DH4 = DH(OPKb, EKa)");
+            log::error!("X3DH recipient: DH4 input - OPKb (private): {}", hex::encode(&one_time_pre_key_pair.private_key));
+            log::error!("X3DH recipient: DH4 input - EKa (public): {}", hex::encode(their_ephemeral_key));
             let dh4 = crypto::x25519_diffie_hellman(
                 &one_time_pre_key_pair.private_key,
                 their_ephemeral_key,
             ).map_err(DoubleRatchetError::CryptoError)?;
+            log::error!("X3DH recipient: DH4 result: {}", hex::encode(&dh4));
             dh_values.push(dh4);
+        } else {
+            log::error!("X3DH recipient: Skipping DH4 - no one-time pre-key");
         }
         
         // Concatenate all DH values
         let mut concat_dh = Vec::new();
-        for dh in dh_values {
-            concat_dh.extend_from_slice(&dh);
+        for (i, dh) in dh_values.iter().enumerate() {
+            log::error!("X3DH recipient: DH{} value ({}): {}", i+1, dh.len(), hex::encode(dh));
+            concat_dh.extend_from_slice(dh);
         }
+        log::error!("X3DH recipient: Concatenated DH ({} bytes): {}", concat_dh.len(), hex::encode(&concat_dh));
         
         // Use HKDF to derive the shared key (same as initiator)
         let salt = vec![0u8; 32]; // Zero salt
         let info = b"OMEMO X3DH";
+        log::error!("X3DH recipient: HKDF inputs:");
+        log::error!("X3DH recipient: - salt ({} bytes): {}", salt.len(), hex::encode(&salt));
+        log::error!("X3DH recipient: - ikm ({} bytes): {}", concat_dh.len(), hex::encode(&concat_dh));
+        log::error!("X3DH recipient: - info ({} bytes): {:?}", info.len(), String::from_utf8_lossy(info));
+        
         let shared_key = crypto::hkdf_derive(&salt, &concat_dh, info, 32)
             .map_err(DoubleRatchetError::CryptoError)?;
         
-        log::debug!("X3DH recipient: derived shared_key: {}", hex::encode(&shared_key));
+        log::error!("X3DH recipient: Final shared_key: {}", hex::encode(&shared_key));
+        log::error!("=== X3DH RECIPIENT KEY AGREEMENT END ===");
         Ok(shared_key)
     }
 }
@@ -1047,6 +1104,14 @@ pub mod utils {
     pub fn omemo_message_to_xml(message: &OmemoMessage) -> String {
         let mut xml = String::new();
         
+        log::debug!("XML_DEBUG: Converting OMEMO message to XML");
+        log::debug!("XML_DEBUG: is_prekey: {}", message.is_prekey);
+        log::debug!("XML_DEBUG: ephemeral_key is_some: {}", message.ephemeral_key.is_some());
+        if let Some(ref eph) = message.ephemeral_key {
+            log::debug!("XML_DEBUG: ephemeral_key length: {}, first 16 bytes: {}", 
+                eph.len(), hex::encode(&eph[..16.min(eph.len())]));
+        }
+        
         xml.push_str(&format!("<encrypted xmlns='{}'>", OMEMO_NAMESPACE));
         
         // Header
@@ -1059,9 +1124,12 @@ pub mod utils {
         
         // Ephemeral key (only for PreKey messages)
         if let Some(ephemeral_key) = &message.ephemeral_key {
+            log::debug!("XML_DEBUG: Adding ephemeral key to XML");
             xml.push_str("<ephemeral>");
             xml.push_str(&BASE64.encode(ephemeral_key));
             xml.push_str("</ephemeral>");
+        } else {
+            log::debug!("XML_DEBUG: No ephemeral key to add to XML");
         }
         
         // Keys
