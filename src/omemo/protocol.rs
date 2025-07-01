@@ -992,6 +992,8 @@ pub mod utils {
     
     /// Parse an OMEMO message from XML
     pub fn omemo_message_from_xml(xml: &str) -> Result<OmemoMessage, XmlError> {
+        log::debug!("XML_PARSE_DEBUG: Parsing OMEMO message from XML: {}", xml);
+        
         // Parse the XML
         let doc = Document::parse(xml)
             .map_err(|e| XmlError::ParseError(e.to_string()))?;
@@ -1015,6 +1017,8 @@ pub mod utils {
         let sender_device_id = sid.parse::<u32>()
             .map_err(|e| XmlError::ParseError(format!("Invalid sid: {}", e)))?;
         
+        log::debug!("XML_PARSE_DEBUG: sender_device_id: {}", sender_device_id);
+        
         // Get the IV
         let iv_elem = header.children()
             .find(|n| n.has_tag_name("iv"))
@@ -1029,6 +1033,7 @@ pub mod utils {
         // Parse the keys
         let mut encrypted_keys = std::collections::HashMap::new();
         
+        log::debug!("XML_PARSE_DEBUG: Starting to parse keys");
         for key_elem in header.children().filter(|n| n.has_tag_name("key")) {
             let rid = key_elem.attribute("rid")
                 .ok_or(XmlError::MissingElementError("rid attribute not found".to_string()))?;
@@ -1042,7 +1047,13 @@ pub mod utils {
             let key = BASE64.decode(key_text)
                 .map_err(|e| XmlError::EncodingError(format!("Failed to decode key: {}", e)))?;
             
+            log::debug!("XML_PARSE_DEBUG: Parsed key for device {}: {} bytes", device_id, key.len());
             encrypted_keys.insert(device_id, key);
+        }
+        
+        log::debug!("XML_PARSE_DEBUG: Total keys parsed: {}", encrypted_keys.len());
+        for device_id in encrypted_keys.keys() {
+            log::debug!("XML_PARSE_DEBUG: Key available for device: {}", device_id);
         }
         
         // Try to get the ephemeral key (for PreKey messages)
@@ -1056,6 +1067,8 @@ pub mod utils {
         } else {
             None
         };
+        
+        log::debug!("XML_PARSE_DEBUG: ephemeral_key is_some: {}", ephemeral_key.is_some());
         
         // Get the payload
         let payload = encrypted.children()
@@ -1107,6 +1120,10 @@ pub mod utils {
         log::debug!("XML_DEBUG: Converting OMEMO message to XML");
         log::debug!("XML_DEBUG: is_prekey: {}", message.is_prekey);
         log::debug!("XML_DEBUG: ephemeral_key is_some: {}", message.ephemeral_key.is_some());
+        log::debug!("XML_DEBUG: encrypted_keys.len(): {}", message.encrypted_keys.len());
+        for (device_id, key) in &message.encrypted_keys {
+            log::debug!("XML_DEBUG: Key for device {}: {} bytes", device_id, key.len());
+        }
         if let Some(ref eph) = message.ephemeral_key {
             log::debug!("XML_DEBUG: ephemeral_key length: {}, first 16 bytes: {}", 
                 eph.len(), hex::encode(&eph[..16.min(eph.len())]));
@@ -1134,6 +1151,7 @@ pub mod utils {
         
         // Keys
         for (device_id, key) in &message.encrypted_keys {
+            log::debug!("XML_DEBUG: Adding key for device {} to XML", device_id);
             xml.push_str(&format!("<key rid='{}'>{}</key>", device_id, BASE64.encode(key)));
         }
         
@@ -1146,6 +1164,7 @@ pub mod utils {
         
         xml.push_str("</encrypted>");
         
+        log::debug!("XML_DEBUG: Generated XML: {}", xml);
         xml
     }
 }

@@ -29,7 +29,7 @@ use chatterbox::xmpp::discovery::ServiceDiscovery;
     long_about = "Chatterbox is a command-line chat client for XMPP with OMEMO encryption support.\n\n\
     Optional parameters:\n\
     --omemo-dir <PATH>     Override the directory for OMEMO device_id, identity_key, and multi-device info files\n\
-    --disable-mam          Disable Message Archive Management (MAM) feature\n\
+    --disable-mam          Disable Message Archive Management (MAM) - no historical messages will be loaded\n\
     Use -h or --help to see all options."
 )]
 struct Args {
@@ -37,8 +37,8 @@ struct Args {
     #[arg(long, value_name = "PATH", help = "Override the directory for OMEMO device_id, identity_key, and multi-device info files")]
     omemo_dir: Option<PathBuf>,
     
-    /// Disable Message Archive Management (MAM) feature
-    #[arg(long, help = "Disable Message Archive Management (MAM) feature")]
+    /// Disable Message Archive Management (MAM) - no historical messages will be loaded
+    #[arg(long, help = "Disable Message Archive Management (MAM) - no historical messages will be loaded")]
     disable_mam: bool,
 }
 
@@ -357,99 +357,101 @@ async fn main() -> Result<()> {
             // Get the first contact for now (or the one at current_contact_index if we had access to it)
             let active_contact = chat_ui.contacts[0].clone();
             
-            // Add a "loading" message to the UI
-            chat_ui.add_message(create_system_message(
-                &active_contact,
-                "Loading message history in background..."
-            ));
-            
-            // Redraw UI with loading message
-            terminal.draw(|f| chat_ui.draw(f))?;
-            
-            // Create a separate client for background loading
-            let xmpp_client_clone = xmpp_client.clone();
-            
-            // Create a channel for message history results
-            let (history_tx, mut history_rx) = tokio::sync::mpsc::channel(100);
-            
-            // Create a message sender for system messages
-            let msg_tx_clone = xmpp_client.get_message_sender();
-            let active_contact_clone = active_contact.clone();
-            
-            // Spawn a background task to load message history
-            tokio::spawn(async move {
-                // Load the message history in background
-                match xmpp_client_clone.get_message_history(
-                    MAMQueryOptions::new()
-                        .with_jid(&active_contact)
-                        .with_limit(50)
-                ).await {
-                    Ok(messages) => {
-                        info!("Loaded {} historical messages for {}", messages.len(), active_contact);
-                        
-                        // Send completion system message
-                        let completion_message = if messages.is_empty() {
-                            create_system_message(&active_contact_clone, "No message history found")
-                        } else {
-                            create_system_message(&active_contact_clone, &format!("Loaded {} historical messages", messages.len()))
-                        };
-                        
-                        // Send the completion message to the main message channel
-                        if let Err(e) = msg_tx_clone.send(completion_message).await {
-                            error!("Failed to send history completion message: {}", e);
-                        }
-                        
-                        // Send messages to the history channel
-                        for message in messages {
-                            if let Err(e) = history_tx.send(message).await {
-                                error!("Failed to send history message to channel: {}", e);
-                                break;
+            // Check if MAM is disabled
+            if args.disable_mam {
+                // Add a message indicating MAM is disabled
+                chat_ui.add_message(create_system_message(
+                    &active_contact,
+                    "Message history disabled (--disable-mam flag)"
+                ));
+            } else {
+                // Add a "loading" message to the UI
+                chat_ui.add_message(create_system_message(
+                    &active_contact,
+                    "Loading message history in background..."
+                ));
+                
+                // Redraw UI with loading message
+                terminal.draw(|f| chat_ui.draw(f))?;
+                
+                // Create a separate client for background loading
+                let xmpp_client_clone = xmpp_client.clone();
+                
+                // Create a channel for message history results
+                let (history_tx, mut history_rx) = tokio::sync::mpsc::channel(100);
+                
+                // Create a message sender for system messages
+                let msg_tx_clone = xmpp_client.get_message_sender();
+                let active_contact_clone = active_contact.clone();
+                
+                // Spawn a background task to load message history
+                tokio::spawn(async move {
+                    // Load the message history in background
+                    match xmpp_client_clone.get_message_history(
+                        MAMQueryOptions::new()
+                            .with_jid(&active_contact)
+                            .with_limit(50)
+                    ).await {
+                        Ok(messages) => {
+                            info!("Loaded {} historical messages for {}", messages.len(), active_contact);
+                            
+                            // Send completion system message
+                            let completion_message = if messages.is_empty() {
+                                create_system_message(&active_contact_clone, "No message history found")
+                            } else {
+                                create_system_message(&active_contact_clone, &format!("Loaded {} historical messages", messages.len()))
+                            };
+                            
+                            // Send the completion message to the main message channel
+                            if let Err(e) = msg_tx_clone.send(completion_message).await {
+                                error!("Failed to send history completion message: {}", e);
+                            }
+                            
+                            // Send messages to the history channel
+                            for message in messages {
+                                if let Err(e) = history_tx.send(message).await {
+                                    error!("Failed to send history message to channel: {}", e);
+                                    break;
+                                }
+                            }
+                        },
+                        Err(e) => {
+                            error!("Failed to retrieve message history for {}: {}", active_contact, e);
+                            
+                            // Send error system message
+                            let error_message = create_system_message(
+                                &active_contact_clone,
+                                &format!("Failed to load message history: {}", e)
+                            );
+                            
+                            // Send the error message to the main message channel
+                            if let Err(send_err) = msg_tx_clone.send(error_message).await {
+                                error!("Failed to send history error message: {}", send_err);
                             }
                         }
-                    },
-                    Err(e) => {
-                        error!("Failed to retrieve message history for {}: {}", active_contact, e);
-                        
-                        // Send error system message
-                        let error_message = create_system_message(
-                            &active_contact_clone,
-                            &format!("Failed to load message history: {}", e)
-                        );
-                        
-                        // Send the error message to the main message channel
-                        if let Err(send_err) = msg_tx_clone.send(error_message).await {
-                            error!("Failed to send history error message: {}", send_err);
+                    }
+                });
+                
+                // Get a clone of the main message channel
+                let msg_tx = xmpp_client.get_message_sender();
+                
+                // Merge the history channel into the main message channel
+                tokio::spawn(async move {
+                    while let Some(message) = history_rx.recv().await {
+                        if let Err(e) = msg_tx.send(message).await {
+                            error!("Failed to forward history message to main channel: {}", e);
                         }
                     }
-                }
-            });
-            
-            // Get a clone of the main message channel
-            let msg_tx = xmpp_client.get_message_sender();
-            
-            // Merge the history channel into the main message channel
-            tokio::spawn(async move {
-                while let Some(message) = history_rx.recv().await {
-                    if let Err(e) = msg_tx.send(message).await {
-                        error!("Failed to forward history message to main channel: {}", e);
-                    }
-                }
-            });
+                });
+            }
         }
-    } else if chat_ui.has_active_contact() && args.disable_mam {
-        // If MAM is disabled but we have an active contact, show a message
-        let active_contact = chat_ui.contacts[0].clone();
-        chat_ui.add_message(create_system_message(
-            &active_contact,
-            "Message history disabled (--disable-mam)"
-        ));
-        terminal.draw(|f| chat_ui.draw(f))?;
     }
 
     // Check for pending OMEMO key verifications
     check_pending_key_verifications(&mut chat_ui, &xmpp_client).await?;
 
     // Main event loop
+    run_main_loop(&mut chat_ui, &mut terminal, &mut xmpp_client, &mut msg_rx, args.disable_mam).await?;
     run_main_loop(&mut chat_ui, &mut terminal, &mut xmpp_client, &mut msg_rx, args.disable_mam).await?;
 
     // Restore terminal
@@ -507,16 +509,17 @@ async fn setup_contacts(chat_ui: &mut ChatUI, xmpp_client: &mut XMPPClient, _dis
 /// Loads message history for a contact in the background without blocking the UI
 /// Returns immediately while history loads asynchronously
 fn load_message_history_async(chat_ui: &mut ChatUI, xmpp_client: &XMPPClient, contact: &str, disable_mam: bool) {
+fn load_message_history_async(chat_ui: &mut ChatUI, xmpp_client: &XMPPClient, contact: &str, disable_mam: bool) {
     // Skip loading history for system contacts
     if contact.starts_with("[") && contact.ends_with("]") {
         return;
     }
     
-    // If MAM is disabled, show a message and return early
+    // If MAM is disabled, show a message and skip history loading
     if disable_mam {
         chat_ui.add_message(create_system_message(
             contact,
-            "Message history disabled (--disable-mam)"
+            "Message history disabled (--disable-mam flag)"
         ));
         return;
     }
@@ -641,6 +644,8 @@ async fn run_main_loop(
     chat_ui: &mut ChatUI,
     terminal: &mut ui::Terminal<ui::CrosstermBackend<io::Stdout>>,
     xmpp_client: &mut XMPPClient,
+    msg_rx: &mut tokio::sync::mpsc::Receiver<Message>,
+    disable_mam: bool
     msg_rx: &mut tokio::sync::mpsc::Receiver<Message>,
     disable_mam: bool
 ) -> Result<()> {
@@ -1333,6 +1338,7 @@ async fn run_main_loop(
                                     
                                     // Load message history for the new active contact
                                     load_message_history_async(chat_ui, xmpp_client, &first_contact, disable_mam);
+                                    load_message_history_async(chat_ui, xmpp_client, &first_contact, disable_mam);
                                 }
                             },
                             Err(e) => {
@@ -1365,6 +1371,7 @@ async fn run_main_loop(
             terminal.draw(|f| chat_ui.draw(f))?;
             
             // Load message history for this contact asynchronously
+            load_message_history_async(chat_ui, xmpp_client, &recipient, disable_mam);
             load_message_history_async(chat_ui, xmpp_client, &recipient, disable_mam);
             
             // Redraw right away to show loading message

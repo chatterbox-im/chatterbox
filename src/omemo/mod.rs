@@ -413,11 +413,13 @@ impl OmemoManager {
         // Normalize the JID to bare JID for consistent session lookup
         let bare_jid = Self::normalize_jid_to_bare(remote_jid);
         let key = (bare_jid.clone(), remote_device_id);
+        
+        info!("SESSION_DEBUG: get_or_create_session called for {}:{}", bare_jid, remote_device_id);
 
         // Check if this device is marked for session rebuild due to previous reset
         let needs_rebuild = self.pending_session_rebuilds.contains(&key);
         if needs_rebuild {
-            info!("Forcing fresh session rebuild for {}:{} after previous reset", bare_jid, remote_device_id);
+            info!("SESSION_DEBUG: Forcing fresh session rebuild for {}:{} after previous reset", bare_jid, remote_device_id);
             // Remove any existing session
             self.sessions.remove(&key);
             // Remove from rebuild set since we're rebuilding now
@@ -427,22 +429,23 @@ impl OmemoManager {
         // Check if we already have a session (early return, no borrow held)
         let session_exists_and_initialized = self.sessions.get(&key).map(|s| s.is_initialized()).unwrap_or(false);
         if session_exists_and_initialized && !needs_rebuild {
-            debug!("Reusing existing session for {}:{}", bare_jid, remote_device_id);
+            info!("SESSION_DEBUG: Reusing existing session for {}:{}", bare_jid, remote_device_id);
             return self.sessions.get_mut(&key).ok_or_else(|| OmemoError::SessionError(
                 session::SessionError::InvalidStateError("Session not found after check".to_string())
             ));
         }
 
-        debug!("Creating new session for {}:{} (exists: {}, needs_rebuild: {})", 
+        info!("SESSION_DEBUG: Creating new session for {}:{} (exists: {}, needs_rebuild: {})", 
             bare_jid, remote_device_id, session_exists_and_initialized, needs_rebuild);
 
         // Determine session role based on device IDs for consistency
         // Device with lower ID becomes initiator, device with higher ID becomes recipient
         let we_are_initiator = self.device_id < remote_device_id;
         
-        debug!("Creating session with {}:{} - we are {}", 
+        info!("SESSION_DEBUG: Creating session with {}:{} - we are {} (our device: {}, their device: {})", 
             bare_jid, remote_device_id,
-            if we_are_initiator { "initiator" } else { "recipient" }
+            if we_are_initiator { "initiator" } else { "recipient" },
+            self.device_id, remote_device_id
         );
 
         // Gather all data and perform async calls BEFORE mutably borrowing self
@@ -452,7 +455,10 @@ impl OmemoManager {
                 session::SessionError::InvalidStateError("Key bundle not initialized".to_string())
             )),
         };
+        
+        info!("SESSION_DEBUG: Getting device identity for {}:{}", bare_jid, remote_device_id);
         let remote_identity = self.get_device_identity(&bare_jid, remote_device_id).await?;
+        info!("SESSION_DEBUG: Successfully retrieved device identity for {}:{}", bare_jid, remote_device_id);
 
         let session = if we_are_initiator {
             // We have the lower device ID, so we are the initiator
@@ -597,6 +603,7 @@ impl OmemoManager {
     
     /// Encrypt a message for a recipient
     pub async fn encrypt_message(&mut self, recipient: &str, plaintext: &str) -> Result<OmemoMessage, OmemoError> {
+        println!("*** CRITICAL DEBUG: encrypt_message called for recipient '{}' with message '{}'", recipient, plaintext);
         info!("Encrypting message for {}", recipient);
         
         // Get the device list for the recipient with timeout protection
@@ -615,9 +622,32 @@ impl OmemoManager {
             }
         };
         
-        if recipient_device_ids.is_empty() {
-            return Err(OmemoError::NoDeviceError(recipient.to_string()));
-        }
+        // DEBUG: Log device discovery results
+        info!("ENCRYPT_DEBUG: Recipient device discovery for {}: {:?}", recipient, recipient_device_ids);
+        
+        let final_recipient_device_ids = if recipient_device_ids.is_empty() {
+            error!("ENCRYPT_DEBUG: No devices found for recipient {}, trying fallback", recipient);
+            
+            // FALLBACK: Try to use known sessions as a source of device IDs
+            warn!("ENCRYPT_DEBUG: Falling back to known sessions for device discovery");
+            let fallback_devices: Vec<u32> = self.sessions.keys()
+                .filter(|(jid, _device_id)| {
+                    let recipient_bare = Self::normalize_jid_to_bare(recipient);
+                    *jid == recipient_bare
+                })
+                .map(|(_jid, device_id)| *device_id)
+                .collect();
+            
+            if !fallback_devices.is_empty() {
+                warn!("ENCRYPT_DEBUG: Found {} devices from known sessions: {:?}", fallback_devices.len(), fallback_devices);
+                fallback_devices
+            } else {
+                error!("ENCRYPT_DEBUG: No devices found even in fallback, cannot encrypt");
+                return Err(OmemoError::NoDeviceError(recipient.to_string()));
+            }
+        } else {
+            recipient_device_ids
+        };
         
         // Get our own device IDs (important for message carbons) with timeout
         // Also force refresh for our own devices to ensure consistency - NO CACHED FALLBACK
@@ -639,7 +669,11 @@ impl OmemoManager {
             }
         };
         
-        info!("Found {} devices for recipient {}: {:?}", recipient_device_ids.len(), recipient, recipient_device_ids);
+        // DEBUG: Log our own device discovery
+        info!("ENCRYPT_DEBUG: Own device discovery for {}: {:?}", user_bare_jid, own_device_ids);
+        info!("ENCRYPT_DEBUG: Our current device ID: {}", self.device_id);
+        
+        info!("Found {} devices for recipient {}: {:?}", final_recipient_device_ids.len(), recipient, final_recipient_device_ids);
         info!("Found {} own devices: {:?}", own_device_ids.len(), own_device_ids);
         
         // Use Dino-compatible AES-GCM format by default
@@ -679,9 +713,12 @@ impl OmemoManager {
         let mut all_devices = Vec::new();
         
         // Add recipient devices
-        for device_id in recipient_device_ids {
+        for device_id in final_recipient_device_ids {
             if !all_devices.contains(&(recipient.to_string(), device_id)) {
                 all_devices.push((recipient.to_string(), device_id));
+                info!("ENCRYPT_DEBUG: Added recipient device {}:{}", recipient, device_id);
+            } else {
+                warn!("ENCRYPT_DEBUG: Duplicate recipient device {}:{} found", recipient, device_id);
             }
         }
         
@@ -690,13 +727,22 @@ impl OmemoManager {
         for device_id in own_device_ids {
             // Skip our current device to avoid creating sessions with ourselves
             if device_id == self.device_id {
-                debug!("Skipping our current device {} for message encryption", device_id);
+                debug!("ENCRYPT_DEBUG: Skipping our current device {} for message encryption", device_id);
                 continue;
             }
             
             if !all_devices.contains(&(user_bare_jid.clone(), device_id)) {
                 all_devices.push((user_bare_jid.clone(), device_id));
+                info!("ENCRYPT_DEBUG: Added own device {}:{}", user_bare_jid, device_id);
+            } else {
+                warn!("ENCRYPT_DEBUG: Duplicate own device {}:{} found", user_bare_jid, device_id);
             }
+        }
+        
+        info!("ENCRYPT_DEBUG: Final merged device list for encryption: {:?}", all_devices);
+        info!("ENCRYPT_DEBUG: Total devices to encrypt for: {}", all_devices.len());
+        for (jid, device_id) in &all_devices {
+            info!("ENCRYPT_DEBUG: Target device: {}:{}", jid, device_id);
         }
         
         info!("Encrypting message key for {} total devices", all_devices.len());
@@ -709,53 +755,57 @@ impl OmemoManager {
         let overall_timeout = Duration::from_secs(15); // Maximum 15 seconds for all session creations
         let session_creation_future = async {
             for (jid, device_id) in all_devices {
+                info!("ENCRYPT_DEBUG: Processing device {}:{}", jid, device_id);
                 let device_key = (jid.clone(), device_id);
                 
                 // Check if this device needs a PreKey message after session reset
                 let needs_prekey = self.pending_prekey_sends.contains(&device_key);
+                info!("ENCRYPT_DEBUG: Device {}:{} needs_prekey: {}", jid, device_id, needs_prekey);
                 
                 // Skip ignored devices UNLESS they need a PreKey message
                 if !needs_prekey {
                     if let Ok(true) = self.is_device_ignored(&jid, device_id).await {
-                        debug!("Skipping ignored device {}:{} (no PreKey needed)", jid, device_id);
+                        warn!("ENCRYPT_DEBUG: Skipping ignored device {}:{} (no PreKey needed)", jid, device_id);
                         continue;
                     }
                 }
                 
                 if needs_prekey {
-                    debug!("Processing device {}:{} for PreKey message", jid, device_id);
+                    info!("ENCRYPT_DEBUG: Processing device {}:{} for PreKey message", jid, device_id);
                 }
                 
                 // Add per-device timeout to prevent individual device hangs
                 let device_timeout = Duration::from_secs(8); // 8 seconds per device
+                info!("ENCRYPT_DEBUG: Getting or creating session for {}:{}", jid, device_id);
                 let session_result = timeout(device_timeout, self.get_or_create_session(&jid, device_id)).await;
                 
                 match session_result {
                     Ok(Ok(session)) => {
+                        info!("ENCRYPT_DEBUG: Successfully got session for {}:{}", jid, device_id);
                         // Encrypt the message key (aes_key + auth_tag) for this device
                         match session.encrypt_key(&message_key) {
                             Ok(encrypted_key) => {
                                 encrypted_keys.insert(device_id, encrypted_key);
-                                debug!("Encrypted message key for {}:{}", jid, device_id);
+                                info!("ENCRYPT_DEBUG: Successfully encrypted message key for {}:{}", jid, device_id);
                                 
                                 // If this device was waiting for a PreKey message, mark it as sent
                                 if needs_prekey {
                                     self.pending_prekey_sends.remove(&device_key);
-                                    info!("Sent PreKey message to {}:{}, removing from pending list", jid, device_id);
+                                    info!("ENCRYPT_DEBUG: Sent PreKey message to {}:{}, removing from pending list", jid, device_id);
                                 }
                             },
                             Err(e) => {
-                                warn!("Failed to encrypt message key for {}:{}: {}", jid, device_id, e);
+                                error!("ENCRYPT_DEBUG: Failed to encrypt message key for {}:{}: {}", jid, device_id, e);
                                 // Continue with other devices
                             }
                         }
                     },
                     Ok(Err(e)) => {
-                        warn!("Failed to get or create session with {}:{}: {}", jid, device_id, e);
+                        error!("ENCRYPT_DEBUG: Failed to get or create session with {}:{}: {}", jid, device_id, e);
                         // Continue with other devices
                     },
                     Err(_) => {
-                        warn!("Timeout getting session with {}:{}, skipping device", jid, device_id);
+                        error!("ENCRYPT_DEBUG: Timeout getting session with {}:{}, skipping device", jid, device_id);
                         // Continue with other devices
                     }
                 }
@@ -768,7 +818,8 @@ impl OmemoManager {
             // Continue with whatever sessions we managed to create
         }
         
-        info!("Message encrypted successfully for {} devices", encrypted_keys.len());
+        info!("ENCRYPT_DEBUG: Message encrypted successfully for {} devices", encrypted_keys.len());
+        info!("ENCRYPT_DEBUG: Final encrypted_keys map contains device IDs: {:?}", encrypted_keys.keys().collect::<Vec<_>>());
         
         // Check if this message contains any PreKey messages (devices with stored ephemeral keys)
         let has_prekey_devices = device_list_copy.iter().any(|(jid, device_id)| {
@@ -890,11 +941,18 @@ impl OmemoManager {
         }
         
         // First, check if we have an encrypted key for our device
+        info!("DECRYPT_DEBUG: Looking for encrypted key for our device {} in message from {}:{}", self.device_id, sender, device_id);
+        info!("DECRYPT_DEBUG: Available encrypted keys in message: {:?}", message.encrypted_keys.keys().collect::<Vec<_>>());
+        info!("DECRYPT_DEBUG: Message has {} encrypted keys total", message.encrypted_keys.len());
+        
         let encrypted_key = match message.encrypted_keys.get(&self.device_id) {
-            Some(key) => key,
+            Some(key) => {
+                info!("DECRYPT_DEBUG: Found encrypted key for our device {}", self.device_id);
+                key
+            },
             None => {
-                warn!("No encrypted key found for our device {} in message from {}:{}", self.device_id, sender, device_id);
-                warn!("Available keys in message: {:?}", message.encrypted_keys.keys().collect::<Vec<_>>());
+                error!("DECRYPT_DEBUG: No encrypted key found for our device {} in message from {}:{}", self.device_id, sender, device_id);
+                error!("DECRYPT_DEBUG: Available keys in message: {:?}", message.encrypted_keys.keys().collect::<Vec<_>>());
                 
                 // This could mean the sender is using outdated device lists
                 // Force refresh our own device list to make sure it's published correctly
