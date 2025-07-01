@@ -29,12 +29,17 @@ use chatterbox::xmpp::discovery::ServiceDiscovery;
     long_about = "Chatterbox is a command-line chat client for XMPP with OMEMO encryption support.\n\n\
     Optional parameters:\n\
     --omemo-dir <PATH>     Override the directory for OMEMO device_id, identity_key, and multi-device info files\n\
+    --disable-mam          Disable Message Archive Management (MAM) feature\n\
     Use -h or --help to see all options."
 )]
 struct Args {
     /// Directory for OMEMO device_id, identity_key, and multi-device info files
     #[arg(long, value_name = "PATH", help = "Override the directory for OMEMO device_id, identity_key, and multi-device info files")]
     omemo_dir: Option<PathBuf>,
+    
+    /// Disable Message Archive Management (MAM) feature
+    #[arg(long, help = "Disable Message Archive Management (MAM) feature")]
+    disable_mam: bool,
 }
 
 /// Prompts the user for login credentials or uses environment variables
@@ -255,7 +260,7 @@ async fn main() -> Result<()> {
     // Add timeout to prevent hanging during contact setup
     match tokio::time::timeout(
         tokio::time::Duration::from_secs(5),
-        setup_contacts(&mut chat_ui, &mut xmpp_client)
+        setup_contacts(&mut chat_ui, &mut xmpp_client, args.disable_mam)
     ).await {
         Ok(_) => {
             info!("Contact setup completed successfully");
@@ -343,8 +348,8 @@ async fn main() -> Result<()> {
     // Draw UI again with contact list and fingerprints
     terminal.draw(|f| chat_ui.draw(f))?;
     
-    // Start message history loading in background if we have an active contact
-    if chat_ui.has_active_contact() {
+    // Start message history loading in background if we have an active contact and MAM is not disabled
+    if chat_ui.has_active_contact() && !args.disable_mam {
         // We need to find the active contact name from the contacts list
         // since chat_ui.contact is private
         if !chat_ui.contacts.is_empty() {
@@ -430,13 +435,21 @@ async fn main() -> Result<()> {
                 }
             });
         }
+    } else if chat_ui.has_active_contact() && args.disable_mam {
+        // If MAM is disabled but we have an active contact, show a message
+        let active_contact = chat_ui.contacts[0].clone();
+        chat_ui.add_message(create_system_message(
+            &active_contact,
+            "Message history disabled (--disable-mam)"
+        ));
+        terminal.draw(|f| chat_ui.draw(f))?;
     }
 
     // Check for pending OMEMO key verifications
     check_pending_key_verifications(&mut chat_ui, &xmpp_client).await?;
 
     // Main event loop
-    run_main_loop(&mut chat_ui, &mut terminal, &mut xmpp_client, &mut msg_rx).await?;
+    run_main_loop(&mut chat_ui, &mut terminal, &mut xmpp_client, &mut msg_rx, args.disable_mam).await?;
 
     // Restore terminal
     ui::restore_terminal(terminal)?;
@@ -446,7 +459,7 @@ async fn main() -> Result<()> {
 }
 
 /// Set up the contacts list from the XMPP server
-async fn setup_contacts(chat_ui: &mut ChatUI, xmpp_client: &mut XMPPClient) {
+async fn setup_contacts(chat_ui: &mut ChatUI, xmpp_client: &mut XMPPClient, _disable_mam: bool) {
     // Try to fetch the roster (contact list) from the XMPP server
     match xmpp_client.get_roster().await {
         Ok(Some(contacts)) if !contacts.is_empty() => {
@@ -492,9 +505,18 @@ async fn setup_contacts(chat_ui: &mut ChatUI, xmpp_client: &mut XMPPClient) {
 
 /// Loads message history for a contact in the background without blocking the UI
 /// Returns immediately while history loads asynchronously
-fn load_message_history_async(chat_ui: &mut ChatUI, xmpp_client: &XMPPClient, contact: &str) {
+fn load_message_history_async(chat_ui: &mut ChatUI, xmpp_client: &XMPPClient, contact: &str, disable_mam: bool) {
     // Skip loading history for system contacts
     if contact.starts_with("[") && contact.ends_with("]") {
+        return;
+    }
+    
+    // If MAM is disabled, show a message and return early
+    if disable_mam {
+        chat_ui.add_message(create_system_message(
+            contact,
+            "Message history disabled (--disable-mam)"
+        ));
         return;
     }
     
@@ -618,7 +640,8 @@ async fn run_main_loop(
     chat_ui: &mut ChatUI,
     terminal: &mut ui::Terminal<ui::CrosstermBackend<io::Stdout>>,
     xmpp_client: &mut XMPPClient,
-    msg_rx: &mut tokio::sync::mpsc::Receiver<Message>
+    msg_rx: &mut tokio::sync::mpsc::Receiver<Message>,
+    disable_mam: bool
 ) -> Result<()> {
     // Subscribe to presence notifications
     let mut presence_rx = xmpp_client.subscribe_to_presence();
@@ -1308,7 +1331,7 @@ async fn run_main_loop(
                                     chat_ui.clear_messages();
                                     
                                     // Load message history for the new active contact
-                                    load_message_history_async(chat_ui, xmpp_client, &first_contact);
+                                    load_message_history_async(chat_ui, xmpp_client, &first_contact, disable_mam);
                                 }
                             },
                             Err(e) => {
@@ -1341,7 +1364,7 @@ async fn run_main_loop(
             terminal.draw(|f| chat_ui.draw(f))?;
             
             // Load message history for this contact asynchronously
-            load_message_history_async(chat_ui, xmpp_client, &recipient);
+            load_message_history_async(chat_ui, xmpp_client, &recipient, disable_mam);
             
             // Redraw right away to show loading message
             terminal.draw(|f| chat_ui.draw(f))?;
