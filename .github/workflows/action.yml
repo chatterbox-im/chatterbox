@@ -32,4 +32,6 @@ jobs:
         run: grep "<<" chatterbox.log | grep "disco#" | grep register
       - name: Check for errors 
         shell: bash
-        run: ./scripts/grep_for_error.sh 
+        run: ./scripts/grep_for_error.sh
+      - name: Check device list fetch from server
+        run: ./scripts/grep_device_fetch.sh 
