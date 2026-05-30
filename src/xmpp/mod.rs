@@ -176,6 +176,17 @@ impl XMPPClient {
         presence_rx
     }
 
+    /// Re-send our presence to trigger the server to re-broadcast roster presences.
+    /// Call this after subscribing to presence updates to avoid missing initial presences.
+    pub async fn resend_presence(&self) {
+        if let Some(client_ref) = &self.client {
+            let mut client_guard = client_ref.lock().await;
+            if let Err(e) = presence::send_initial_presence(&mut client_guard).await {
+                error!("Failed to resend presence: {}", e);
+            }
+        }
+    }
+
     /// Subscribe to friend request notifications
     pub fn subscribe_to_friend_requests(&self) -> mpsc::Receiver<String> {
         presence::subscribe_to_friend_requests()

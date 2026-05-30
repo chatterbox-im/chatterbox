@@ -25,6 +25,23 @@ lazy_static::lazy_static! {
 // Presence-related namespaces
 const NS_JABBER_CLIENT: &str = "jabber:client";
 
+// XEP-0319 idle namespace
+const NS_IDLE: &str = "urn:xmpp:idle:1";
+
+/// Check if a presence stanza indicates the user is idle (XEP-0319)
+/// Returns true if idle for more than 5 minutes
+fn is_idle(stanza: &Element) -> bool {
+    if let Some(idle) = stanza.get_child("idle", NS_IDLE) {
+        if let Some(since) = idle.attr("since") {
+            if let Ok(since_time) = chrono::DateTime::parse_from_rfc3339(since) {
+                let idle_duration = chrono::Utc::now() - since_time.with_timezone(&chrono::Utc);
+                return idle_duration > chrono::Duration::minutes(5);
+            }
+        }
+    }
+    false
+}
+
 /// Handle a presence stanza received from a contact
 /// 
 /// # Arguments
@@ -64,32 +81,21 @@ pub fn handle_presence_stanza(stanza: &Element) -> Result<()> {
             // Check for show element to determine more specific status
             if let Some(show) = stanza.get_child("show", "") {
                 match show.text().as_str() {
-                    "away" => ContactStatus::Away,
-                    "xa" | "dnd" => ContactStatus::Away, // Map extended away and do not disturb to Away
+                    "away" | "xa" | "dnd" => ContactStatus::Away,
                     _ => ContactStatus::Online,
                 }
+            } else if is_idle(stanza) {
+                // XEP-0319: Last User Interaction in Presence
+                // If idle for more than 5 minutes, show as Away
+                ContactStatus::Away
             } else {
                 ContactStatus::Online
             }
         },
-        "subscribe" => {
-            info!("Received presence subscription request from {}", bare_jid);
-            // Handle subscription request here
-            // For now we just notify about the request
-            ContactStatus::Online // Using Online as a placeholder since we don't have SubscriptionRequested
-        },
-        "subscribed" => {
-            info!("Presence subscription to {} accepted", bare_jid);
-            // We can continue with normal status
-            ContactStatus::Online
-        },
-        "unsubscribe" => {
-            info!("{} unsubscribed from our presence", bare_jid);
-            ContactStatus::Offline
-        },
-        "unsubscribed" => {
-            info!("Our subscription to {}'s presence was canceled", bare_jid);
-            ContactStatus::Offline
+        // Subscription management stanzas should NOT update presence display
+        "subscribe" | "subscribed" | "unsubscribe" | "unsubscribed" => {
+            info!("Received subscription stanza '{}' from {}", presence_type, bare_jid);
+            return Ok(()); // Don't broadcast a presence update for these
         },
         _ => {
             warn!("Unknown presence type '{}' from {}", presence_type, bare_jid);

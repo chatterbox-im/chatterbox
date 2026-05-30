@@ -650,6 +650,11 @@ async fn run_main_loop(
     // Subscribe to friend request notifications
     let mut friend_req_rx = xmpp_client.subscribe_to_friend_requests();
     
+    // Re-send presence now that we're subscribed to updates.
+    // Initial presences arrive before subscribe_to_presence() is called, so they're lost.
+    // Re-sending triggers the server to echo back all roster contacts' presences.
+    xmpp_client.resend_presence().await;
+    
     // Create a channel for receiving typing notifications
     let (typing_tx, mut typing_rx) = tokio::sync::mpsc::channel::<(String, TypingStatus)>(100);
     
@@ -745,8 +750,8 @@ async fn run_main_loop(
             }
         }
         
-        // Check for presence updates
-        if let Ok((contact_id, status)) = presence_rx.try_recv() {
+        // Check for presence updates (drain all pending)
+        while let Ok((contact_id, status)) = presence_rx.try_recv() {
             // Update contact status in the UI
             chat_ui.update_contact_status(&contact_id, status);
         }
