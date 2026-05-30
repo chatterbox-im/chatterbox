@@ -256,3 +256,114 @@ pub fn verify_omemo_stanza(stanza: &Element, content: &str) -> Result<(), String
         Err(format!("SECURITY VIOLATION: Message missing required OMEMO elements: {}", missing_elements.join(", ")))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine;
+
+    fn make_valid_omemo_stanza() -> Element {
+        let iv_b64 = base64::engine::general_purpose::STANDARD.encode(b"0123456789ab"); // 12 bytes
+        let key_b64 = base64::engine::general_purpose::STANDARD.encode(b"key-data-for-device");
+        let payload_b64 = base64::engine::general_purpose::STANDARD.encode(b"encrypted-payload-content");
+
+        let key_elem = Element::builder("key", custom_ns::OMEMO)
+            .attr("rid", "12345")
+            .append(key_b64)
+            .build();
+
+        let iv_elem = Element::builder("iv", custom_ns::OMEMO)
+            .append(iv_b64)
+            .build();
+
+        let header = Element::builder("header", custom_ns::OMEMO)
+            .attr("sid", "67890")
+            .append(key_elem)
+            .append(iv_elem)
+            .build();
+
+        let payload = Element::builder("payload", custom_ns::OMEMO)
+            .append(payload_b64)
+            .build();
+
+        let encrypted = Element::builder("encrypted", custom_ns::OMEMO)
+            .append(header)
+            .append(payload)
+            .build();
+
+        Element::builder("message", "jabber:client")
+            .attr("from", "alice@example.com/phone")
+            .attr("to", "bob@example.com/laptop")
+            .append(encrypted)
+            .build()
+    }
+
+    #[test]
+    fn test_valid_omemo_stanza_passes() {
+        let stanza = make_valid_omemo_stanza();
+        let result = verify_omemo_stanza(&stanza, "secret message");
+        assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
+    }
+
+    #[test]
+    fn test_plaintext_leak_detected() {
+        let plaintext = "my secret content";
+        // Build a stanza that happens to contain the plaintext in an attribute
+        let encrypted = Element::builder("encrypted", custom_ns::OMEMO)
+            .attr("debug", plaintext) // Simulates accidental leak
+            .build();
+        let stanza = Element::builder("message", "jabber:client")
+            .attr("from", "alice@example.com")
+            .append(encrypted)
+            .build();
+
+        let result = verify_omemo_stanza(&stanza, plaintext);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("SECURITY VIOLATION"));
+    }
+
+    #[test]
+    fn test_missing_encrypted_element() {
+        let stanza = Element::builder("message", "jabber:client")
+            .attr("from", "alice@example.com")
+            .append(Element::builder("body", "jabber:client").append("hello").build())
+            .build();
+
+        let result = verify_omemo_stanza(&stanza, "unrelated");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("encrypted element"));
+    }
+
+    #[test]
+    fn test_missing_header_element() {
+        let encrypted = Element::builder("encrypted", custom_ns::OMEMO).build();
+        let stanza = Element::builder("message", "jabber:client")
+            .attr("from", "alice@example.com")
+            .append(encrypted)
+            .build();
+
+        let result = verify_omemo_stanza(&stanza, "unrelated");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("header"));
+    }
+
+    #[test]
+    fn test_non_message_element_fails() {
+        let stanza = Element::builder("iq", "jabber:client")
+            .attr("type", "result")
+            .build();
+
+        let result = verify_omemo_stanza(&stanza, "unrelated");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_wrong_namespace_fails() {
+        let stanza = Element::builder("message", "jabber:server")
+            .attr("from", "alice@example.com")
+            .build();
+
+        let result = verify_omemo_stanza(&stanza, "unrelated");
+        assert!(result.is_err());
+    }
+}

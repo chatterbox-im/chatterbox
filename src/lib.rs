@@ -1,6 +1,7 @@
 // Re-export needed modules for testing
 pub mod models;
 pub mod omemo;  // OMEMO module
+pub mod storage; // Local message persistence
 pub mod xmpp;  // Our new modular XMPP implementation
 
 // Re-export main types for convenience

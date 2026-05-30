@@ -1,8 +1,8 @@
-# Sermo XMPP Chat Client - Design Overview
+# Chatterbox XMPP Chat Client - Design Overview
 
 ## 1. Introduction
 
-Sermo is a terminal-based XMPP (Extensible Messaging and Presence Protocol) chat client written in Rust. It aims to provide essential chat functionalities, including messaging, contact management, presence, delivery receipts, and typing notifications, within a terminal user interface (TUI).
+Chatterbox is a terminal-based XMPP (Extensible Messaging and Presence Protocol) chat client written in Rust. It provides messaging, contact management, presence, delivery receipts, typing notifications, local message persistence, and OMEMO end-to-end encryption within a terminal user interface (TUI).
 
 ## 2. Architecture
 
@@ -17,13 +17,16 @@ The application follows a modular, asynchronous, and event-driven architecture:
 ## 3. Core Components
 
 *   **`main.rs`:**
-    *   The application entry point.
-    *   Handles command-line arguments (implicitly via environment variables for credentials).
-    *   Manages application startup and shutdown.
-    *   Initializes logging, credential loading/prompting.
-    *   Sets up the `XMPPClient` and the `ChatUI`.
-    *   Runs the main event loop, orchestrating interactions between the UI and the XMPP client.
-    *   Handles terminal setup and restoration.
+    *   Slim entry point (~240 lines).
+    *   Handles command-line argument parsing and logging setup.
+    *   Loads credentials and establishes the XMPP connection.
+    *   Delegates to `app::run_app()` after successful connection.
+*   **`app.rs`:**
+    *   Application lifecycle: TUI setup, event loop, and command dispatch.
+    *   Opens the local `MessageStore` on startup.
+    *   Runs the main event loop, orchestrating interactions between the UI, XMPP client, and local store.
+    *   Handles contact switching (loads local history instantly, then MAM catch-up).
+    *   Persists all sent and received messages to the local store.
 *   **`lib.rs`:**
     *   Defines the library crate root.
     *   Re-exports core modules and types for external use (primarily testing in this case).
@@ -48,10 +51,14 @@ The application follows a modular, asynchronous, and event-driven architecture:
     *   Contains the core logic for OMEMO end-to-end encryption. Key components include the `OmemoManager` (in `manager.rs`) which orchestrates cryptographic operations, session management, and interaction with the OMEMO store. It also includes modules for cryptographic primitives (`crypto.rs`), session state (`session.rs`), X3DH and Double Ratchet protocol logic (e.g. `x3dh.rs`, `double_ratchet.rs`), and key/identity storage (`store.rs`).
 *   **`models.rs`:**
     *   Defines core data structures used throughout the application, such as `Message`, `DeliveryStatus`, `ContactStatus`, etc. Ensures consistent data representation.
+*   **`storage.rs`:**
+    *   SQLite-backed local message persistence (`rusqlite` with bundled SQLite).
+    *   Database per account at `~/.local/share/chatterbox/<jid>/messages.db`.
+    *   Provides `MessageStore` with methods: `store_message`, `load_messages`, `newest_timestamp`, `update_delivery_status`.
+    *   Idempotent inserts (`INSERT OR IGNORE`) allow safe replay of MAM results.
+    *   Used as the primary source of history on contact switch; MAM becomes catch-up only.
 *   **`credentials.rs`:**
-    *   Handles the loading and saving of user credentials (server, username, password) securely, likely to a configuration file.
-*   **`auth.rs`:**
-    *   Appears related to authentication or credential management, potentially overlapping with `credentials.rs`. (Further investigation might clarify its specific role).
+    *   Handles the loading and saving of user credentials (server, username, password) securely to a configuration file.
 *   **`utils.rs`:**
     *   Contains miscellaneous utility functions, such as setting up logging (`log` crate) and reading lines from standard input.
 
@@ -63,9 +70,10 @@ The application follows a modular, asynchronous, and event-driven architecture:
 *   **Basic Messaging (RFC 6121):** Sending and receiving one-to-one chat messages.
 *   **Message Delivery Receipts (XEP-0184):** Tracking message status (Sent, Delivered).
 *   **Chat State Notifications (XEP-0085):** Displaying typing indicators.
-*   **Message Archive Management (XEP-0313):** Retrieving message history from the server.
+*   **Message Archive Management (XEP-0313):** Retrieving message history from the server (used for catch-up only; local store is primary).
 *   **Message Carbons (XEP-0280):** Synchronizing messages sent/received by other clients for the same account.
 *   **OMEMO Encryption (XEP-0384):** End-to-end encryption for messages (implementation details in `omemo/`).
+*   **Local Message Persistence:** SQLite-backed per-account message storage for instant history access offline.
 
 ## 5. Concurrency and State Management
 
@@ -88,9 +96,10 @@ The application follows a modular, asynchronous, and event-driven architecture:
 *   **`log` / `env_logger`:** Logging framework.
 *   **`anyhow`:** Error handling.
 *   **`uuid`:** Generating unique IDs (e.g., for messages, stanza tracking).
-*   **`serde`:** Serialization/Deserialization (likely for credentials).
-*   **`lazy_static`:** For static variables with non-const initializers (e.g., shared channels).
-*   **OMEMO Dependencies:** Likely includes cryptographic libraries (`curve25519-dalek`, `aes-gcm`, etc.) and potentially database libraries (`rusqlite`) for storage.
+*   **`serde`:** Serialization/Deserialization (for credentials).
+*   **`rusqlite`:** SQLite database access (bundled) for local message persistence.
+*   **`chrono`:** Timestamp handling for MAM queries and message ordering.
+*   **OMEMO Dependencies:** Cryptographic libraries (`curve25519-dalek`, `aes-gcm`, etc.) for end-to-end encryption.
 
 ## 7. OMEMO Encryption Implementation
 
@@ -179,4 +188,42 @@ OMEMO (XEP-0384) is an end-to-end encryption protocol for XMPP based on the Sign
     *   While message content is encrypted, metadata (sender, recipient, timestamp) remains visible to the server.
     *   Users should be aware of these limitations.
 
-The OMEMO implementation in Sermo prioritizes security while maintaining usability. It achieves this by handling the complex cryptographic operations transparently, allowing users to communicate securely without needing to understand the underlying encryption details.
+The OMEMO implementation in Chatterbox prioritizes security while maintaining usability. It achieves this by handling the complex cryptographic operations transparently, allowing users to communicate securely without needing to understand the underlying encryption details.
+
+## 8. Local Message Persistence
+
+Chatterbox uses SQLite (via `rusqlite` with the `bundled` feature) to persist messages locally, making history available instantly without waiting for server round-trips.
+
+### 8.1 Storage Layout
+
+*   One database per account: `~/.local/share/chatterbox/<bare_jid>/messages.db`
+*   Falls back to the OMEMO directory override if set (useful for tests and custom deployments).
+
+### 8.2 Schema
+
+```sql
+CREATE TABLE messages (
+    id              TEXT PRIMARY KEY,
+    contact_jid     TEXT NOT NULL,
+    sender_id       TEXT NOT NULL,
+    recipient_id    TEXT NOT NULL,
+    content         TEXT NOT NULL,
+    timestamp       INTEGER NOT NULL,
+    delivery_status INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX idx_messages_contact_ts ON messages (contact_jid, timestamp);
+```
+
+### 8.3 Integration with MAM
+
+1. On contact switch, the last 100 messages are loaded instantly from SQLite.
+2. A background MAM catch-up query is issued with `start` set to `newest_local_timestamp + 1`.
+3. Messages arriving from MAM are persisted via `INSERT OR IGNORE`, so duplicates are harmless.
+4. If no local history exists, a full MAM fetch is performed (same as before).
+
+### 8.4 Design Decisions
+
+*   **Relational (SQLite):** Chosen for indexed range queries on `(contact_jid, timestamp)`, atomic upserts, and zero-config deployment (bundled).
+*   **Idempotent writes:** `INSERT OR IGNORE` keyed on message ID ensures safe replay and deduplication.
+*   **Synchronous access:** All store operations are fast local I/O and run on the main event loop — no need for async wrapping or cross-thread sharing.
+*   **Graceful degradation:** If the store fails to open, the app continues without local persistence (MAM-only mode).

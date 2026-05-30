@@ -17,6 +17,7 @@ use chatterbox::models::DeliveryStatus;
 /// This test verifies that messages are properly archived by the server
 /// and can be retrieved using XEP-0313: Message Archive Management
 #[tokio::test]
+#[ignore = "requires live XMPP server"]
 async fn test_message_archiving() -> Result<()> {
     // Setup logging for the test
     setup_logging();
@@ -183,6 +184,7 @@ async fn test_message_archiving() -> Result<()> {
 
 /// Test more thorough message archiving with both plaintext and encrypted messages
 #[tokio::test]
+#[ignore = "requires live XMPP server"]
 async fn test_comprehensive_message_archiving() -> Result<()> {
     // Setup logging for the test
     setup_logging();

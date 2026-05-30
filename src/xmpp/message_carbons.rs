@@ -320,7 +320,7 @@ impl super::XMPPClient {
         debug!("Carbon OMEMO message from: {},: to:: {}", from, to);
         
         // Get the OMEMO manager
-        let omemo_manager = match crate::xmpp::get_global_xmpp_client().await {
+        let omemo_manager = match self.shared_self.lock().await.as_ref() {
             Some(client) => {
                 let client_guard = client.lock().await;
                 client_guard.get_omemo_manager().map(|arc| arc.clone())
@@ -566,5 +566,105 @@ impl super::XMPPClient {
         }
         
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::custom_ns;
+    use xmpp_parsers::Element;
+
+    fn make_carbon_received(from: &str, body: &str) -> Element {
+        let inner_msg = Element::builder("message", "jabber:client")
+            .attr("from", from)
+            .attr("to", "me@server.example")
+            .attr("id", "orig-id-1")
+            .append(Element::builder("body", "jabber:client").append(body).build())
+            .build();
+
+        let forwarded = Element::builder("forwarded", custom_ns::FORWARD)
+            .append(inner_msg)
+            .build();
+
+        let received = Element::builder("received", custom_ns::CARBONS)
+            .append(forwarded)
+            .build();
+
+        Element::builder("message", "jabber:client")
+            .attr("from", "me@server.example")
+            .attr("to", "me@server.example/resource")
+            .append(received)
+            .build()
+    }
+
+    fn make_carbon_sent(to: &str, body: &str) -> Element {
+        let inner_msg = Element::builder("message", "jabber:client")
+            .attr("from", "me@server.example/other-device")
+            .attr("to", to)
+            .attr("id", "orig-id-2")
+            .append(Element::builder("body", "jabber:client").append(body).build())
+            .build();
+
+        let forwarded = Element::builder("forwarded", custom_ns::FORWARD)
+            .append(inner_msg)
+            .build();
+
+        let sent = Element::builder("sent", custom_ns::CARBONS)
+            .append(forwarded)
+            .build();
+
+        Element::builder("message", "jabber:client")
+            .attr("from", "me@server.example")
+            .attr("to", "me@server.example/resource")
+            .append(sent)
+            .build()
+    }
+
+    #[test]
+    fn test_detect_received_carbon() {
+        let stanza = make_carbon_received("alice@example.com/phone", "Hello!");
+        assert!(stanza.has_child("received", custom_ns::CARBONS));
+        assert!(!stanza.has_child("sent", custom_ns::CARBONS));
+    }
+
+    #[test]
+    fn test_detect_sent_carbon() {
+        let stanza = make_carbon_sent("bob@example.com", "Hey!");
+        assert!(stanza.has_child("sent", custom_ns::CARBONS));
+        assert!(!stanza.has_child("received", custom_ns::CARBONS));
+    }
+
+    #[test]
+    fn test_extract_forwarded_message_from_received_carbon() {
+        let stanza = make_carbon_received("alice@example.com/phone", "Test message");
+        let received = stanza.get_child("received", custom_ns::CARBONS).unwrap();
+        let forwarded = received.get_child("forwarded", custom_ns::FORWARD).unwrap();
+        let message = forwarded.get_child("message", "jabber:client").unwrap();
+
+        assert_eq!(message.attr("from").unwrap(), "alice@example.com/phone");
+        let body = message.get_child("body", "jabber:client").unwrap();
+        assert_eq!(body.text(), "Test message");
+    }
+
+    #[test]
+    fn test_extract_forwarded_message_from_sent_carbon() {
+        let stanza = make_carbon_sent("bob@example.com", "Outgoing");
+        let sent = stanza.get_child("sent", custom_ns::CARBONS).unwrap();
+        let forwarded = sent.get_child("forwarded", custom_ns::FORWARD).unwrap();
+        let message = forwarded.get_child("message", "jabber:client").unwrap();
+
+        assert_eq!(message.attr("to").unwrap(), "bob@example.com");
+        let body = message.get_child("body", "jabber:client").unwrap();
+        assert_eq!(body.text(), "Outgoing");
+    }
+
+    #[test]
+    fn test_non_carbon_message_not_detected() {
+        let stanza = Element::builder("message", "jabber:client")
+            .attr("from", "bob@example.com")
+            .append(Element::builder("body", "jabber:client").append("plain msg").build())
+            .build();
+        assert!(!stanza.has_child("sent", custom_ns::CARBONS));
+        assert!(!stanza.has_child("received", custom_ns::CARBONS));
     }
 }

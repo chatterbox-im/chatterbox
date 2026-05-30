@@ -12,6 +12,7 @@ use tokio::time::{timeout, Duration as TokioDuration};
 
 /// Test OMEMO multi-device encryption functionality
 #[tokio::test]
+#[ignore = "requires live XMPP server"]
 async fn test_omemo_multi_device_encryption() -> Result<()> {
     // Setup logging for the test
     setup_logging();
@@ -183,6 +184,7 @@ async fn test_omemo_multi_device_encryption() -> Result<()> {
 
 /// Test OMEMO multi-device encryption functionality more thoroughly
 #[tokio::test]
+#[ignore = "requires live XMPP server"]
 async fn test_omemo_multi_device_encryption_enhanced() -> Result<()> {
     // Setup logging for the test
     setup_logging();

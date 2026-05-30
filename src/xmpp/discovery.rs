@@ -365,3 +365,115 @@ impl ServiceDiscovery {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_disco_info_query(features: &[&str], identities: &[(&str, &str, Option<&str>)]) -> Element {
+        let mut query = Element::builder("query", "http://jabber.org/protocol/disco#info").build();
+        for ns in features {
+            let feat = Element::builder("feature", "http://jabber.org/protocol/disco#info")
+                .attr("var", *ns)
+                .build();
+            query.append_child(feat);
+        }
+        for (category, type_, name) in identities {
+            let mut id = Element::builder("identity", "http://jabber.org/protocol/disco#info")
+                .attr("category", *category)
+                .attr("type", *type_)
+                .build();
+            if let Some(n) = name {
+                id.set_attr("name", *n);
+            }
+            query.append_child(id);
+        }
+        query
+    }
+
+    /// Test extract_features via ServiceDiscovery (needs a dummy client)
+    fn extract_features_from(query: &Element) -> HashSet<Feature> {
+        query.children()
+            .filter(|child| child.name() == "feature")
+            .filter_map(|feature| {
+                feature.attr("var").map(|var| Feature { namespace: var.to_string() })
+            })
+            .collect()
+    }
+
+    fn extract_identities_from(query: &Element) -> HashSet<Identity> {
+        query.children()
+            .filter(|child| child.name() == "identity")
+            .filter_map(|identity| {
+                let category = identity.attr("category")?;
+                let type_ = identity.attr("type")?;
+                let name = identity.attr("name");
+                Some(Identity {
+                    category: category.to_string(),
+                    type_: type_.to_string(),
+                    name: name.map(ToString::to_string),
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_extract_features() {
+        let query = make_disco_info_query(
+            &["urn:xmpp:carbons:2", "urn:xmpp:mam:2", "eu.siacs.conversations.axolotl"],
+            &[],
+        );
+        let features = extract_features_from(&query);
+        assert_eq!(features.len(), 3);
+        assert!(features.contains(&Feature { namespace: "urn:xmpp:carbons:2".to_string() }));
+        assert!(features.contains(&Feature { namespace: "urn:xmpp:mam:2".to_string() }));
+        assert!(features.contains(&Feature { namespace: "eu.siacs.conversations.axolotl".to_string() }));
+    }
+
+    #[test]
+    fn test_extract_identities() {
+        let query = make_disco_info_query(
+            &[],
+            &[("client", "console", Some("Chatterbox")), ("server", "im", None)],
+        );
+        let identities = extract_identities_from(&query);
+        assert_eq!(identities.len(), 2);
+        assert!(identities.contains(&Identity {
+            category: "client".to_string(),
+            type_: "console".to_string(),
+            name: Some("Chatterbox".to_string()),
+        }));
+        assert!(identities.contains(&Identity {
+            category: "server".to_string(),
+            type_: "im".to_string(),
+            name: None,
+        }));
+    }
+
+    #[test]
+    fn test_empty_disco_response() {
+        let query = make_disco_info_query(&[], &[]);
+        let features = extract_features_from(&query);
+        let identities = extract_identities_from(&query);
+        assert!(features.is_empty());
+        assert!(identities.is_empty());
+    }
+
+    #[test]
+    fn test_feature_equality() {
+        let f1 = Feature { namespace: "urn:xmpp:mam:2".to_string() };
+        let f2 = Feature { namespace: "urn:xmpp:mam:2".to_string() };
+        let f3 = Feature { namespace: "urn:xmpp:carbons:2".to_string() };
+        assert_eq!(f1, f2);
+        assert_ne!(f1, f3);
+    }
+
+    #[test]
+    fn test_identity_equality() {
+        let i1 = Identity { category: "client".to_string(), type_: "pc".to_string(), name: None };
+        let i2 = Identity { category: "client".to_string(), type_: "pc".to_string(), name: None };
+        let i3 = Identity { category: "client".to_string(), type_: "phone".to_string(), name: None };
+        assert_eq!(i1, i2);
+        assert_ne!(i1, i3);
+    }
+}

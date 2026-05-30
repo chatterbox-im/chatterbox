@@ -48,6 +48,7 @@ hex = "0.4.3"
 textwrap = "0.16.0"
 clap = { version = "4.5", features = ["derive"] }
 regex = "1.11.1"
+rusqlite = { version = "0.31", features = ["bundled"] }
 
 [build-dependencies]
 regex = "1.11.1"

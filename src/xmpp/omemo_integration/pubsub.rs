@@ -2,39 +2,38 @@ use anyhow::{anyhow, Result};
 use log::{error, info, warn};
 use tokio::time::Duration;
 use uuid::Uuid;
+use std::sync::Arc;
+use tokio::sync::Mutex as TokioMutex;
 
 use tokio_xmpp::AsyncClient as XMPPAsyncClient;
 
 use crate::omemo::device_id::DeviceId;
 
-use super::{CURRENT_CLIENT, get_current_client, PUBSUB_RESPONSES};
+use super::PubSubResponses;
 
 /// Publish an item to a PubSub node (for OMEMO implementation)
 /// This function is called by the OMEMO manager to publish key bundles and device lists
 pub async fn publish_pubsub_item(
+    _to: Option<&str>,
+    _node: &str,
+    _id: &str,
+    _payload: &str,
+) -> Result<()> {
+    // Legacy wrapper — uses the PUBSUB_RESPONSES global to find the client
+    // The bridge path (publish_pubsub_item_with_client) is preferred
+    error!("publish_pubsub_item called without explicit client — this path is deprecated");
+    Err(anyhow!("No client available (legacy global path removed)"))
+}
+
+/// Publish an item to a PubSub node using an explicit client reference
+pub async fn publish_pubsub_item_with_client(
+    client_arc: &Arc<TokioMutex<XMPPAsyncClient>>,
     to: Option<&str>,
     node: &str,
     id: &str,
     payload: &str,
 ) -> Result<()> {
     info!("PubSub payload: {}", payload);
-    
-    // Get the client Arc from the global static (drop the RwLock guard before awaiting)
-    let client_arc = {
-        match CURRENT_CLIENT.read() {
-            Ok(guard) => match guard.as_ref() {
-                Some(arc) => arc.clone(),
-                None => {
-                    error!("No client available in CURRENT_CLIENT for PubSub publishing");
-                    return Err(anyhow!("No client available in CURRENT_CLIENT for PubSub publishing"));
-                }
-            },
-            Err(_) => {
-                error!("Failed to acquire read lock for CURRENT_CLIENT");
-                return Err(anyhow!("Failed to acquire read lock for CURRENT_CLIENT"));
-            }
-        }
-    };
     
     {
         let mut client_guard = client_arc.lock().await;
@@ -199,7 +198,7 @@ pub async fn publish_pubsub_item(
                         // If the error contains "invalid-item" or "bad-request", try the alternative format
                         if e.to_string().contains("invalid-item") || e.to_string().contains("bad-request") {
                             warn!("Received bad-request error, trying alternative bundle format");
-                            return publish_bundle_alternative_format(to, node, id, payload).await;
+                            return publish_bundle_alternative_format_with_client(client_arc, to, node, id, payload).await;
                         }
                         
                         return Err(anyhow!("Failed to send bundle stanza: {}", e));
@@ -306,28 +305,23 @@ pub async fn publish_pubsub_item(
 /// Alternative format for publishing bundles when the standard format fails
 /// This function is public so it can be called from the bundle.rs module
 pub async fn publish_bundle_alternative_format(
+    _to: Option<&str>,
+    _node: &str,
+    _id: &str,
+    _payload: &str,
+) -> Result<()> {
+    error!("publish_bundle_alternative_format called without explicit client — this path is deprecated");
+    Err(anyhow!("No client available (legacy global path removed)"))
+}
+
+/// Alternative format for publishing bundles — uses explicit client reference
+pub async fn publish_bundle_alternative_format_with_client(
+    client_arc: &Arc<TokioMutex<XMPPAsyncClient>>,
     to: Option<&str>,
     node: &str,
     id: &str,
     payload: &str,
 ) -> Result<()> {
-    // Get the client Arc from the global static (drop the RwLock guard before awaiting)
-    let client_arc = {
-        match CURRENT_CLIENT.read() {
-            Ok(guard) => match guard.as_ref() {
-                Some(arc) => arc.clone(),
-                None => {
-                    error!("No client available for OMEMO device list publishing");
-                    return Err(anyhow!("No client available"));
-                }
-            },
-            Err(_) => {
-                error!("Failed to acquire read lock for CURRENT_CLIENT");
-                return Err(anyhow!("Failed to acquire read lock for CURRENT_CLIENT"));
-            }
-        }
-    };
-    
     {
         let mut client_guard = client_arc.lock().await;
             
@@ -568,25 +562,17 @@ async fn publish_item_alternative_format(
 
 /// Publish a PubSub item in the correct format for OMEMO device lists
 pub async fn publish_pubsub_item_device_list(
+    _device_ids: &[DeviceId]
+) -> Result<()> {
+    error!("publish_pubsub_item_device_list called without explicit client — this path is deprecated");
+    Err(anyhow!("No client available (legacy global path removed)"))
+}
+
+/// Publish a PubSub item in the correct format for OMEMO device lists — uses explicit client
+pub async fn publish_pubsub_item_device_list_with_client(
+    client_arc: &Arc<TokioMutex<XMPPAsyncClient>>,
     device_ids: &[DeviceId]
 ) -> Result<()> {
-    // Get the client Arc from the global static (drop the RwLock guard before awaiting)
-    let client_arc = {
-        match CURRENT_CLIENT.read() {
-            Ok(guard) => match guard.as_ref() {
-                Some(arc) => arc.clone(),
-                None => {
-                    error!("No client available for OMEMO device list publishing");
-                    return Err(anyhow!("No client available"));
-                }
-            },
-            Err(_) => {
-                error!("Failed to acquire read lock for CURRENT_CLIENT");
-                return Err(anyhow!("Failed to acquire read lock for CURRENT_CLIENT"));
-            }
-        }
-    };
-    
     {
         let mut client_guard = client_arc.lock().await;
             
@@ -664,20 +650,22 @@ pub async fn publish_pubsub_item_device_list(
 /// Request items from a PubSub node (for OMEMO implementation)
 /// This function is called by the OMEMO manager to fetch device lists and bundles
 pub async fn request_pubsub_items(
+    _from: &str,
+    _node: &str,
+) -> Result<String> {
+    error!("request_pubsub_items called without explicit client — this path is deprecated");
+    Err(anyhow!("No client available (legacy global path removed)"))
+}
+
+/// Request items from a PubSub node — uses explicit client and response map
+pub async fn request_pubsub_items_with_client(
+    client_arc: &Arc<TokioMutex<XMPPAsyncClient>>,
+    responses_map: &PubSubResponses,
     from: &str,
     node: &str,
 ) -> Result<String> {
-    // Get a cloned Arc of the client to avoid holding the RwLock across await points
-    let client_ref = match get_current_client() {
-        Some(client) => client,
-        None => {
-            error!("No client available for PubSub requests");
-            return Err(anyhow!("No client available for PubSub requests"));
-        }
-    };
-    
     // Lock the client and send the request
-    let mut client_guard = client_ref.lock().await;
+    let mut client_guard = client_arc.lock().await;
     
     // Generate a unique ID for this request
     let request_id = uuid::Uuid::new_v4().to_string();
@@ -712,8 +700,8 @@ pub async fn request_pubsub_items(
     let start_time = tokio::time::Instant::now();
     
     while tokio::time::Instant::now().duration_since(start_time) < timeout {
-        // Check if we have the response in our global map
-        if let Some(response) = get_pubsub_response(&request_id).await {
+        // Check if we have the response in our map
+        if let Some(response) = get_pubsub_response_from(responses_map, &request_id).await {
             return Ok(response);
         }
         
@@ -722,16 +710,15 @@ pub async fn request_pubsub_items(
     }
     
     // Clean up: remove the entry in case a late response arrives after we give up
-    // This prevents unbounded growth of PUBSUB_RESPONSES on repeated timeouts
-    get_pubsub_response(&request_id).await;
+    get_pubsub_response_from(responses_map, &request_id).await;
     
     error!("Timeout waiting for PubSub response for request {}", request_id);
     Err(anyhow!("Timeout waiting for PubSub response"))
 }
 
-/// Store a pubsub response by request ID
-pub async fn store_pubsub_response(request_id: String, xml_response: String) {
-    let mut responses = PUBSUB_RESPONSES.lock().await;
+/// Store a pubsub response into a specific response map
+pub async fn store_pubsub_response_to(responses_map: &PubSubResponses, request_id: String, xml_response: String) {
+    let mut responses = responses_map.lock().await;
     // Cap the map size to prevent unbounded growth from orphaned responses
     if responses.len() > 100 {
         // Remove some old entries (HashMap order is arbitrary but sufficient for eviction)
@@ -743,9 +730,9 @@ pub async fn store_pubsub_response(request_id: String, xml_response: String) {
     responses.insert(request_id, xml_response);
 }
 
-/// Retrieve a pubsub response by request ID
-pub async fn get_pubsub_response(request_id: &str) -> Option<String> {
-    let mut responses = PUBSUB_RESPONSES.lock().await;
+/// Retrieve a pubsub response from a specific response map
+pub async fn get_pubsub_response_from(responses_map: &PubSubResponses, request_id: &str) -> Option<String> {
+    let mut responses = responses_map.lock().await;
     responses.remove(request_id)
 }
 

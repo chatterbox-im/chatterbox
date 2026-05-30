@@ -15,20 +15,6 @@ impl XMPPClient {
         info!("SEND_MESSAGE CALLED: recipient={}, content_starts_with={}", 
              recipient, content.chars().take(30).collect::<String>());
         
-        // Check if this is a key verification message
-        if content.starts_with("__CHECK_KEY_VERIFICATION__") {
-            info!("DETECTED key verification prefix in message content");
-            
-            let real_message = content.trim_start_matches("__CHECK_KEY_VERIFICATION__");
-            info!("Extracted real message: {}", real_message);
-            
-            info!("Checking OMEMO keys for contact: {}", recipient);
-            self.check_omemo_keys_for_contact(recipient).await?;
-            
-            info!("Sending cleaned message without prefix to: {}", recipient);
-            return self.send_encrypted_message(recipient, real_message).await;
-        }
-        
         // Check if OMEMO is enabled - if it is, always use encrypted messaging
         let omemo_enabled = self.is_omemo_enabled().await;
         

@@ -118,3 +118,96 @@ impl IqResponseRegistry {
         self.pending.len()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xmpp_parsers::Element;
+
+    fn make_iq_result(id: &str) -> Element {
+        Element::builder("iq", "jabber:client")
+            .attr("type", "result")
+            .attr("id", id)
+            .build()
+    }
+
+    #[tokio::test]
+    async fn test_register_and_route() {
+        let mut registry = IqResponseRegistry::new();
+        let rx = registry.register("req-1".to_string());
+
+        assert_eq!(registry.pending_count(), 1);
+
+        let stanza = make_iq_result("req-1");
+        assert!(registry.try_route("req-1", stanza.clone()));
+        assert_eq!(registry.pending_count(), 0);
+
+        let received = rx.await.unwrap();
+        assert_eq!(received.attr("id").unwrap(), "req-1");
+    }
+
+    #[test]
+    fn test_route_unknown_id_returns_false() {
+        let mut registry = IqResponseRegistry::new();
+        let stanza = make_iq_result("unknown");
+        assert!(!registry.try_route("unknown", stanza));
+    }
+
+    #[tokio::test]
+    async fn test_mam_register_and_route_messages() {
+        let mut registry = IqResponseRegistry::new();
+        let (mut msg_rx, iq_rx) = registry.register_mam("mam-q1".to_string());
+
+        // Route intermediate MAM messages
+        let msg1 = Element::builder("message", "jabber:client").attr("id", "m1").build();
+        let msg2 = Element::builder("message", "jabber:client").attr("id", "m2").build();
+        assert!(registry.try_route_mam("mam-q1", msg1));
+        assert!(registry.try_route_mam("mam-q1", msg2));
+
+        // Route final IQ result
+        let iq = make_iq_result("mam-q1");
+        assert!(registry.try_route("mam-q1", iq));
+
+        // Verify messages received in order
+        let r1 = msg_rx.recv().await.unwrap();
+        assert_eq!(r1.attr("id").unwrap(), "m1");
+        let r2 = msg_rx.recv().await.unwrap();
+        assert_eq!(r2.attr("id").unwrap(), "m2");
+
+        // Verify IQ result received
+        let result = iq_rx.await.unwrap();
+        assert_eq!(result.attr("id").unwrap(), "mam-q1");
+    }
+
+    #[test]
+    fn test_evict_stale_removes_old_entries() {
+        let mut registry = IqResponseRegistry::new();
+        let _rx = registry.register("old-req".to_string());
+        assert_eq!(registry.pending_count(), 1);
+
+        // Evict with zero duration — everything is stale
+        registry.evict_stale(std::time::Duration::from_secs(0));
+        assert_eq!(registry.pending_count(), 0);
+    }
+
+    #[test]
+    fn test_evict_stale_keeps_fresh_entries() {
+        let mut registry = IqResponseRegistry::new();
+        let _rx = registry.register("fresh-req".to_string());
+
+        // Evict with generous duration — nothing is stale
+        registry.evict_stale(std::time::Duration::from_secs(60));
+        assert_eq!(registry.pending_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_dropped_receiver_doesnt_panic() {
+        let mut registry = IqResponseRegistry::new();
+        let rx = registry.register("dropped".to_string());
+        drop(rx); // Receiver dropped (caller timed out)
+
+        // Routing should succeed (returns true) but not panic
+        let stanza = make_iq_result("dropped");
+        assert!(registry.try_route("dropped", stanza));
+    }
+}

@@ -24,6 +24,7 @@ const OMEMO: &str = "eu.siacs.conversations.axolotl";
 
 /// Test OMEMO encryption functionality
 #[tokio::test]
+#[ignore = "requires live XMPP server"]
 async fn test_omemo_encryption() -> Result<()> {
     // Setup logging for the test
     setup_logging();
@@ -390,6 +391,7 @@ async fn test_omemo_encryption() -> Result<()> {
 
 /// Test OMEMO device trust management functionality
 #[tokio::test]
+#[ignore = "requires live XMPP server"]
 async fn test_omemo_device_trust() -> Result<()> {
     // Setup logging for the test
     setup_logging();
@@ -592,6 +594,7 @@ async fn test_omemo_device_trust() -> Result<()> {
 
 /// Test OMEMO bundle management and rotation
 #[tokio::test]
+#[ignore = "requires live XMPP server"]
 async fn test_omemo_bundle_management() -> Result<()> {
     // Setup logging for the test
     setup_logging();
@@ -699,6 +702,7 @@ async fn test_omemo_bundle_management() -> Result<()> {
 
 /// Test OMEMO group encryption functionality
 #[tokio::test]
+#[ignore = "requires live XMPP server"]
 async fn test_omemo_group_encryption() -> Result<()> {
     // Setup logging for the test
     setup_logging();
@@ -802,6 +806,7 @@ async fn test_omemo_group_encryption() -> Result<()> {
 
 /// Positive test: Send a well-formed OMEMO stanza and verify compliance
 #[tokio::test]
+#[ignore = "requires live XMPP server"]
 async fn test_omemo_stanza_positive_compliance() -> anyhow::Result<()> {
     let credentials = common::get_test_credentials().await?;
     let (mut client, _msg_rx) = chatterbox::xmpp::XMPPClient::new();
@@ -870,6 +875,7 @@ async fn test_omemo_stanza_positive_compliance() -> anyhow::Result<()> {
 /// Negative test: Send a malformed OMEMO stanza and verify non-compliance
 /// This test intentionally omits the 'header' element and includes plaintext in the payload.
 #[tokio::test]
+#[ignore = "requires live XMPP server"]
 async fn test_omemo_stanza_negative_compliance() -> anyhow::Result<()> {
     // Construct a malformed OMEMO stanza (missing header, plaintext in payload)
     let mut message_element = Element::builder("message", "jabber:client").build();

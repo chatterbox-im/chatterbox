@@ -54,6 +54,16 @@ pub mod custom_ns {
 // XEP namespaces (core and extensions)
 const NS_JABBER_CLIENT: &str = "jabber:client";
 
+/// A shared, late-bound reference to the fully-initialized XMPPClient.
+/// Created at construction time (as None), populated after OMEMO init,
+/// and cloned into spawned tasks so they can access the client without a global.
+pub type SharedClientRef = Arc<TokioMutex<Option<Arc<TokioMutex<XMPPClient>>>>>;
+
+/// Create a new empty SharedClientRef
+pub fn new_shared_client_ref() -> SharedClientRef {
+    Arc::new(TokioMutex::new(None))
+}
+
 // XMPPClient struct - main client implementation
 pub struct XMPPClient {
     pub(crate) jid: String,
@@ -64,12 +74,11 @@ pub struct XMPPClient {
     pub(crate) omemo_manager: Option<Arc<TokioMutex<crate::omemo::OmemoManager>>>,
     pub(crate) carbons_enabled: Arc<AtomicBool>,
     pub(crate) iq_registry: Arc<TokioMutex<iq_registry::IqResponseRegistry>>,
-}
-
-// Make the typing notification channel accessible from outside
-lazy_static::lazy_static! {
-    pub static ref TYPING_TX: std::sync::Mutex<Option<mpsc::Sender<(String, crate::xmpp::chat_states::TypingStatus)>>> = 
-        std::sync::Mutex::new(None);
+    pub(crate) pubsub_responses: Option<crate::xmpp::omemo_integration::PubSubResponses>,
+    /// Shared reference that spawned tasks use to access the fully-initialized client.
+    pub(crate) shared_self: SharedClientRef,
+    /// Typing notification sender — passed to the event loop for chat state notifications.
+    pub typing_tx: Option<mpsc::Sender<(String, crate::xmpp::chat_states::TypingStatus)>>,
 }
 
 // Enum for representing client state
@@ -97,6 +106,9 @@ impl XMPPClient {
             omemo_manager: None,
             carbons_enabled: Arc::new(AtomicBool::new(true)),
             iq_registry: Arc::new(TokioMutex::new(iq_registry::IqResponseRegistry::new())),
+            pubsub_responses: None,
+            shared_self: new_shared_client_ref(),
+            typing_tx: None,
         }, msg_rx)
     }
 
@@ -162,6 +174,9 @@ impl XMPPClient {
             omemo_manager: self.omemo_manager.clone(),
             carbons_enabled: self.carbons_enabled.clone(),
             iq_registry: self.iq_registry.clone(),
+            pubsub_responses: self.pubsub_responses.clone(),
+            shared_self: self.shared_self.clone(),
+            typing_tx: self.typing_tx.clone(),
         }
     }
 
@@ -183,7 +198,7 @@ impl XMPPClient {
     }
 
     /// Subscribe to friend request notifications
-    pub fn subscribe_to_friend_requests(&self) -> mpsc::Receiver<String> {
+    pub fn subscribe_to_friend_requests(&self) -> tokio::sync::broadcast::Receiver<String> {
         presence::subscribe_to_friend_requests()
     }
 
@@ -233,18 +248,13 @@ impl XMPPClient {
     }
 }
 
-// Global XMPP client instance for accessing from other modules
-static GLOBAL_XMPP_CLIENT: tokio::sync::OnceCell<Arc<TokioMutex<XMPPClient>>> = tokio::sync::OnceCell::const_new();
-
-/// Set the global XMPP client instance
+/// Register the fully-initialized client so that spawned tasks can access it
+/// via the `shared_self` field.
 pub async fn set_global_xmpp_client(client: XMPPClient) {
+    let shared = client.shared_self.clone();
     let client_arc = Arc::new(TokioMutex::new(client));
-    let _ = GLOBAL_XMPP_CLIENT.set(client_arc);
-}
-
-/// Get the global XMPP client instance
-pub async fn get_global_xmpp_client() -> Option<Arc<TokioMutex<XMPPClient>>> {
-    GLOBAL_XMPP_CLIENT.get().cloned()
+    // Populate the shared_self reference so event loop tasks can find the client
+    *shared.lock().await = Some(client_arc);
 }
 
 /// Verify OMEMO stanza structure for security

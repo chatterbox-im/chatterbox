@@ -451,3 +451,97 @@ impl super::XMPPClient {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use crate::models::DeliveryStatus;
+
+    fn make_receipt_stanza(from: &str, receipt_id: &str) -> Element {
+        Element::builder("message", "jabber:client")
+            .attr("from", from)
+            .attr("to", "me@server.example")
+            .append(
+                Element::builder("received", custom_ns::RECEIPTS)
+                    .attr("id", receipt_id)
+                    .build(),
+            )
+            .build()
+    }
+
+    fn make_message_with_receipt_request(from: &str, id: &str) -> Element {
+        Element::builder("message", "jabber:client")
+            .attr("from", from)
+            .attr("to", "me@server.example")
+            .attr("id", id)
+            .append(Element::builder("body", "jabber:client").append("Hello").build())
+            .append(Element::builder("request", custom_ns::RECEIPTS).build())
+            .build()
+    }
+
+    #[tokio::test]
+    async fn test_handle_receipt_updates_pending() {
+        let pending = Arc::new(TokioMutex::new(HashMap::new()));
+        let (msg_tx, mut msg_rx) = tokio::sync::mpsc::channel(10);
+
+        // Insert a pending receipt
+        {
+            let mut p = pending.lock().await;
+            p.insert("msg-42".to_string(), PendingMessage {
+                id: "msg-42".to_string(),
+                to: "alice@example.com".to_string(),
+                content: "Hello".to_string(),
+                timestamp: 1700000000,
+                status: DeliveryStatus::Sending,
+            });
+        }
+
+        let stanza = make_receipt_stanza("alice@example.com/phone", "msg-42");
+        let result = handle_receipt(&stanza, &pending, &msg_tx).await;
+        assert!(result.is_ok());
+
+        // Give the spawned task time to process
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        // The pending receipt should be removed
+        let p = pending.lock().await;
+        assert!(!p.contains_key("msg-42"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_receipt_no_id_is_noop() {
+        let pending = Arc::new(TokioMutex::new(HashMap::new()));
+        let (msg_tx, _msg_rx) = tokio::sync::mpsc::channel(10);
+
+        // Receipt with no id attribute
+        let stanza = Element::builder("message", "jabber:client")
+            .attr("from", "alice@example.com")
+            .append(Element::builder("received", custom_ns::RECEIPTS).build())
+            .build();
+
+        let result = handle_receipt(&stanza, &pending, &msg_tx).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_non_receipt_stanza_is_noop() {
+        let pending = Arc::new(TokioMutex::new(HashMap::new()));
+        let (msg_tx, _msg_rx) = tokio::sync::mpsc::channel(10);
+
+        let stanza = Element::builder("message", "jabber:client")
+            .attr("from", "bob@example.com")
+            .append(Element::builder("body", "jabber:client").append("hi").build())
+            .build();
+
+        let result = handle_receipt(&stanza, &pending, &msg_tx).await;
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_receipt_request_element_present() {
+        let stanza = make_message_with_receipt_request("alice@example.com", "msg-99");
+        assert!(stanza.get_child("request", custom_ns::RECEIPTS).is_some());
+        assert_eq!(stanza.attr("id").unwrap(), "msg-99");
+    }
+}

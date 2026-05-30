@@ -26,8 +26,12 @@ pub use pubsub::{
     publish_bundle_alternative_format,
     publish_pubsub_item_device_list,
     request_pubsub_items,
-    store_pubsub_response,
-    get_pubsub_response,
+    publish_pubsub_item_with_client,
+    publish_bundle_alternative_format_with_client,
+    publish_pubsub_item_device_list_with_client,
+    request_pubsub_items_with_client,
+    store_pubsub_response_to,
+    get_pubsub_response_from,
     element_to_xml_string,
 };
 pub use message::{
@@ -43,72 +47,45 @@ pub use message::{
     process_incoming_omemo_message,
 };
 
-// Global client reference for publishing operations
-lazy_static::lazy_static! {
-    pub(super) static ref CURRENT_CLIENT: std::sync::RwLock<Option<Arc<TokioMutex<XMPPAsyncClient>>>> = std::sync::RwLock::new(None);
-    
-    // Global map for storing pubsub responses by request ID
-    pub(super) static ref PUBSUB_RESPONSES: TokioMutex<std::collections::HashMap<String, String>> = TokioMutex::new(std::collections::HashMap::new());
-}
+/// Shared map for storing pubsub responses by IQ request ID.
+/// The event loop writes into this; the bridge polls from it.
+pub type PubSubResponses = Arc<TokioMutex<std::collections::HashMap<String, String>>>;
 
-/// Set the current client for publishing operations
-pub fn set_current_client(client: XMPPAsyncClient) {
-    if let Ok(mut current_client) = CURRENT_CLIENT.write() {
-        *current_client = Some(Arc::new(TokioMutex::new(client)));
-    } else {
-        error!("Failed to acquire write lock for current client");
-    }
-}
-
-/// Set the current client for publishing operations using an Arc<TokioMutex<XMPPAsyncClient>>
-pub fn set_current_client_arc(client: Arc<TokioMutex<XMPPAsyncClient>>) {
-    if let Ok(mut current_client) = CURRENT_CLIENT.write() {
-        *current_client = Some(client);
-    } else {
-        error!("Failed to acquire write lock for current client");
-    }
-}
-
-/// Get the current client for publishing operations
-pub fn get_current_client() -> Option<Arc<TokioMutex<XMPPAsyncClient>>> {
-    if let Ok(current_client) = CURRENT_CLIENT.read() {
-        current_client.clone()
-    } else {
-        error!("Failed to acquire read lock for current client");
-        None
-    }
+/// Create a new empty PubSubResponses map.
+pub fn new_pubsub_responses() -> PubSubResponses {
+    Arc::new(TokioMutex::new(std::collections::HashMap::new()))
 }
 
 /// Implementation of OmemoPubSub that delegates to the XMPP connection.
-/// Holds an Arc to the raw XMPP client — no globals needed from the OMEMO side.
+/// Holds an Arc to the raw XMPP client and the shared pubsub response map.
 #[derive(Clone)]
 pub struct XmppPubSubBridge {
-    // Held for future use when free functions are migrated to use the injected client
-    _client: Arc<TokioMutex<XMPPAsyncClient>>,
+    pub(super) client: Arc<TokioMutex<XMPPAsyncClient>>,
+    pub(super) responses: PubSubResponses,
 }
 
 impl XmppPubSubBridge {
-    pub fn new(client: Arc<TokioMutex<XMPPAsyncClient>>) -> Self {
-        Self { _client: client }
+    pub fn new(client: Arc<TokioMutex<XMPPAsyncClient>>, responses: PubSubResponses) -> Self {
+        Self { client, responses }
     }
 }
 
 #[async_trait]
 impl OmemoPubSub for XmppPubSubBridge {
     async fn request_items(&self, from: &str, node: &str) -> Result<String> {
-        request_pubsub_items(from, node).await
+        request_pubsub_items_with_client(&self.client, &self.responses, from, node).await
     }
 
     async fn publish_item(&self, to: Option<&str>, node: &str, id: &str, payload: &str) -> Result<()> {
-        publish_pubsub_item(to, node, id, payload).await
+        publish_pubsub_item_with_client(&self.client, to, node, id, payload).await
     }
 
     async fn publish_item_alternative(&self, to: Option<&str>, node: &str, id: &str, payload: &str) -> Result<()> {
-        publish_bundle_alternative_format(to, node, id, payload).await
+        publish_bundle_alternative_format_with_client(&self.client, to, node, id, payload).await
     }
 
     async fn publish_device_list(&self, device_ids: &[DeviceId]) -> Result<()> {
-        publish_pubsub_item_device_list(device_ids).await
+        publish_pubsub_item_device_list_with_client(&self.client, device_ids).await
     }
 }
 

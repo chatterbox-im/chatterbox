@@ -29,6 +29,8 @@ pub mod wire;
 mod encrypt;
 mod decrypt;
 mod lifecycle;
+#[cfg(test)]
+mod encrypt_decrypt_test;
 
 /// The OMEMO namespace used in XMPP stanzas
 pub const OMEMO_NAMESPACE: &str = "eu.siacs.conversations.axolotl";

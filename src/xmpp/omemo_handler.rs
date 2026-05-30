@@ -16,14 +16,17 @@ use super::{XMPPClient, custom_ns, NS_JABBER_CLIENT};
 impl XMPPClient {
     /// Initialize the client
     pub async fn initialize_client(&mut self) -> Result<()> {
-        // Set the current client for OMEMO operations (still needed for pubsub internals)
         let client_ref = self.client.as_ref().ok_or_else(|| anyhow!("Client not initialized"))?;
-        crate::xmpp::omemo_integration::set_current_client_arc(client_ref.clone());
         
-        // Create the PubSub bridge with the XMPP client
+        // Create the PubSub bridge with the XMPP client and shared response map.
+        // The event loop writes responses into self.pubsub_responses via shared_client,
+        // so the bridge and event loop share the same Arc map.
+        let responses = crate::xmpp::omemo_integration::new_pubsub_responses();
+        self.pubsub_responses = Some(responses.clone());
         let pubsub_bridge: Arc<dyn crate::omemo::OmemoPubSub> = Arc::new(
             crate::xmpp::omemo_integration::XmppPubSubBridge::new(
-                self.client.as_ref().unwrap().clone()
+                client_ref.clone(),
+                responses,
             )
         );
         
@@ -331,223 +334,6 @@ impl XMPPClient {
         
         error!("Could not find required OMEMO elements in encrypted message");
         Err(anyhow!("Could not find required OMEMO elements in encrypted message"))
-    }
-
-    /// Process an OMEMO encrypted message and attempt to decrypt it
-    pub async fn process_encrypted_message(stanza: &xmpp_parsers::Element) -> Result<Option<(String, String)>> {
-        // First check if this is an OMEMO encrypted message
-        if !stanza.name().eq("message") {
-            return Ok(None);
-        }
-
-        let encrypted = match stanza.get_child("encrypted", custom_ns::OMEMO)
-            .or_else(|| stanza.get_child("encrypted", custom_ns::OMEMO_V1))
-            .or_else(|| stanza.get_child("encrypted", "")) {
-            Some(elem) => elem,
-            None => return Ok(None),
-        };
-
-        // Extract sender JID
-        let from = match stanza.attr("from") {
-            Some(from_str) => from_str.to_string(),
-            None => return Err(anyhow!("No sender JID in encrypted message")),
-        };
-
-        info!("Processing OMEMO encrypted message from {}", from);
-
-        // Extract the header and encrypted data
-        let header = match encrypted.get_child("header", "") {
-            Some(h) => h,
-            None => return Err(anyhow!("Missing header in OMEMO message")),
-        };
-
-        // Get the sender device ID
-        let sid = match header.attr("sid") {
-            Some(sid_str) => match sid_str.parse::<u32>() {
-                Ok(sid) => sid,
-                Err(_) => return Err(anyhow!("Invalid device ID in OMEMO message")),
-            },
-            None => return Err(anyhow!("Missing device ID in OMEMO message")),
-        };
-
-        // Extract the key information
-        let key_element = match header.get_child("key", "") {
-            Some(k) => k,
-            None => return Err(anyhow!("Missing key element in OMEMO message")),
-        };
-
-        // Check if this key is intended for us by checking the "rid" attribute
-        let _recipient_device_id = match key_element.attr("rid") {
-            Some(rid_str) => match rid_str.parse::<u32>() {
-                Ok(rid) => rid,
-                Err(_) => {
-                    warn!("Invalid recipient device ID '{}' in key element", rid_str);
-                    return Err(anyhow!("Invalid recipient device ID in OMEMO message"));
-                }
-            },
-            None => 0
-        };
-
-        // Get the encrypted key data
-        let key_text = key_element.text();
-        if key_text.is_empty() {
-            return Err(anyhow!("Empty key data in OMEMO message"));
-        }
-        
-        let encrypted_key = match base64::engine::general_purpose::STANDARD.decode(key_text.trim()) {
-            Ok(decoded) => decoded,
-            Err(e) => {
-                error!("Failed to decode key data: {}", e);
-                return Err(anyhow!("Failed to decode key data: {}", e));
-            }
-        };
-
-        // Get the IV (initialization vector)
-        let iv_data = match header.get_child("iv", "") {
-            Some(iv_elem) => {
-                let iv_text = iv_elem.text();
-                if iv_text.is_empty() {
-                    return Err(anyhow!("Empty IV in OMEMO message"));
-                }
-                
-                match base64::engine::general_purpose::STANDARD.decode(iv_text.trim()) {
-                    Ok(decoded) => decoded,
-                    Err(e) => {
-                        error!("Failed to decode IV: {}", e);
-                        return Err(anyhow!("Failed to decode IV: {}", e));
-                    }
-                }
-            },
-            None => return Err(anyhow!("Missing IV in OMEMO message")),
-        };
-
-        // Extract the payload (actual encrypted content)
-        let payload_data = match encrypted.get_child("payload", "") {
-            Some(p) => {
-                let payload_text = p.text();
-                if payload_text.is_empty() {
-                    return Err(anyhow!("Empty payload in OMEMO message"));
-                }
-                
-                match base64::engine::general_purpose::STANDARD.decode(payload_text.trim()) {
-                    Ok(decoded) => decoded,
-                    Err(e) => {
-                        error!("Failed to decode payload: {}", e);
-                        return Err(anyhow!("Failed to decode payload: {}", e));
-                    }
-                }
-            },
-            None => return Err(anyhow!("Missing payload in OMEMO message")),
-        };
-
-        // Get the associated data for authenticated encryption
-        let auth_data = match encrypted.get_child("auth", "") {
-            Some(a) => {
-                let auth_text = a.text();
-                if !auth_text.is_empty() {
-                    match base64::engine::general_purpose::STANDARD.decode(auth_text.trim()) {
-                        Ok(decoded) => decoded,
-                        Err(e) => {
-                            warn!("Failed to decode auth tag, proceeding without it: {}", e);
-                            vec![]
-                        }
-                    }
-                } else {
-                    vec![]
-                }
-            },
-            None => vec![],
-        };
-
-        // Retrieve session and decrypt
-        let sender_bare_jid = from.split('/').next().unwrap_or(&from).to_string();
-        
-        let device_id = 1;
-        
-        let storage = match crate::omemo::storage::OmemoStorage::new_default() {
-            Ok(storage) => storage,
-            Err(e) => return Err(anyhow!("Failed to create OMEMO storage: {}", e)),
-        };
-        
-        // Create a PubSub bridge for this temporary manager
-        let pubsub_bridge: Arc<dyn crate::omemo::OmemoPubSub> = match crate::xmpp::omemo_integration::get_current_client() {
-            Some(client_arc) => Arc::new(crate::xmpp::omemo_integration::XmppPubSubBridge::new(client_arc)),
-            None => return Err(anyhow!("No XMPP client available for OMEMO decryption")),
-        };
-        
-        let _omemo_manager = match crate::omemo::OmemoManager::new(
-            storage,
-            "me".to_string(),
-            Some(device_id),
-            pubsub_bridge,
-        ).await {
-            Ok(manager) => manager,
-            Err(e) => return Err(anyhow!("Failed to create OMEMO manager: {}", e)),
-        };
-
-        info!("Retrieving session state for {}, device {}", sender_bare_jid, sid);
-        
-        // Get the session key from storage
-        let session_key = match Self::get_session_key(&sender_bare_jid, sid) {
-            Ok(key) => key,
-            Err(e) => {
-                error!("Failed to retrieve session key: {}", e);
-                return Err(anyhow!("Failed to retrieve session key: {}", e));
-            }
-        };
-
-        // Decrypt the message key
-        info!("Decrypting message key");
-        let message_key = match crate::omemo::crypto::decrypt(&encrypted_key, &session_key, &iv_data, &auth_data) {
-            Ok(key) => key,
-            Err(e) => {
-                error!("Failed to decrypt message key: {}", e);
-                return Err(anyhow!("Failed to decrypt message key: {}. Please make sure you have exchanged OMEMO keys with this contact.", e));
-            }
-        };
-
-        // Now decrypt the actual message payload with the message key
-        info!("Decrypting message payload");
-        let decrypted_payload = match crate::omemo::crypto::decrypt(&payload_data, &message_key, &iv_data, &auth_data) {
-            Ok(plaintext) => plaintext,
-            Err(e) => {
-                error!("Failed to decrypt message payload: {}", e);
-                return Err(anyhow!("Failed to decrypt message payload: {}", e));
-            }
-        };
-
-        // Convert the decrypted bytes to a UTF-8 string
-        let decrypted_message = match String::from_utf8(decrypted_payload) {
-            Ok(text) => text,
-            Err(e) => {
-                error!("Decrypted data is not valid UTF-8: {}", e);
-                return Err(anyhow!("Decrypted data is not valid UTF-8: {}", e));
-            }
-        };
-
-        info!("Successfully decrypted OMEMO message from {}", from);
-        Ok(Some((from, decrypted_message)))
-    }
-
-    // Helper function to get a session key for a sender
-    fn get_session_key(sender_jid: &str, device_id: u32) -> Result<Vec<u8>> {
-        match crate::omemo::storage::OmemoStorage::new_default() {
-            Ok(storage) => {
-                match storage.get_session_ratchet_state(sender_jid, device_id) {
-                    Ok(state) => {
-                        Ok(state.unwrap().root_key.clone())
-                    },
-                    Err(e) => {
-                        error!("No valid session found for {} (device {}): {}", sender_jid, device_id, e);
-                        Err(anyhow!("No valid session found: {}. You may need to refresh your OMEMO keys.", e))
-                    }
-                }
-            },
-            Err(e) => {
-                error!("Failed to create OMEMO storage: {}", e);
-                Err(anyhow!("Failed to create OMEMO storage: {}", e))
-            }
-        }
     }
 
     /// Process a key verification response from the user

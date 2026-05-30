@@ -2,8 +2,8 @@
 // This module handles presence stanzas, presence subscriptions, and broadcasting status updates
 
 use anyhow::{anyhow, Result};
-use log::{debug, error, info, warn};
-use tokio::sync::{broadcast, mpsc};
+use log::{error, info, warn};
+use tokio::sync::broadcast;
 use tokio_xmpp::AsyncClient as XMPPAsyncClient;
 use xmpp_parsers::Element;
 use std::collections::HashSet;
@@ -16,8 +16,10 @@ lazy_static::lazy_static! {
         let (tx, _) = broadcast::channel(256);
         tx
     };
-    static ref FRIEND_REQUEST_TX: std::sync::RwLock<Option<mpsc::Sender<String>>> = 
-        std::sync::RwLock::new(None);
+    pub static ref FRIEND_REQUEST_BUS: broadcast::Sender<String> = {
+        let (tx, _) = broadcast::channel(64);
+        tx
+    };
     static ref AUTO_ACCEPTED_REQUESTS: std::sync::RwLock<HashSet<String>> = 
         std::sync::RwLock::new(HashSet::new());
 }
@@ -331,28 +333,9 @@ pub async fn process_subscription(client: &mut XMPPAsyncClient, stanza: &Element
                         // Add to tracking set
                         auto_accepted.insert(bare_jid_str.clone());
                         
-                        // Send notification through channel
-                        if let Some(tx) = FRIEND_REQUEST_TX.read().unwrap_or_else(|e| e.into_inner()).as_ref() {
-                            match tx.try_send(bare_jid_str.clone()) {
-                                Ok(_) => {
-                                    info!("Sent UI notification for auto-accepted friend request from {}", bare_jid);
-                                },
-                                Err(e) => {
-                                    // Only log if it's not a disconnected channel error
-                                    match e {
-                                        tokio::sync::mpsc::error::TrySendError::Full(_) => {
-                                            warn!("Failed to send friend request notification: channel full");
-                                        }
-                                        tokio::sync::mpsc::error::TrySendError::Closed(_) => {
-                                            // Channel closed - this is expected when app is shutting down
-                                            debug!("Friend request notification channel closed");
-                                        }
-                                    }
-                                }
-                            }
-                        } else {
-                            warn!("FRIEND_REQUEST_TX not initialized - cannot send friend request notification");
-                        }
+                        // Broadcast notification (no receivers = silently dropped, which is fine)
+                        let _ = FRIEND_REQUEST_BUS.send(bare_jid_str.clone());
+                        info!("Broadcast friend request notification from {}", bare_jid);
                     }
                 },
                 Err(e) => {
@@ -393,11 +376,10 @@ pub async fn process_subscription(client: &mut XMPPAsyncClient, stanza: &Element
 
 /// Subscribe to receive friend request notifications
 ///
-/// Returns a channel to receive friend request notifications
-pub fn subscribe_to_friend_requests() -> mpsc::Receiver<String> {
-    let (friend_req_tx, friend_req_rx) = mpsc::channel(100);
-    FRIEND_REQUEST_TX.write().unwrap_or_else(|e| e.into_inner()).replace(friend_req_tx);
-    friend_req_rx
+/// Returns a broadcast receiver for friend request notifications.
+/// Multiple subscribers are supported; re-subscribing does not orphan previous receivers.
+pub fn subscribe_to_friend_requests() -> broadcast::Receiver<String> {
+    FRIEND_REQUEST_BUS.subscribe()
 }
 
 // Data structure to hold pending capability discoveries
@@ -424,5 +406,128 @@ pub fn schedule_caps_discovery(jid: &str, node: &str, ver: &str) {
         });
     } else {
         error!("Failed to acquire lock for pending capability discoveries");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{PresenceEvent, ShowStatus, SubscriptionKind};
+
+    fn make_presence(from: &str, type_attr: Option<&str>) -> Element {
+        let mut builder = Element::builder("presence", "jabber:client")
+            .attr("from", from);
+        if let Some(t) = type_attr {
+            builder = builder.attr("type", t);
+        }
+        builder.build()
+    }
+
+    #[test]
+    fn test_handle_available_presence() {
+        let stanza = make_presence("alice@example.com/phone", None);
+        let mut rx = subscribe_to_presence();
+        handle_presence_stanza(&stanza).unwrap();
+        let event = rx.try_recv().unwrap();
+        match event {
+            PresenceEvent::Available { jid, show, idle_since } => {
+                assert_eq!(jid, "alice@example.com");
+                assert!(show.is_none());
+                assert!(idle_since.is_none());
+            }
+            _ => panic!("Expected Available event"),
+        }
+    }
+
+    #[test]
+    fn test_handle_unavailable_presence() {
+        let stanza = make_presence("bob@example.com/laptop", Some("unavailable"));
+        let mut rx = subscribe_to_presence();
+        handle_presence_stanza(&stanza).unwrap();
+        let event = rx.try_recv().unwrap();
+        match event {
+            PresenceEvent::Unavailable { jid } => {
+                assert_eq!(jid, "bob@example.com");
+            }
+            _ => panic!("Expected Unavailable event"),
+        }
+    }
+
+    #[test]
+    fn test_handle_subscribe_presence() {
+        let stanza = make_presence("carol@example.com", Some("subscribe"));
+        let mut rx = subscribe_to_presence();
+        handle_presence_stanza(&stanza).unwrap();
+        let event = rx.try_recv().unwrap();
+        match event {
+            PresenceEvent::Subscription { jid, kind } => {
+                assert_eq!(jid, "carol@example.com");
+                assert_eq!(kind, SubscriptionKind::Subscribe);
+            }
+            _ => panic!("Expected Subscription event"),
+        }
+    }
+
+    #[test]
+    fn test_parse_show_dnd() {
+        let stanza = Element::builder("presence", "jabber:client")
+            .attr("from", "dave@example.com/work")
+            .append(Element::builder("show", "").append("dnd").build())
+            .build();
+        let mut rx = subscribe_to_presence();
+        handle_presence_stanza(&stanza).unwrap();
+        let event = rx.try_recv().unwrap();
+        match event {
+            PresenceEvent::Available { show, .. } => {
+                assert_eq!(show, Some(ShowStatus::Dnd));
+            }
+            _ => panic!("Expected Available event"),
+        }
+    }
+
+    #[test]
+    fn test_parse_show_away() {
+        let stanza = Element::builder("presence", "jabber:client")
+            .attr("from", "eve@example.com/mobile")
+            .append(Element::builder("show", "").append("away").build())
+            .build();
+        let show = parse_show(&stanza);
+        assert_eq!(show, Some(ShowStatus::Away));
+    }
+
+    #[test]
+    fn test_idle_since_parsing() {
+        let stanza = Element::builder("presence", "jabber:client")
+            .attr("from", "frank@example.com")
+            .append(
+                Element::builder("idle", NS_IDLE)
+                    .attr("since", "2026-01-15T10:30:00Z")
+                    .build()
+            )
+            .build();
+        let since = idle_since(&stanza);
+        assert!(since.is_some());
+        assert_eq!(since.unwrap().timestamp(), 1768473000);
+    }
+
+    #[test]
+    fn test_no_from_attribute_is_ok() {
+        let stanza = Element::builder("presence", "jabber:client").build();
+        // Should not error, just return Ok
+        assert!(handle_presence_stanza(&stanza).is_ok());
+    }
+
+    #[test]
+    fn test_error_presence() {
+        let stanza = make_presence("bad@example.com", Some("error"));
+        let mut rx = subscribe_to_presence();
+        handle_presence_stanza(&stanza).unwrap();
+        let event = rx.try_recv().unwrap();
+        match event {
+            PresenceEvent::Error { jid, .. } => {
+                assert_eq!(jid, "bad@example.com");
+            }
+            _ => panic!("Expected Error event"),
+        }
     }
 }

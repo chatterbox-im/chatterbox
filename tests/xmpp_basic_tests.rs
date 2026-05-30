@@ -383,6 +383,7 @@ fn test_message_delivery_receipt() {
 /// 7. Disconnect
 /// 8. Reconnect and check message history
 #[tokio::test]
+#[ignore = "requires live XMPP server"]
 async fn test_full_xmpp_workflow() -> Result<()> {
     // Setup logging for the test
     setup_logging();
@@ -585,6 +586,7 @@ async fn test_full_xmpp_workflow() -> Result<()> {
 
 /// Test that messages sent by ca are received by cb
 #[tokio::test]
+#[ignore = "requires live XMPP server"]
 async fn test_cross_account_message_delivery() -> Result<()> {
     // Setup logging for the test
     setup_logging();

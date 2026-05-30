@@ -185,17 +185,6 @@ impl ChatUI {
             .unwrap_or_default()
     }
 
-    // Public method to get the full JID (with resource) if available
-    pub fn get_full_jid(&self, base_jid: &str) -> String {
-        // If resources are available, use the first one (most recently active)
-        if let Some(resources) = self.resources.get(base_jid) {
-            if !resources.is_empty() {
-                return format!("{}/{}", base_jid, resources[0]);
-            }
-        }
-        base_jid.to_string()
-    }
-
     pub fn set_active_contact(&mut self, contact: &str) {
         // Always store the base JID as the active contact
         self.contact = Self::get_base_jid(contact);
@@ -801,12 +790,6 @@ impl ChatUI {
             base_jid, 
             (status, chrono::Utc::now())
         );
-    }
-    
-    pub fn get_typing_status(&self, contact_id: &str) -> Option<TypingStatus> {
-        // Get typing status using the base JID
-        let base_jid = Self::get_base_jid(contact_id);
-        self.typing_states.get(&base_jid).map(|(status, _)| status.clone())
     }
     
     // Check and clear typing states older than the timeout duration

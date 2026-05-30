@@ -85,7 +85,7 @@ impl super::XMPPClient {
         info!("Fetching message history with options: {:?}", options);
         
         // Check OMEMO initialization state before proceeding
-        let omemo_initialized = Self::is_omemo_fully_initialized().await;
+        let omemo_initialized = Self::is_omemo_fully_initialized(&self.shared_self).await;
         if !omemo_initialized {
             info!("OMEMO not fully initialized yet when fetching message history - encrypted messages may not be decrypted");
         }
@@ -337,7 +337,7 @@ impl super::XMPPClient {
                                 info!("Found OMEMO encrypted message in archive from {}", sender_id);
                                 
                                 if self.omemo_manager.is_some() {
-                                    match Self::decrypt_archived_omemo_message(&message_stanza, &from).await {
+                                    match Self::decrypt_archived_omemo_message(&message_stanza, &from, &self.shared_self).await {
                                         Ok(Some(decrypted_content)) => {
                                             archived_messages.push(Message {
                                                 id: message_id,
@@ -516,6 +516,7 @@ impl super::XMPPClient {
     async fn decrypt_archived_omemo_message(
         message_stanza: &xmpp_parsers::Element,
         sender_jid: &str,
+        shared_client: &crate::xmpp::SharedClientRef,
     ) -> Result<Option<String>> {
         //debug!("Attempting to decrypt archived OMEMO message from {}", sender_jid);
         
@@ -552,7 +553,7 @@ impl super::XMPPClient {
         };
         
         // Retrieve our OMEMO manager instance
-        let omemo_manager = match crate::xmpp::get_global_xmpp_client().await {
+        let omemo_manager = match shared_client.lock().await.as_ref() {
             Some(client) => {
                 let client_guard = client.lock().await;
                 client_guard.get_omemo_manager().map(|arc| arc.clone())
@@ -717,8 +718,8 @@ impl super::XMPPClient {
     // Use the implementation from mod.rs instead of duplicating it here
 
     // Helper method to check if OMEMO is fully initialized
-    pub async fn is_omemo_fully_initialized() -> bool {
-        let omemo_manager = match crate::xmpp::get_global_xmpp_client().await {
+    pub async fn is_omemo_fully_initialized(shared_client: &crate::xmpp::SharedClientRef) -> bool {
+        let omemo_manager = match shared_client.lock().await.as_ref() {
             Some(client) => {
                 let client_guard = client.lock().await;
                 client_guard.get_omemo_manager().map(|arc| arc.clone())
@@ -892,5 +893,56 @@ impl super::XMPPClient {
         
         info!("Completed background history load for {} ({} pages retrieved)", jid, page_count);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mam_query_options_defaults() {
+        let opts = MAMQueryOptions::new();
+        assert_eq!(opts.limit, Some(50));
+        assert!(opts.with.is_none());
+        assert!(opts.start.is_none());
+        assert!(opts.end.is_none());
+        assert!(opts.after.is_none());
+    }
+
+    #[test]
+    fn test_mam_query_options_builder() {
+        let start = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let end = chrono::DateTime::parse_from_rfc3339("2026-06-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        let opts = MAMQueryOptions::new()
+            .with_jid("alice@example.com")
+            .with_start(start)
+            .with_end(end)
+            .with_limit(25)
+            .with_after("page-token-123");
+
+        assert_eq!(opts.with.as_deref(), Some("alice@example.com"));
+        assert_eq!(opts.start, Some(start));
+        assert_eq!(opts.end, Some(end));
+        assert_eq!(opts.limit, Some(25));
+        assert_eq!(opts.after.as_deref(), Some("page-token-123"));
+    }
+
+    #[test]
+    fn test_mam_query_result_empty() {
+        let result = MAMQueryResult {
+            messages: vec![],
+            complete: true,
+            rsm_first: None,
+            rsm_last: None,
+            rsm_count: Some(0),
+        };
+        assert!(result.messages.is_empty());
+        assert!(result.complete);
     }
 }

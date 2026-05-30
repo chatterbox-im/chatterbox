@@ -21,8 +21,9 @@ pub enum TypingStatus {
     Gone       // User has effectively ended their participation
 }
 
-/// Handle chat state notifications in incoming messages
-pub fn handle_chat_state(stanza: &Element) -> Result<()> {
+/// Handle chat state notifications in incoming messages.
+/// `typing_tx` is the channel sender for forwarding typing status to the UI.
+pub fn handle_chat_state(stanza: &Element, typing_tx: Option<&tokio::sync::mpsc::Sender<(String, TypingStatus)>>) -> Result<()> {
     // Check the stanza for chat state elements
     let chat_states = ["active", "composing", "paused", "inactive", "gone"];
     
@@ -47,13 +48,10 @@ pub fn handle_chat_state(stanza: &Element) -> Result<()> {
             
             if let (Some(jid), Some(status)) = (from.clone(), typing_status) {
                 // Try to send the typing notification to the UI
-                if let Ok(typing_tx_guard) = super::TYPING_TX.lock() {
-                    if let Some(typing_tx) = typing_tx_guard.as_ref() {
-                        // Don't block on sending - use try_send to avoid deadlocks
-                        match typing_tx.try_send((jid, status)) {
-                            Ok(_) => debug!("Sent typing status to UI"),
-                            Err(e) => debug!("Failed to send typing status to UI: {}", e),
-                        }
+                if let Some(tx) = typing_tx {
+                    match tx.try_send((jid, status)) {
+                        Ok(_) => debug!("Sent typing status to UI"),
+                        Err(e) => debug!("Failed to send typing status to UI: {}", e),
                     }
                 }
             }
@@ -162,5 +160,78 @@ impl super::XMPPClient {
         };
 
         Some((bare_jid, typing_status))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xmpp_parsers::Element;
+
+    fn make_message_with_state(from: &str, state: &str) -> Element {
+        Element::builder("message", "jabber:client")
+            .attr("from", from)
+            .attr("to", "me@server.example")
+            .attr("type", "chat")
+            .append(Element::builder(state, super::custom_ns::CHATSTATES).build())
+            .build()
+    }
+
+    #[test]
+    fn test_handle_composing_state() {
+        let stanza = make_message_with_state("alice@example.com/phone", "composing");
+        let (tx, mut rx) = tokio::sync::mpsc::channel(10);
+        let result = handle_chat_state(&stanza, Some(&tx));
+        assert!(result.is_ok());
+        let (jid, status) = rx.try_recv().unwrap();
+        assert_eq!(jid, "alice@example.com/phone");
+        assert_eq!(status, TypingStatus::Composing);
+    }
+
+    #[test]
+    fn test_handle_active_state() {
+        let stanza = make_message_with_state("bob@example.com/laptop", "active");
+        let (tx, mut rx) = tokio::sync::mpsc::channel(10);
+        let result = handle_chat_state(&stanza, Some(&tx));
+        assert!(result.is_ok());
+        let (_, status) = rx.try_recv().unwrap();
+        assert_eq!(status, TypingStatus::Active);
+    }
+
+    #[test]
+    fn test_handle_paused_state() {
+        let stanza = make_message_with_state("bob@example.com", "paused");
+        let (tx, mut rx) = tokio::sync::mpsc::channel(10);
+        handle_chat_state(&stanza, Some(&tx)).unwrap();
+        let (_, status) = rx.try_recv().unwrap();
+        assert_eq!(status, TypingStatus::Paused);
+    }
+
+    #[test]
+    fn test_handle_gone_state() {
+        let stanza = make_message_with_state("bob@example.com", "gone");
+        let (tx, mut rx) = tokio::sync::mpsc::channel(10);
+        handle_chat_state(&stanza, Some(&tx)).unwrap();
+        let (_, status) = rx.try_recv().unwrap();
+        assert_eq!(status, TypingStatus::Gone);
+    }
+
+    #[test]
+    fn test_no_chat_state_in_message() {
+        let stanza = Element::builder("message", "jabber:client")
+            .attr("from", "alice@example.com")
+            .append(Element::builder("body", "jabber:client").append("hello").build())
+            .build();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(10);
+        handle_chat_state(&stanza, Some(&tx)).unwrap();
+        assert!(rx.try_recv().is_err()); // nothing sent
+    }
+
+    #[test]
+    fn test_handle_chat_state_without_sender() {
+        // No typing_tx provided — should not panic
+        let stanza = make_message_with_state("alice@example.com", "composing");
+        let result = handle_chat_state(&stanza, None);
+        assert!(result.is_ok());
     }
 }

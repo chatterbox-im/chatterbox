@@ -17,6 +17,7 @@ use chatterbox::xmpp::XMPPClient;
 use common::credentials::Credentials;
 
 #[tokio::test]
+#[ignore = "requires live XMPP server"]
 async fn test_omemo_simple() -> Result<()> {
     // Setup logging
     setup_logging();

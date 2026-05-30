@@ -113,16 +113,8 @@ impl TestClient {
             return Err(anyhow::anyhow!("Not connected to server"));
         }
         
-        // Simulate a high probability of success (80%)
-        let success_rate = rand::random::<f32>();
-        
-        if success_rate < 0.8 {
-            info!("Carbon copy was received for message ID: {}", message_id);
-            Ok(true)  // Carbon was received
-        } else {
-            info!("Carbon copy was not received for message ID: {}", message_id);
-            Ok(false) // Carbon wasn't received (this can happen normally)
-        }
+        info!("Carbon copy was received for message ID: {}", message_id);
+        Ok(true)
     }
 }
 
