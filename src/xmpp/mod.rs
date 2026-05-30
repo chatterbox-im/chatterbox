@@ -34,7 +34,7 @@ pub use presence::*;
 pub use discovery::ServiceDiscovery;
 
 // Import models
-use crate::models::{ContactStatus, Message, DeliveryStatus, PendingMessage};
+use crate::models::{Message, DeliveryStatus, PendingMessage, PresenceEvent};
 
 // Custom namespaces
 pub mod custom_ns {
@@ -167,17 +167,14 @@ impl XMPPClient {
         }
     }
 
-    /// Subscribe to presence notifications for contacts
-    pub fn subscribe_to_presence(&self) -> mpsc::Receiver<(String, ContactStatus)> {
-        let (presence_tx, presence_rx) = mpsc::channel(100);
-        
-        presence::PRESENCE_SUBSCRIBERS.lock().unwrap().push(presence_tx);
-        
-        presence_rx
+    /// Subscribe to presence events via broadcast channel.
+    /// Can be called at any time — the broadcast channel ensures no race conditions.
+    pub fn subscribe_to_presence(&self) -> tokio::sync::broadcast::Receiver<PresenceEvent> {
+        presence::subscribe_to_presence()
     }
 
     /// Re-send our presence to trigger the server to re-broadcast roster presences.
-    /// Call this after subscribing to presence updates to avoid missing initial presences.
+    /// Useful after subscribing if the broadcast buffer has already wrapped (Lagged).
     pub async fn resend_presence(&self) {
         if let Some(client_ref) = &self.client {
             let mut client_guard = client_ref.lock().await;

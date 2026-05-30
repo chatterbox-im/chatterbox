@@ -644,15 +644,14 @@ async fn run_main_loop(
     msg_rx: &mut tokio::sync::mpsc::Receiver<Message>,
     disable_mam: bool
 ) -> Result<()> {
-    // Subscribe to presence notifications
+    // Subscribe to presence events via broadcast channel.
+    // Broadcast ensures no race condition — events before subscribe are buffered (up to 256).
     let mut presence_rx = xmpp_client.subscribe_to_presence();
     
     // Subscribe to friend request notifications
     let mut friend_req_rx = xmpp_client.subscribe_to_friend_requests();
     
-    // Re-send presence now that we're subscribed to updates.
-    // Initial presences arrive before subscribe_to_presence() is called, so they're lost.
-    // Re-sending triggers the server to echo back all roster contacts' presences.
+    // Re-send presence to populate state in case broadcast buffer wrapped (Lagged).
     xmpp_client.resend_presence().await;
     
     // Create a channel for receiving typing notifications
@@ -751,9 +750,21 @@ async fn run_main_loop(
         }
         
         // Check for presence updates (drain all pending)
-        while let Ok((contact_id, status)) = presence_rx.try_recv() {
-            // Update contact status in the UI
-            chat_ui.update_contact_status(&contact_id, status);
+        loop {
+            match presence_rx.try_recv() {
+                Ok(event) => {
+                    // Only update UI for events that produce a display status
+                    if let Some((contact_id, status)) = event.to_contact_status() {
+                        chat_ui.update_contact_status(&contact_id, status);
+                    }
+                }
+                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => {
+                    // We missed `n` events — request a full refresh
+                    log::warn!("Presence broadcast lagged by {} events, requesting refresh", n);
+                    xmpp_client.resend_presence().await;
+                }
+                Err(_) => break, // Empty or closed
+            }
         }
         
         // Check for friend request notifications

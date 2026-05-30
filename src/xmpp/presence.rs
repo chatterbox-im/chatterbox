@@ -3,20 +3,20 @@
 
 use anyhow::{anyhow, Result};
 use log::{debug, error, info, warn};
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tokio_xmpp::AsyncClient as XMPPAsyncClient;
 use xmpp_parsers::Element;
 use std::collections::HashSet;
 
-use crate::models::ContactStatus;
+use crate::models::{PresenceEvent, ShowStatus, SubscriptionKind};
 
-// Shared state for presence notifications
+// Broadcast channel for presence events — late subscribers get Lagged error (not silent loss)
 lazy_static::lazy_static! {
-    pub static ref PRESENCE_SUBSCRIBERS: std::sync::Mutex<Vec<mpsc::Sender<(String, ContactStatus)>>> = 
-        std::sync::Mutex::new(Vec::new());
+    pub static ref PRESENCE_BUS: broadcast::Sender<PresenceEvent> = {
+        let (tx, _) = broadcast::channel(256);
+        tx
+    };
     static ref FRIEND_REQUEST_TX: std::sync::RwLock<Option<mpsc::Sender<String>>> = 
-        std::sync::RwLock::new(None);
-    static ref PRESENCE_TX: std::sync::RwLock<Option<mpsc::Sender<(String, ContactStatus)>>> = 
         std::sync::RwLock::new(None);
     static ref AUTO_ACCEPTED_REQUESTS: std::sync::RwLock<HashSet<String>> = 
         std::sync::RwLock::new(HashSet::new());
@@ -28,32 +28,31 @@ const NS_JABBER_CLIENT: &str = "jabber:client";
 // XEP-0319 idle namespace
 const NS_IDLE: &str = "urn:xmpp:idle:1";
 
-/// Check if a presence stanza indicates the user is idle (XEP-0319)
-/// Returns true if idle for more than 5 minutes
-fn is_idle(stanza: &Element) -> bool {
-    if let Some(idle) = stanza.get_child("idle", NS_IDLE) {
-        if let Some(since) = idle.attr("since") {
-            if let Ok(since_time) = chrono::DateTime::parse_from_rfc3339(since) {
-                let idle_duration = chrono::Utc::now() - since_time.with_timezone(&chrono::Utc);
-                return idle_duration > chrono::Duration::minutes(5);
-            }
-        }
-    }
-    false
+/// Extract the XEP-0319 idle timestamp from a presence stanza, if present.
+fn idle_since(stanza: &Element) -> Option<chrono::DateTime<chrono::Utc>> {
+    let idle = stanza.get_child("idle", NS_IDLE)?;
+    let since = idle.attr("since")?;
+    chrono::DateTime::parse_from_rfc3339(since)
+        .ok()
+        .map(|dt| dt.with_timezone(&chrono::Utc))
 }
 
-/// Handle a presence stanza received from a contact
-/// 
-/// # Arguments
-/// 
-/// * `stanza` - The presence stanza element
-/// 
-/// # Returns
-/// 
-/// Result indicating success or failure
+/// Parse the <show> element into a typed ShowStatus
+fn parse_show(stanza: &Element) -> Option<ShowStatus> {
+    let show = stanza.get_child("show", "")?;
+    match show.text().as_str() {
+        "chat" => Some(ShowStatus::Chat),
+        "away" => Some(ShowStatus::Away),
+        "xa" => Some(ShowStatus::Xa),
+        "dnd" => Some(ShowStatus::Dnd),
+        _ => None,
+    }
+}
+
+/// Handle a presence stanza received from a contact.
+/// Parses into a typed `PresenceEvent` and broadcasts via the PRESENCE_BUS.
+/// Subscription stanzas produce `PresenceEvent::Subscription` which the UI ignores.
 pub fn handle_presence_stanza(stanza: &Element) -> Result<()> {
-    //debug!("Processing presence stanza: {:?}", stanza);
-    
     // Extract the sender JID
     let from = match stanza.attr("from") {
         Some(jid) => jid,
@@ -64,119 +63,68 @@ pub fn handle_presence_stanza(stanza: &Element) -> Result<()> {
     };
     
     // Normalize JID by removing resource part (after the slash)
-    let bare_jid = from.split('/').next().unwrap_or(from);
-    
-    //debug!("[JID DEBUG] handle_presence_stanza: from='{}', bare_jid='{}'", from, bare_jid);
+    let bare_jid = from.split('/').next().unwrap_or(from).to_string();
     
     // Determine presence type
-    let presence_type = match stanza.attr("type") {
-        Some(typ) => typ,
-        None => "available" // Default type is "available" when not specified
-    };
+    let presence_type = stanza.attr("type").unwrap_or("available");
     
-    // Map presence type to ContactStatus
-    let status = match presence_type {
-        "unavailable" => ContactStatus::Offline,
-        "available" | "" => {
-            // Check for show element to determine more specific status
-            if let Some(show) = stanza.get_child("show", "") {
-                match show.text().as_str() {
-                    "away" | "xa" | "dnd" => ContactStatus::Away,
-                    _ => ContactStatus::Online,
-                }
-            } else if is_idle(stanza) {
-                // XEP-0319: Last User Interaction in Presence
-                // If idle for more than 5 minutes, show as Away
-                ContactStatus::Away
-            } else {
-                ContactStatus::Online
-            }
+    // Build a typed PresenceEvent
+    let event = match presence_type {
+        "unavailable" => PresenceEvent::Unavailable { jid: bare_jid.clone() },
+        "available" | "" => PresenceEvent::Available {
+            jid: bare_jid.clone(),
+            show: parse_show(stanza),
+            idle_since: idle_since(stanza),
         },
-        // Subscription management stanzas should NOT update presence display
         "subscribe" | "subscribed" | "unsubscribe" | "unsubscribed" => {
+            let kind = match presence_type {
+                "subscribe" => SubscriptionKind::Subscribe,
+                "subscribed" => SubscriptionKind::Subscribed,
+                "unsubscribe" => SubscriptionKind::Unsubscribe,
+                _ => SubscriptionKind::Unsubscribed,
+            };
             info!("Received subscription stanza '{}' from {}", presence_type, bare_jid);
-            return Ok(()); // Don't broadcast a presence update for these
+            PresenceEvent::Subscription { jid: bare_jid.clone(), kind }
+        },
+        "error" => {
+            let reason = stanza.get_child("error", "")
+                .map(|e| e.text())
+                .unwrap_or_else(|| "unknown error".to_string());
+            warn!("Presence error from {}: {}", bare_jid, reason);
+            PresenceEvent::Error { jid: bare_jid.clone(), reason }
         },
         _ => {
             warn!("Unknown presence type '{}' from {}", presence_type, bare_jid);
-            ContactStatus::Offline // Using Offline as a default for unknown status
+            PresenceEvent::Error {
+                jid: bare_jid.clone(),
+                reason: format!("unknown type: {}", presence_type),
+            }
         }
     };
     
-    // Process entity capabilities if present
-    if let Some(caps) = stanza.get_child("c", "http://jabber.org/protocol/caps") {
-        // We'll query the entity later when we get their full JID with resource
-        //debug!("Entity {} advertises capabilities via presence", from);
-        
-        // Get capability details for delayed processing
-        let node = caps.attr("node").unwrap_or("");
-        let ver = caps.attr("ver").unwrap_or("");
-        
-        if !ver.is_empty() {
-            // Store this for later capability discovery
-            //debug!("Entity {} capabilities: node={}, ver={}", from, node, ver);
-            
-            // When we get a presence with capabilities, we'll handle this 
-            // in the main client event loop to send a disco#info query
-            schedule_caps_discovery(from, node, ver);
+    // Process entity capabilities if present (only for available presences)
+    if matches!(&event, PresenceEvent::Available { .. }) {
+        if let Some(caps) = stanza.get_child("c", "http://jabber.org/protocol/caps") {
+            let node = caps.attr("node").unwrap_or("");
+            let ver = caps.attr("ver").unwrap_or("");
+            if !ver.is_empty() {
+                schedule_caps_discovery(from, node, ver);
+            }
         }
     }
     
-    // Send presence status to all subscribers
-    send_presence_update(bare_jid.to_string(), status);
+    // Broadcast the typed event — if no subscribers yet, the message is simply dropped
+    // (broadcast channel handles this gracefully, no silent subscriber-list bugs)
+    let _ = PRESENCE_BUS.send(event);
     
     Ok(())
 }
 
-/// Send a presence status update to all subscribers
-/// 
-/// # Arguments
-/// 
-/// * `jid` - The JID of the contact whose status changed
-/// * `status` - The new status of the contact
-pub fn send_presence_update(jid: String, status: ContactStatus) {
-    //debug!("Broadcasting presence update: {} is now {:?}", jid, status);
-    
-    if let Ok(subscribers) = PRESENCE_SUBSCRIBERS.lock() {
-        let mut to_remove = Vec::new();
-        
-        for (i, tx) in subscribers.iter().enumerate() {
-            if let Err(e) = tx.try_send((jid.clone(), status.clone())) {
-                match e {
-                    tokio::sync::mpsc::error::TrySendError::Closed(_) => {
-                        // This subscriber has been dropped, mark for removal
-                        to_remove.push(i);
-                        //debug!("Subscriber channel closed, will be removed");
-                    },
-                    tokio::sync::mpsc::error::TrySendError::Full(_) => {
-                        // Channel is full, this is unusual but not fatal
-                        warn!("Failed to send presence update: channel full");
-                    }
-                }
-            }
-        }
-        
-        // If there are closed channels, we need to remove them
-        // This is somewhat inefficient but presence updates are not high frequency
-        if !to_remove.is_empty() {
-            // We can't modify while holding the lock, so drop it first
-            drop(subscribers);
-            
-            // Now try to acquire the lock again for modification
-            if let Ok(mut subscribers) = PRESENCE_SUBSCRIBERS.lock() {
-                // Remove in reverse order to avoid invalidating indices
-                for i in to_remove.into_iter().rev() {
-                    if i < subscribers.len() {
-                        subscribers.remove(i);
-                    }
-                }
-                
-                //debug!("Removed closed subscriber channels. {} subscribers remaining", subscribers.len());
-            }
-        }
-    } else {
-        error!("Failed to lock PRESENCE_SUBSCRIBERS");
-    }
+/// Subscribe to presence events via broadcast channel.
+/// Late subscribers won't miss events — they'll get a Lagged error which signals
+/// the need for a full state refresh (handled by resend_presence).
+pub fn subscribe_to_presence() -> broadcast::Receiver<PresenceEvent> {
+    PRESENCE_BUS.subscribe()
 }
 
 /// Send an initial presence stanza to let contacts know we're online
@@ -443,18 +391,8 @@ pub async fn process_subscription(client: &mut XMPPAsyncClient, stanza: &Element
     Ok(())
 }
 
-/// Subscribe to presence notifications for contacts
-pub fn subscribe_to_presence() -> mpsc::Receiver<(String, ContactStatus)> {
-    let (presence_tx, presence_rx) = mpsc::channel(100);
-    
-    // Store in a static collection for the message handler to access
-    PRESENCE_SUBSCRIBERS.lock().unwrap().push(presence_tx);
-    
-    presence_rx
-}
-
 /// Subscribe to receive friend request notifications
-/// 
+///
 /// Returns a channel to receive friend request notifications
 pub fn subscribe_to_friend_requests() -> mpsc::Receiver<String> {
     let (friend_req_tx, friend_req_rx) = mpsc::channel(100);
