@@ -950,6 +950,32 @@ async fn run_main_loop(
                                     }
                                 }
                             }
+                            
+                            // Also fetch the active contact's fingerprints
+                            let active_contact = chat_ui.get_active_contact();
+                            let (contact_jid, contact_fingerprints) = if !active_contact.is_empty() && active_contact != bare_jid {
+                                let contact_bare = active_contact.split('/').next().unwrap_or(&active_contact);
+                                let mut cfps = Vec::new();
+                                if let Ok(Ok(contact_device_ids)) = tokio::time::timeout(
+                                    std::time::Duration::from_secs(5),
+                                    xmpp_client.get_device_ids_for_user(contact_bare)
+                                ).await {
+                                    for device_id in &contact_device_ids {
+                                        match tokio::time::timeout(
+                                            std::time::Duration::from_secs(3),
+                                            xmpp_client.get_device_fingerprint(contact_bare, *device_id)
+                                        ).await {
+                                            Ok(Ok(fp)) => cfps.push((device_id.to_string(), fp)),
+                                            Ok(Err(e)) => cfps.push((device_id.to_string(), format!("Error: {}", e))),
+                                            Err(_) => cfps.push((device_id.to_string(), "Timeout".to_string())),
+                                        }
+                                    }
+                                }
+                                (Some(contact_bare.to_string()), cfps)
+                            } else {
+                                (None, Vec::new())
+                            };
+                            
                             if fingerprints.is_empty() {
                                 chat_ui.add_message(create_system_message(
                                     "me",
@@ -962,7 +988,12 @@ async fn run_main_loop(
                                     Err(_) => None,
                                 };
                                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    chat_ui.show_device_fingerprints_dialog(fingerprints.clone(), current_device_id);
+                                    chat_ui.show_device_fingerprints_dialog(
+                                        fingerprints.clone(),
+                                        current_device_id,
+                                        contact_jid.clone(),
+                                        contact_fingerprints.clone(),
+                                    );
                                 })) {
                                     Ok(_) => {},
                                     Err(_) => {
@@ -1508,7 +1539,9 @@ async fn run_main_loop(
                                     // Show fingerprint dialog
                                     chat_ui.show_device_fingerprints_dialog(
                                         vec![(current_device_id.to_string(), fingerprint)], 
-                                        Some(current_device_id.to_string())
+                                        Some(current_device_id.to_string()),
+                                        None,
+                                        Vec::new(),
                                     );
                                 },
                                 Err(e) => {

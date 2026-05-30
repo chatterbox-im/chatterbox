@@ -20,11 +20,24 @@ impl XMPPClient {
             return Err(anyhow!("Client not initialized"));
         }
         
+        // Set the current client for OMEMO operations (still needed for pubsub internals)
+        if let Some(client_ref) = &self.client {
+            crate::xmpp::omemo_integration::set_current_client_arc(client_ref.clone());
+        }
+        
+        // Create the PubSub bridge with the XMPP client
+        let pubsub_bridge: Arc<dyn crate::omemo::OmemoPubSub> = Arc::new(
+            crate::xmpp::omemo_integration::XmppPubSubBridge::new(
+                self.client.as_ref().unwrap().clone()
+            )
+        );
+        
         // Create the OMEMO manager
         let omemo_manager = match crate::omemo::OmemoManager::new(
             crate::omemo::storage::OmemoStorage::new_default()?,
             self.jid.clone(),
-            None
+            None,
+            pubsub_bridge,
         ).await {
             Ok(manager) => manager,
             Err(e) => {
@@ -35,11 +48,6 @@ impl XMPPClient {
         
         // Initialize OMEMO for this client
         info!("Initializing OMEMO for {}", self.jid);
-        
-        // Set the current client for OMEMO operations
-        if let Some(client_ref) = &self.client {
-            crate::xmpp::omemo_integration::set_current_client_arc(client_ref.clone());
-        }
         
         // Generate and publish device list if needed
         if let Err(e) = omemo_manager.ensure_device_list_published().await {
@@ -441,10 +449,17 @@ impl XMPPClient {
             Err(e) => return Err(anyhow!("Failed to create OMEMO storage: {}", e)),
         };
         
+        // Create a PubSub bridge for this temporary manager
+        let pubsub_bridge: Arc<dyn crate::omemo::OmemoPubSub> = match crate::xmpp::omemo_integration::get_current_client() {
+            Some(client_arc) => Arc::new(crate::xmpp::omemo_integration::XmppPubSubBridge::new(client_arc)),
+            None => return Err(anyhow!("No XMPP client available for OMEMO decryption")),
+        };
+        
         let _omemo_manager = match crate::omemo::OmemoManager::new(
             storage,
             "me".to_string(),
-            Some(device_id)
+            Some(device_id),
+            pubsub_bridge,
         ).await {
             Ok(manager) => manager,
             Err(e) => return Err(anyhow!("Failed to create OMEMO manager: {}", e)),

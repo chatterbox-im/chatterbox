@@ -10,6 +10,7 @@ use log::{debug, info, warn};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use async_trait::async_trait;
 
 use crate::omemo::storage::OmemoStorage;
 pub use crate::omemo::storage::TrustLevel;
@@ -31,6 +32,24 @@ mod lifecycle;
 
 /// The OMEMO namespace used in XMPP stanzas
 pub const OMEMO_NAMESPACE: &str = "eu.siacs.conversations.axolotl";
+
+/// Trait abstracting the XMPP PubSub operations that OMEMO needs.
+/// This breaks the circular dependency: OmemoManager depends on this trait,
+/// and the XMPP layer implements it. No globals needed.
+#[async_trait]
+pub trait OmemoPubSub: Send + Sync {
+    /// Request items from a PubSub node (fetch device lists, bundles, etc.)
+    async fn request_items(&self, from: &str, node: &str) -> Result<String>;
+
+    /// Publish an item to a PubSub node (bundles, device lists)
+    async fn publish_item(&self, to: Option<&str>, node: &str, id: &str, payload: &str) -> Result<()>;
+
+    /// Publish using alternative XML format (fallback for servers that reject standard format)
+    async fn publish_item_alternative(&self, to: Option<&str>, node: &str, id: &str, payload: &str) -> Result<()>;
+
+    /// Publish the OMEMO device list
+    async fn publish_device_list(&self, device_ids: &[DeviceId]) -> Result<()>;
+}
 
 /// Errors that can occur in OMEMO operations
 #[derive(Debug, Error)]
@@ -162,6 +181,9 @@ pub struct OmemoManager {
     
     /// Ephemeral keys for pending PreKey messages to specific devices
     pub(crate) prekey_ephemeral_keys: HashMap<(String, DeviceId), Vec<u8>>,
+
+    /// PubSub operations — injected dependency instead of global access
+    pub(crate) pubsub: Arc<dyn OmemoPubSub>,
 }
 
 impl OmemoManager {
@@ -169,7 +191,8 @@ impl OmemoManager {
     pub async fn new(
         storage: OmemoStorage,
         local_jid: String,
-        device_id: Option<u32>
+        device_id: Option<u32>,
+        pubsub: Arc<dyn OmemoPubSub>,
     ) -> Result<Self, OmemoError> {
         let storage = Arc::new(Mutex::new(storage));
         
@@ -239,6 +262,7 @@ impl OmemoManager {
             pending_session_rebuilds: HashSet::new(),
             pending_prekey_sends: HashSet::new(),
             prekey_ephemeral_keys: HashMap::new(),
+            pubsub,
         };
         
         // Load the last PreKey rotation time from storage
@@ -276,6 +300,11 @@ impl OmemoManager {
     /// Get the device ID for this OMEMO manager
     pub fn get_device_id(&self) -> DeviceId {
         self.device_id
+    }
+
+    /// Get a reference to the pubsub bridge
+    pub fn pubsub(&self) -> &dyn OmemoPubSub {
+        &*self.pubsub
     }
 
     /// Get a reference to the storage Arc
@@ -317,6 +346,29 @@ mod tests {
     use crate::omemo::device_id::generate_device_id;
     use tempfile::tempdir;
 
+    /// No-op PubSub implementation for unit tests (no real XMPP connection)
+    struct NoOpPubSub;
+
+    #[async_trait]
+    impl OmemoPubSub for NoOpPubSub {
+        async fn request_items(&self, _from: &str, _node: &str) -> Result<String> {
+            Ok(String::new())
+        }
+        async fn publish_item(&self, _to: Option<&str>, _node: &str, _id: &str, _payload: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn publish_item_alternative(&self, _to: Option<&str>, _node: &str, _id: &str, _payload: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn publish_device_list(&self, _device_ids: &[DeviceId]) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn test_pubsub() -> Arc<dyn OmemoPubSub> {
+        Arc::new(NoOpPubSub)
+    }
+
     async fn create_test_storage() -> Result<OmemoStorage, anyhow::Error> {
         let temp_dir = tempdir()?;
         let storage_path = temp_dir.path().to_path_buf();
@@ -339,7 +391,7 @@ mod tests {
     async fn test_omemo_manager_device_id() -> Result<(), anyhow::Error> {
         let storage = create_test_storage().await?;
         
-        let manager = OmemoManager::new(storage, "test@example.com".to_string(), None).await
+        let manager = OmemoManager::new(storage, "test@example.com".to_string(), None, test_pubsub()).await
             .expect("Failed to create OmemoManager");
         
         let device_id = manager.get_device_id();
@@ -351,14 +403,14 @@ mod tests {
         }
         
         let storage1 = OmemoStorage::new(Some(storage_path.clone()))?;
-        let manager1 = OmemoManager::new(storage1, "test@example.com".to_string(), None).await
+        let manager1 = OmemoManager::new(storage1, "test@example.com".to_string(), None, test_pubsub()).await
             .expect("Failed to create first manager");
         
         let device_id1 = manager1.get_device_id();
         assert!(device_id1 > 0, "First manager's device ID should be non-zero");
         
         let storage2 = OmemoStorage::new(Some(storage_path.clone()))?;
-        let manager2 = OmemoManager::new(storage2, "test@example.com".to_string(), None).await
+        let manager2 = OmemoManager::new(storage2, "test@example.com".to_string(), None, test_pubsub()).await
             .expect("Failed to create second manager");
         
         let device_id2 = manager2.get_device_id();
@@ -377,7 +429,7 @@ mod tests {
         let storage = create_test_storage().await?;
         
         let explicit_id: DeviceId = 12345;
-        let manager = OmemoManager::new(storage, "test@example.com".to_string(), Some(explicit_id)).await
+        let manager = OmemoManager::new(storage, "test@example.com".to_string(), Some(explicit_id), test_pubsub()).await
             .expect("Failed to create OmemoManager with explicit ID");
         
         let device_id = manager.get_device_id();

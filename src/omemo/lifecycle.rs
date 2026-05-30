@@ -256,7 +256,7 @@ impl OmemoManager {
         debug!("[OMEMO] fetch_device_list_from_server: backtrace = {:?}", std::backtrace::Backtrace::capture());
 
         // Use the enhanced device discovery module
-        match device_discovery::fetch_device_list_with_fallbacks(bare_jid).await {
+        match device_discovery::fetch_device_list_with_fallbacks(bare_jid, self.pubsub()).await {
             Ok(devices) => {
                 info!("[OMEMO] Found {} devices with enhanced discovery: {:?}", devices.len(), devices);
                 return Ok(devices);
@@ -267,12 +267,10 @@ impl OmemoManager {
         }
 
         // Fall back to basic method
-        if let Some(client) = crate::xmpp::get_global_xmpp_client().await {
-            let _client_guard = client.lock().await;
-            
+        {
             let standard_node = format!("{}:devices", OMEMO_NAMESPACE);
             info!("[OMEMO] Trying standard node: {}", standard_node);
-            match crate::xmpp::omemo_integration::request_pubsub_items(bare_jid, &standard_node).await {
+            match self.pubsub.request_items(bare_jid, &standard_node).await {
                 Ok(xml) => {
                     match self.parse_device_list_response(&xml) {
                         Ok(devices) if !devices.is_empty() => {
@@ -294,7 +292,7 @@ impl OmemoManager {
             
             let legacy_node = "eu.siacs.conversations.axolotl:devices";
             info!("[OMEMO] Trying legacy node: {}", legacy_node);
-            match crate::xmpp::omemo_integration::request_pubsub_items(bare_jid, &legacy_node).await {
+            match self.pubsub.request_items(bare_jid, &legacy_node).await {
                 Ok(xml) => {
                     match self.parse_device_list_response(&xml) {
                         Ok(devices) => {
@@ -312,8 +310,6 @@ impl OmemoManager {
                     return Err(OmemoError::ProtocolError(format!("Failed to fetch device list from both namespaces: {}", e)));
                 }
             }
-        } else {
-            return Err(OmemoError::MissingDataError("No XMPP client available".to_string()));
         }
     }
 
@@ -491,7 +487,7 @@ impl OmemoManager {
             info!("Adding our device ID {} to device list", self.device_id);
             device_list.push(self.device_id);
             
-            if let Err(e) = crate::xmpp::omemo_integration::publish_pubsub_item_device_list(&device_list).await {
+            if let Err(e) = self.pubsub.publish_device_list(&device_list).await {
                 error!("Failed to publish device list: {}", e);
                 return Err(anyhow!("Failed to publish device list: {}", e));
             }
@@ -567,7 +563,7 @@ impl OmemoManager {
         devices.sort();
         debug!("Publishing device list: {:?}", devices);
         
-        match crate::xmpp::omemo_integration::publish_pubsub_item_device_list(&devices).await {
+        match self.pubsub.publish_device_list(&devices).await {
             Ok(_) => {
                 info!("Device list published successfully: {:?}", devices);
                 
@@ -827,7 +823,7 @@ impl OmemoManager {
         
         let node = format!("{}.bundles:{}", OMEMO_NAMESPACE, self.device_id);
         
-        match crate::xmpp::omemo_integration::publish_pubsub_item(None, &node, "current", &bundle_xml).await {
+        match self.pubsub.publish_item(None, &node, "current", &bundle_xml).await {
             Ok(_) => {
                 info!("Successfully published to node {}", node);
                 self.storage.lock().await.mark_bundle_published(self.device_id).await?;
@@ -883,7 +879,7 @@ impl OmemoManager {
         
         let node = format!("{}.bundles:{}", OMEMO_NAMESPACE, self.device_id);
         
-        match crate::xmpp::omemo_integration::publish_pubsub_item(None, &node, "current", &alternative_payload).await {
+        match self.pubsub.publish_item(None, &node, "current", &alternative_payload).await {
             Ok(_) => {
                 info!("Successfully published bundle with alternative format for device {}", self.device_id);
                 self.storage.lock().await.mark_bundle_published(self.device_id).await?;

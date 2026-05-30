@@ -570,10 +570,25 @@ async fn publish_item_alternative_format(
 pub async fn publish_pubsub_item_device_list(
     device_ids: &[DeviceId]
 ) -> Result<()> {
-    // Get the client from the global static
-    if let Ok(current_client) = CURRENT_CLIENT.read() {
-        if let Some(client_ref) = current_client.as_ref() {
-            let mut client_guard = client_ref.lock().await;
+    // Get the client Arc from the global static (drop the RwLock guard before awaiting)
+    let client_arc = {
+        match CURRENT_CLIENT.read() {
+            Ok(guard) => match guard.as_ref() {
+                Some(arc) => arc.clone(),
+                None => {
+                    error!("No client available for OMEMO device list publishing");
+                    return Err(anyhow!("No client available"));
+                }
+            },
+            Err(_) => {
+                error!("Failed to acquire read lock for CURRENT_CLIENT");
+                return Err(anyhow!("Failed to acquire read lock for CURRENT_CLIENT"));
+            }
+        }
+    };
+    
+    {
+        let mut client_guard = client_arc.lock().await;
             
             // Generate a unique IQ ID
             let iq_id = Uuid::new_v4().to_string();
@@ -643,13 +658,6 @@ pub async fn publish_pubsub_item_device_list(
                     Err(anyhow!("Failed to send device list publish stanza: {}", e))
                 }
             }
-        } else {
-            error!("No client available for OMEMO device list publishing");
-            Err(anyhow!("No client available"))
-        }
-    } else {
-        error!("Failed to acquire read lock for CURRENT_CLIENT");
-        Err(anyhow!("Failed to acquire read lock for CURRENT_CLIENT"))
     }
 }
 

@@ -139,7 +139,7 @@ impl OmemoManager {
         let bundle_node = format!("{}.bundles:{}", OMEMO_NAMESPACE, device_id);
         
         // Make the request
-        let response = match crate::xmpp::omemo_integration::request_pubsub_items(remote_jid, &bundle_node).await {
+        let response = match self.pubsub.request_items(remote_jid, &bundle_node).await {
             Ok(resp) => resp,
             Err(e) => {
                 warn!("Failed to fetch device bundle for {}:{}: {}", remote_jid, device_id, e);

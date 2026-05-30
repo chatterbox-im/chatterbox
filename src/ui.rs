@@ -71,6 +71,8 @@ struct HelpDialog {
 struct DeviceFingerprintsDialog {
     fingerprints: Vec<(String, String)>, // (Device ID, Fingerprint)
     current_device_id: Option<String>,
+    contact_jid: Option<String>,
+    contact_fingerprints: Vec<(String, String)>, // (Device ID, Fingerprint) for active contact
 }
 
 // Add this new struct for friend request notification
@@ -250,11 +252,19 @@ impl ChatUI {
     /// 
     /// # Arguments
     /// * `fingerprints` - A vector of tuples containing device ID and fingerprint
-    pub fn show_device_fingerprints_dialog(&mut self, fingerprints: Vec<(String, String)>, current_device_id: Option<String>) {
-        //debug!("UI: Showing device fingerprints dialog with {} devices", fingerprints.len());
+    pub fn show_device_fingerprints_dialog(
+        &mut self,
+        fingerprints: Vec<(String, String)>,
+        current_device_id: Option<String>,
+        contact_jid: Option<String>,
+        contact_fingerprints: Vec<(String, String)>,
+    ) {
+        //debug!("UI: Showing device fingerprints dialog with {} own devices, {} contact devices", fingerprints.len(), contact_fingerprints.len());
         self.device_fingerprints_dialog = Some(DeviceFingerprintsDialog {
             fingerprints,
             current_device_id,
+            contact_jid,
+            contact_fingerprints,
         });
     }
 
@@ -1237,7 +1247,12 @@ fn draw_help_dialog<B: Backend>(f: &mut Frame<B>, area: Rect) {
 fn draw_device_fingerprints_dialog<B: Backend>(f: &mut Frame<B>, dialog: &DeviceFingerprintsDialog, area: Rect) {
     // Calculate popup size and position (centered)
     let popup_width = 70.min(area.width - 4);
-    let popup_height = 20.min(area.height - 4);
+    // Increase height if we have contact fingerprints
+    let base_height = 20u16;
+    let extra = if !dialog.contact_fingerprints.is_empty() {
+        (dialog.contact_fingerprints.len() as u16 * 3 + 3).min(15)
+    } else { 0 };
+    let popup_height = (base_height + extra).min(area.height - 4);
     
     let popup_x = (area.width - popup_width) / 2;
     let popup_y = (area.height - popup_height) / 2;
@@ -1246,7 +1261,7 @@ fn draw_device_fingerprints_dialog<B: Backend>(f: &mut Frame<B>, dialog: &Device
     
     // Create popup with border
     let popup_block = Block::default()
-        .title("Device Fingerprints")
+        .title("OMEMO Fingerprints")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Blue));
     
@@ -1262,7 +1277,7 @@ fn draw_device_fingerprints_dialog<B: Backend>(f: &mut Frame<B>, dialog: &Device
     // Create the fingerprints list
     let mut fingerprints_content = Vec::new();
     
-    // Add header
+    // --- Own devices section ---
     fingerprints_content.push("Your OMEMO device fingerprints:".to_string());
     fingerprints_content.push("".to_string());
     
@@ -1277,13 +1292,29 @@ fn draw_device_fingerprints_dialog<B: Backend>(f: &mut Frame<B>, dialog: &Device
                 format!("Device ID: {}", device_id)
             };
             fingerprints_content.push(device_label);
-            fingerprints_content.push(format!("Fingerprint: {}", fingerprint));
+            fingerprints_content.push(format!("  {}", fingerprint));
             fingerprints_content.push("".to_string());
         }
     }
     
-    fingerprints_content.push("".to_string());
-    fingerprints_content.push("Press any key to close this dialog".to_string());
+    // --- Contact devices section ---
+    if let Some(contact_jid) = &dialog.contact_jid {
+        fingerprints_content.push("─".repeat(40));
+        fingerprints_content.push(format!("Contact fingerprints ({}):", contact_jid));
+        fingerprints_content.push("".to_string());
+        
+        if dialog.contact_fingerprints.is_empty() {
+            fingerprints_content.push("No OMEMO keys found for this contact".to_string());
+        } else {
+            for (device_id, fingerprint) in &dialog.contact_fingerprints {
+                fingerprints_content.push(format!("Device ID: {}", device_id));
+                fingerprints_content.push(format!("  {}", fingerprint));
+                fingerprints_content.push("".to_string());
+            }
+        }
+    }
+    
+    fingerprints_content.push("Press any key to close".to_string());
     
     // Convert content to ListItems
     let items: Vec<ListItem> = fingerprints_content
@@ -1299,7 +1330,8 @@ fn draw_device_fingerprints_dialog<B: Backend>(f: &mut Frame<B>, dialog: &Device
                     s.clone(),
                     Style::default().fg(Color::Yellow)
                 ))
-            } else if s.starts_with("Fingerprint:") {
+            } else if s.starts_with("  ") && s.len() > 10 {
+                // Fingerprint lines (indented)
                 ListItem::new(Text::styled(
                     s.clone(),
                     Style::default().fg(Color::Green)
@@ -1308,6 +1340,16 @@ fn draw_device_fingerprints_dialog<B: Backend>(f: &mut Frame<B>, dialog: &Device
                 ListItem::new(Text::styled(
                     s.clone(), 
                     Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                ))
+            } else if s.starts_with("Contact fingerprints") {
+                ListItem::new(Text::styled(
+                    s.clone(),
+                    Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)
+                ))
+            } else if s.starts_with("─") {
+                ListItem::new(Text::styled(
+                    s.clone(),
+                    Style::default().fg(Color::DarkGray)
                 ))
             } else {
                 ListItem::new(s.as_str())

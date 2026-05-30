@@ -181,7 +181,7 @@ pub const NODE_FORMATS: [&str; 8] = [
 ];
 
 /// Attempt to fetch a device list using multiple namespace and node format combinations
-pub async fn fetch_device_list_with_fallbacks(jid: &str) -> Result<Vec<DeviceId>, OmemoError> {
+pub async fn fetch_device_list_with_fallbacks(jid: &str, pubsub: &dyn crate::omemo::OmemoPubSub) -> Result<Vec<DeviceId>, OmemoError> {
     info!("[OMEMO] Attempting to fetch OMEMO device list for {} with fallbacks", jid);
     
     // For device list queries, we must use the BARE JID (without resource)
@@ -197,23 +197,6 @@ pub async fn fetch_device_list_with_fallbacks(jid: &str) -> Result<Vec<DeviceId>
         info!("[OMEMO] Normalized JID for device discovery: {} -> {}", jid, bare_jid);
     }
     
-    // Try to get the client and omemo manager
-    let client_opt = crate::xmpp::get_global_xmpp_client().await;
-    let client = match client_opt {
-        Some(c) => c,
-        None => return Err(OmemoError::MissingDataError("No XMPP client available".to_string())),
-    };
-    
-    let omemo_manager_opt = {
-        let client_guard = client.lock().await;
-        client_guard.get_omemo_manager().map(|arc| arc.clone())
-    };
-    let omemo_manager = match omemo_manager_opt {
-        Some(m) => m,
-        None => return Err(OmemoError::MissingDataError("No OMEMO manager available".to_string())),
-    };
-    
-    let client_guard = client.lock().await;
     let mut combined_devices = Vec::new();
     let any_success = false;
     
@@ -232,7 +215,7 @@ pub async fn fetch_device_list_with_fallbacks(jid: &str) -> Result<Vec<DeviceId>
             // Set a timeout to avoid hanging on unresponsive servers
             match timeout(
                 Duration::from_secs(DEVICE_LIST_TIMEOUT_SECS), 
-                crate::xmpp::omemo_integration::request_pubsub_items(bare_jid, &node)
+                pubsub.request_items(bare_jid, &node)
             ).await {
                 Ok(Ok(xml)) => {
                     debug!("[OMEMO] Got response for node {}, parsing...", node);
@@ -252,7 +235,6 @@ pub async fn fetch_device_list_with_fallbacks(jid: &str) -> Result<Vec<DeviceId>
                             }
                             
                             // Return immediately when we find devices to avoid unnecessary delays
-                            drop(client_guard);
                             info!("[OMEMO] Successfully found devices for {}: {:?}", jid, combined_devices);
                             return Ok(combined_devices);
                         },
@@ -268,7 +250,6 @@ pub async fn fetch_device_list_with_fallbacks(jid: &str) -> Result<Vec<DeviceId>
                             // Stop trying and return empty list immediately
                             if e.to_string().contains("feature-not-implemented") {
                                 warn!("[OMEMO] Server {} doesn't support OMEMO (feature-not-implemented)", jid);
-                                drop(client_guard);
                                 return Ok(Vec::new());
                             }
                         }
@@ -281,7 +262,6 @@ pub async fn fetch_device_list_with_fallbacks(jid: &str) -> Result<Vec<DeviceId>
                     // Stop trying and return empty list immediately
                     if e.to_string().contains("feature-not-implemented") {
                         warn!("[OMEMO] Server {} doesn't support OMEMO (feature-not-implemented)", jid);
-                        drop(client_guard);
                         return Ok(Vec::new());
                     }
                 },
@@ -308,13 +288,9 @@ pub async fn fetch_device_list_with_fallbacks(jid: &str) -> Result<Vec<DeviceId>
     
     // If we didn't find any devices, try the standard node as a final attempt
     let standard_node = format!("{}:devices", OMEMO_NAMESPACE);
-    match crate::xmpp::omemo_integration::request_pubsub_items(bare_jid, &standard_node).await {
+    match pubsub.request_items(bare_jid, &standard_node).await {
         Ok(xml) => {
-            let parsed_devices = {
-                let manager_guard = omemo_manager.lock().await;
-                manager_guard.parse_device_list_response(&xml)
-            };
-            if let Ok(devices) = parsed_devices {
+            if let Ok(devices) = parse_device_list_response_static(&xml) {
                 if !devices.is_empty() {
                     return Ok(devices);
                 }
@@ -323,13 +299,9 @@ pub async fn fetch_device_list_with_fallbacks(jid: &str) -> Result<Vec<DeviceId>
         Err(e) => {
             // Try legacy format as final attempt
             let legacy_node = format!("{}:devicelist", OMEMO_NAMESPACE);
-            match crate::xmpp::omemo_integration::request_pubsub_items(bare_jid, &legacy_node).await {
+            match pubsub.request_items(bare_jid, &legacy_node).await {
                 Ok(xml) => {
-                    let parsed_devices = {
-                        let manager_guard = omemo_manager.lock().await;
-                        manager_guard.parse_device_list_response(&xml)
-                    };
-                    if let Ok(devices) = parsed_devices {
+                    if let Ok(devices) = parse_device_list_response_static(&xml) {
                         if !devices.is_empty() {
                             return Ok(devices);
                         }
@@ -344,24 +316,22 @@ pub async fn fetch_device_list_with_fallbacks(jid: &str) -> Result<Vec<DeviceId>
     
     // If we still have no devices, try an additional fallback for servers that might store
     // device information under a different node or using a different format
-    // This could involve checking the vcard, looking for a specific feature, or other custom logic
     
-    // For now, as a last resort, we'll try to fetch bundle information for device ID 1
-    // Many clients use device ID 1 as their first/primary device
-    try_fetch_bundle_for_common_device_ids(jid, &client_guard).await
+    // As a last resort, try to fetch bundle information for common device IDs
+    try_fetch_bundle_for_common_device_ids(jid, pubsub).await
 }
 
 /// Try to fetch bundles for common device IDs as a last resort
 async fn try_fetch_bundle_for_common_device_ids(
     jid: &str, 
-    _client_guard: &crate::xmpp::XMPPClient
+    pubsub: &dyn crate::omemo::OmemoPubSub,
 ) -> Result<Vec<DeviceId>, OmemoError> {
     let common_device_ids = [1, 2, 3, 4, 5]; // Most common device IDs
     let mut found_devices = Vec::new();
     
     for &device_id in &common_device_ids {
         let bundle_node = format!("{}.bundles:{}", OMEMO_NAMESPACE, device_id);
-        match crate::xmpp::omemo_integration::request_pubsub_items(jid, &bundle_node).await {
+        match pubsub.request_items(jid, &bundle_node).await {
             Ok(_) => {
                 // If we can fetch a bundle, this device likely exists
                 info!("[OMEMO] Found device {} for {} by directly checking bundle", device_id, jid);
@@ -370,7 +340,7 @@ async fn try_fetch_bundle_for_common_device_ids(
             Err(_) => {
                 // Try alternative format (legacy with colon)
                 let alt_bundle_node = format!("{}:bundles:{}", OMEMO_NAMESPACE, device_id);
-                if let Ok(_) = crate::xmpp::omemo_integration::request_pubsub_items(jid, &alt_bundle_node).await {
+                if let Ok(_) = pubsub.request_items(jid, &alt_bundle_node).await {
                     info!("[OMEMO] Found device {} for {} by checking legacy bundle format", device_id, jid);
                     found_devices.push(device_id);
                 }

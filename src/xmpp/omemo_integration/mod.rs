@@ -5,6 +5,7 @@ use anyhow::{anyhow, Result};
 use log::{error, info, warn};
 use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
+use async_trait::async_trait;
 
 use tokio_xmpp::AsyncClient as XMPPAsyncClient;
 use xmpp_parsers::BareJid as JidBare;
@@ -13,6 +14,7 @@ use futures_util::StreamExt;
 
 use crate::omemo::OmemoManager;
 use crate::omemo::device_id::DeviceId;
+use crate::omemo::OmemoPubSub;
 
 mod xmpp_client_impl;
 mod pubsub;
@@ -74,6 +76,39 @@ pub fn get_current_client() -> Option<Arc<TokioMutex<XMPPAsyncClient>>> {
     } else {
         error!("Failed to acquire read lock for current client");
         None
+    }
+}
+
+/// Implementation of OmemoPubSub that delegates to the XMPP connection.
+/// Holds an Arc to the raw XMPP client — no globals needed from the OMEMO side.
+#[derive(Clone)]
+pub struct XmppPubSubBridge {
+    // Held for future use when free functions are migrated to use the injected client
+    _client: Arc<TokioMutex<XMPPAsyncClient>>,
+}
+
+impl XmppPubSubBridge {
+    pub fn new(client: Arc<TokioMutex<XMPPAsyncClient>>) -> Self {
+        Self { _client: client }
+    }
+}
+
+#[async_trait]
+impl OmemoPubSub for XmppPubSubBridge {
+    async fn request_items(&self, from: &str, node: &str) -> Result<String> {
+        request_pubsub_items(from, node).await
+    }
+
+    async fn publish_item(&self, to: Option<&str>, node: &str, id: &str, payload: &str) -> Result<()> {
+        publish_pubsub_item(to, node, id, payload).await
+    }
+
+    async fn publish_item_alternative(&self, to: Option<&str>, node: &str, id: &str, payload: &str) -> Result<()> {
+        publish_bundle_alternative_format(to, node, id, payload).await
+    }
+
+    async fn publish_device_list(&self, device_ids: &[DeviceId]) -> Result<()> {
+        publish_pubsub_item_device_list(device_ids).await
     }
 }
 

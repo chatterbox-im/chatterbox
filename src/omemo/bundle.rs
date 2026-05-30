@@ -62,7 +62,7 @@ impl super::OmemoManager {
                     //debug!("Attempting alternative bundle publication format");
                     
                     // Try using the alternative format method from omemo_integration
-                    match crate::xmpp::omemo_integration::publish_bundle_alternative_format(
+                    match self.pubsub.publish_item_alternative(
                         None, &node_name, item_id, &bundle_xml
                     ).await {
                         Ok(_) => {
@@ -380,7 +380,7 @@ impl super::OmemoManager {
     /// Helper method to request PubSub items from the XMPP server
     pub async fn request_pubsub_items(&self, jid: &str, node: &str) -> Result<String, super::OmemoError> {
         //debug!("Making PubSub request to {}: {}", jid, node);
-        match crate::xmpp::omemo_integration::request_pubsub_items(jid, node).await {
+        match self.pubsub.request_items(jid, node).await {
             Ok(response) => {
                 //debug!("Received PubSub response from {}: {}", jid, node);
                 Ok(response)
@@ -451,7 +451,7 @@ impl super::OmemoManager {
         );
         info!("Would publish PubSub item: {}", stanza);
         // Publish the PubSub item using the XMPP integration layer.
-        match crate::xmpp::omemo_integration::publish_pubsub_item(to, node, id, payload).await {
+        match self.pubsub.publish_item(to, node, id, payload).await {
             Ok(_) => {
                 info!("Successfully published to node {}", node);
                 Ok(())
@@ -573,7 +573,7 @@ impl super::OmemoManager {
                     debug!("Attempting alternative bundle publication format");
                     
                     // Try using the alternative format method from omemo_integration
-                    match crate::xmpp::omemo_integration::publish_bundle_alternative_format(
+                    match self.pubsub.publish_item_alternative(
                         None, &node_name, item_id, &bundle_xml
                     ).await {
                         Ok(_) => {
