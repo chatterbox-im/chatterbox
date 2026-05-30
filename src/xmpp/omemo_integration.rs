@@ -375,7 +375,7 @@ impl super::XMPPClient {
 
         // Create the items element with the device list
         let items_element = xmpp_parsers::Element::builder("items", custom_ns::PUBSUB)
-            .attr("node", &format!("{}:devices", custom_ns::OMEMO))
+            .attr("node", &format!("{}.devicelist", custom_ns::OMEMO))
             .append(
                 xmpp_parsers::Element::builder("item", custom_ns::PUBSUB)
                     .attr("id", "current")
@@ -426,39 +426,31 @@ impl super::XMPPClient {
         
         info!("Requesting device list for bare JID: {}", bare_jid);
         
-        // Try with standard namespace and node format first (per XEP-0384)
+        // Try with Conversations format first (dot + devicelist)
+        let conversations_result = crate::xmpp::omemo_integration::request_pubsub_items(&bare_jid, &format!("{}.devicelist", custom_ns::OMEMO)).await;
+        
+        if conversations_result.is_ok() {
+            info!("Successfully retrieved device list with Conversations format ({}.devicelist)", custom_ns::OMEMO);
+            return Ok(());
+        }
+        
+        // Try with colon separator format
         let standard_result = crate::xmpp::omemo_integration::request_pubsub_items(&bare_jid, &format!("{}:devices", custom_ns::OMEMO)).await;
         
         if standard_result.is_ok() {
-            info!("Successfully retrieved device list with standard format ({}:devices)", custom_ns::OMEMO);
+            info!("Successfully retrieved device list with colon format ({}:devices)", custom_ns::OMEMO);
             return Ok(());
         }
         
-        // Try with legacy v1 namespace but standard node format
-        let v1_standard_result = crate::xmpp::omemo_integration::request_pubsub_items(&bare_jid, &format!("{}:devices", custom_ns::OMEMO_V1)).await;
+        // Try with legacy colon+devicelist format
+        let legacy_result = crate::xmpp::omemo_integration::request_pubsub_items(&bare_jid, &format!("{}:devicelist", custom_ns::OMEMO)).await;
         
-        if v1_standard_result.is_ok() {
-            info!("Successfully retrieved device list with v1 namespace and standard format ({}:devices)", custom_ns::OMEMO_V1);
-            return Ok(());
-        }
-        
-        // Try with legacy node format (devicelist) for both namespaces
-        let legacy_v2_result = crate::xmpp::omemo_integration::request_pubsub_items(&bare_jid, &format!("{}:devicelist", custom_ns::OMEMO)).await;
-        
-        if legacy_v2_result.is_ok() {
-            info!("Successfully retrieved device list with legacy format ({}:devicelist)", custom_ns::OMEMO);
-            return Ok(());
-        }
-        
-        // Final attempt with the most legacy combination
-        let legacy_v1_result = crate::xmpp::omemo_integration::request_pubsub_items(&bare_jid, &format!("{}:devicelist", custom_ns::OMEMO_V1)).await;
-        
-        if let Err(e) = &legacy_v1_result {
-            warn!("Failed to retrieve device list with all namespace and node combinations: {}", e);
+        if let Err(e) = &legacy_result {
+            warn!("Failed to retrieve device list with all node format combinations: {}", e);
             return Err(anyhow!("Failed to retrieve device list: {}", e));
         }
         
-        info!("Successfully retrieved device list with most legacy format ({}:devicelist)", custom_ns::OMEMO_V1);
+        info!("Successfully retrieved device list with legacy format ({}:devicelist)", custom_ns::OMEMO);
         Ok(())
     }
 
@@ -544,7 +536,7 @@ impl super::XMPPClient {
         }
         
         let client = self.client.as_ref().unwrap();
-        let node_name = format!("{}:devices", custom_ns::OMEMO);
+        let node_name = format!("{}.devicelist", custom_ns::OMEMO);
         
         // First, try to configure the node for open access
         if let Err(e) = self.configure_node_for_open_access(&node_name).await {
@@ -574,7 +566,7 @@ impl super::XMPPClient {
                 xmpp_parsers::Element::builder("pubsub", custom_ns::PUBSUB)
                     .append(
                         xmpp_parsers::Element::builder("publish", custom_ns::PUBSUB)
-                            .attr("node", &format!("{}:devices", custom_ns::OMEMO))
+                            .attr("node", &format!("{}.devicelist", custom_ns::OMEMO))
                             .append(
                                 xmpp_parsers::Element::builder("item", custom_ns::PUBSUB)
                                     .attr("id", "current")
@@ -1887,7 +1879,7 @@ impl OmemoIntegration {
         item_elem.append_child(list_elem);
         
         let mut publish_elem = Element::bare("publish", "http://jabber.org/protocol/pubsub");
-        publish_elem.set_attr("node", "eu.siacs.conversations.axolotl:devices");
+        publish_elem.set_attr("node", "eu.siacs.conversations.axolotl.devicelist");
         publish_elem.append_child(item_elem);
         
         let mut pubsub_elem = Element::bare("pubsub", "http://jabber.org/protocol/pubsub");
@@ -2266,7 +2258,7 @@ pub async fn publish_pubsub_item_device_list(
                 .build();
             
             let publish_element = xmpp_parsers::Element::builder("publish", "http://jabber.org/protocol/pubsub")
-                .attr("node", "eu.siacs.conversations.axolotl:devices")
+                .attr("node", "eu.siacs.conversations.axolotl.devicelist")
                 .append(item_element)
                 .build();
             
@@ -2301,7 +2293,7 @@ pub async fn publish_pubsub_item_device_list(
                             devices_xml
                         );
                         
-                        return publish_item_alternative_format(client_guard, None, "eu.siacs.conversations.axolotl:devices", "current", &list_xml).await;
+                        return publish_item_alternative_format(client_guard, None, "eu.siacs.conversations.axolotl.devicelist", "current", &list_xml).await;
                     }
                     
                     Err(anyhow!("Failed to send device list publish stanza: {}", e))

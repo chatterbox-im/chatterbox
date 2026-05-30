@@ -885,6 +885,7 @@ impl super::XMPPClient {
                     },
                     is_prekey: false,     // Will be determined by session state
                     ephemeral_key: None,  // Will be extracted from XML if present
+                    prekey_devices: std::collections::HashSet::new(),
                 }
             ).await {
                 Ok(content) => content,

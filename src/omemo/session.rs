@@ -329,7 +329,7 @@ impl OmemoSession {
         Ok(plaintext)
     }
     
-    /// Encrypt a message key for transport
+    /// Encrypt a message key for transport (produces a SignalMessage in wire format)
     pub fn encrypt_key(&mut self, key: &[u8]) -> Result<Vec<u8>, SessionError> {
         if !self.ratchet_state.initialized {
             return Err(SessionError::InvalidStateError(
@@ -340,6 +340,53 @@ impl OmemoSession {
         let encrypted_key = DoubleRatchet::encrypt_key(&mut self.ratchet_state, key)?;
         
         Ok(encrypted_key)
+    }
+
+    /// Encrypt a message key for transport as a PreKeySignalMessage.
+    /// Used when establishing a new session with a device.
+    pub fn encrypt_key_prekey(
+        &mut self,
+        key: &[u8],
+        registration_id: u32,
+        pre_key_id: Option<u32>,
+        signed_pre_key_id: u32,
+        base_key: &[u8],
+        identity_key: &[u8],
+    ) -> Result<Vec<u8>, SessionError> {
+        if !self.ratchet_state.initialized {
+            return Err(SessionError::InvalidStateError(
+                "Session not initialized".to_string()
+            ));
+        }
+
+        // First encrypt the key to get the inner SignalMessage bytes
+        let inner_bytes = DoubleRatchet::encrypt_key(&mut self.ratchet_state, key)?;
+
+        // Parse the inner SignalMessage we just created
+        let inner_msg = crate::omemo::wire::SignalMessage::deserialize(&inner_bytes)
+            .ok_or_else(|| SessionError::SerializationError(
+                "Failed to parse inner SignalMessage for PreKey wrapping".to_string()
+            ))?;
+
+        // Wrap in PreKeySignalMessage
+        let prekey_msg = crate::omemo::wire::PreKeySignalMessage {
+            registration_id,
+            pre_key_id,
+            signed_pre_key_id,
+            base_key: base_key.to_vec(),
+            identity_key: identity_key.to_vec(),
+            message: inner_msg,
+        };
+
+        // Use the sending chain key as MAC key (same as in encrypt_key)
+        let mac_key = crate::omemo::crypto::kdf(
+            &self.ratchet_state.send_chain_key,
+            &self.ratchet_state.root_key,
+            b"mac",
+        );
+        let result = prekey_msg.serialize(&mac_key);
+
+        Ok(result)
     }
     
     /// Decrypt a message key

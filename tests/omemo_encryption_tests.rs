@@ -827,6 +827,9 @@ async fn test_omemo_stanza_positive_compliance() -> anyhow::Result<()> {
         mac: vec![0; 16],
         iv: iv.clone(),
         encrypted_keys: encrypted_keys.clone(),
+        is_prekey: false,
+        ephemeral_key: None,
+        prekey_devices: std::collections::HashSet::new(),
     };
 
     // Manually construct the OMEMO stanza as Element

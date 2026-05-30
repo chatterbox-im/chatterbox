@@ -79,7 +79,6 @@ impl super::OmemoManager {
                 
                 // If we get here, the error wasn't related to format issues or the alternative method failed
                 error!("Failed to publish bundle: {}", e);
-                println!("[OMEMO ERROR] Failed to publish bundle: {}", e);
                 return Err(anyhow!("Failed to publish bundle: {}", e));
             }
         }
@@ -583,7 +582,6 @@ impl super::OmemoManager {
                         },
                         Err(alt_err) => {
                             error!("Alternative bundle publication also failed: {}", alt_err);
-                            println!("[OMEMO ERROR] Failed to publish bundle (both methods): {}", alt_err);
                             return Err(anyhow!("Failed to publish bundle (both methods): {}", alt_err));
                         }
                     }
@@ -591,7 +589,6 @@ impl super::OmemoManager {
                 
                 // If we get here, the error wasn't related to format issues or the alternative method failed
                 error!("Failed to publish bundle: {}", e);
-                println!("[OMEMO ERROR] Failed to publish bundle: {}", e);
                 return Err(anyhow!("Failed to publish bundle: {}", e));
             }
         }

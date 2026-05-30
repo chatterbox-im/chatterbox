@@ -296,16 +296,16 @@ async fn main() -> Result<()> {
                 ).await {
                     Ok(Ok(ids)) => ids,
                     Ok(Err(e)) => {
-                        println!("Failed to refresh device list for {}: {}", bare_jid, e);
+                        error!("Failed to refresh device list for {}: {}", bare_jid, e);
                         Vec::new()
                     },
                     Err(_) => {
-                        println!("Timeout refreshing device list for {}", bare_jid);
+                        error!("Timeout refreshing device list for {}", bare_jid);
                         Vec::new()
                     }
                 }
             } else {
-                println!("OMEMO not initialized");
+                error!("OMEMO not initialized");
                 Vec::new()
             };
             
@@ -509,7 +509,6 @@ async fn setup_contacts(chat_ui: &mut ChatUI, xmpp_client: &mut XMPPClient, _dis
 /// Loads message history for a contact in the background without blocking the UI
 /// Returns immediately while history loads asynchronously
 fn load_message_history_async(chat_ui: &mut ChatUI, xmpp_client: &XMPPClient, contact: &str, disable_mam: bool) {
-fn load_message_history_async(chat_ui: &mut ChatUI, xmpp_client: &XMPPClient, contact: &str, disable_mam: bool) {
     // Skip loading history for system contacts
     if contact.starts_with("[") && contact.ends_with("]") {
         return;
@@ -644,8 +643,6 @@ async fn run_main_loop(
     chat_ui: &mut ChatUI,
     terminal: &mut ui::Terminal<ui::CrosstermBackend<io::Stdout>>,
     xmpp_client: &mut XMPPClient,
-    msg_rx: &mut tokio::sync::mpsc::Receiver<Message>,
-    disable_mam: bool
     msg_rx: &mut tokio::sync::mpsc::Receiver<Message>,
     disable_mam: bool
 ) -> Result<()> {

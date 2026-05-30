@@ -232,7 +232,7 @@ pub async fn fetch_device_list_with_fallbacks(jid: &str) -> Result<Vec<DeviceId>
             // Set a timeout to avoid hanging on unresponsive servers
             match timeout(
                 Duration::from_secs(DEVICE_LIST_TIMEOUT_SECS), 
-                crate::xmpp::omemo_integration::request_pubsub_items(jid, &node)
+                crate::xmpp::omemo_integration::request_pubsub_items(bare_jid, &node)
             ).await {
                 Ok(Ok(xml)) => {
                     debug!("[OMEMO] Got response for node {}, parsing...", node);
@@ -310,7 +310,7 @@ pub async fn fetch_device_list_with_fallbacks(jid: &str) -> Result<Vec<DeviceId>
     
     // If we didn't find any devices, try the standard node as a final attempt
     let standard_node = format!("{}:devices", OMEMO_NAMESPACE);
-    match crate::xmpp::omemo_integration::request_pubsub_items(jid, &standard_node).await {
+    match crate::xmpp::omemo_integration::request_pubsub_items(bare_jid, &standard_node).await {
         Ok(xml) => {
             let parsed_devices = {
                 let manager_guard = omemo_manager.lock().await;
@@ -325,7 +325,7 @@ pub async fn fetch_device_list_with_fallbacks(jid: &str) -> Result<Vec<DeviceId>
         Err(e) => {
             // Try legacy format as final attempt
             let legacy_node = format!("{}:devicelist", OMEMO_NAMESPACE);
-            match crate::xmpp::omemo_integration::request_pubsub_items(jid, &legacy_node).await {
+            match crate::xmpp::omemo_integration::request_pubsub_items(bare_jid, &legacy_node).await {
                 Ok(xml) => {
                     let parsed_devices = {
                         let manager_guard = omemo_manager.lock().await;

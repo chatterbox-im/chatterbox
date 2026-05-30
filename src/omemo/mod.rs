@@ -27,6 +27,7 @@ pub mod storage;
 pub mod device_id;
 pub mod bundle;
 pub mod device_discovery;
+pub mod wire;
 
 /// The OMEMO namespace used in XMPP stanzas
 /// The OMEMO version 1 namespace (for backward compatibility)
@@ -603,7 +604,7 @@ impl OmemoManager {
     
     /// Encrypt a message for a recipient
     pub async fn encrypt_message(&mut self, recipient: &str, plaintext: &str) -> Result<OmemoMessage, OmemoError> {
-        println!("*** CRITICAL DEBUG: encrypt_message called for recipient '{}' with message '{}'", recipient, plaintext);
+        debug!("encrypt_message called for recipient '{}'", recipient);
         info!("Encrypting message for {}", recipient);
         
         // Get the device list for the recipient with timeout protection
@@ -753,6 +754,7 @@ impl OmemoManager {
         // Now encrypt the message key (aes_key + auth_tag, 32 bytes) for all devices
         // Add overall timeout protection to prevent UI hangs
         let overall_timeout = Duration::from_secs(15); // Maximum 15 seconds for all session creations
+        let mut prekey_device_set: HashSet<DeviceId> = HashSet::new();
         let session_creation_future = async {
             for (jid, device_id) in all_devices {
                 info!("ENCRYPT_DEBUG: Processing device {}:{}", jid, device_id);
@@ -774,6 +776,23 @@ impl OmemoManager {
                     info!("ENCRYPT_DEBUG: Processing device {}:{} for PreKey message", jid, device_id);
                 }
                 
+                // Determine if this is a new session that needs PreKey wrapping
+                // A device needs PreKey wrapping if it has a stored ephemeral key
+                let has_ephemeral = self.prekey_ephemeral_keys.contains_key(&device_key);
+                let use_prekey_format = needs_prekey || has_ephemeral;
+                
+                // Capture PreKey parameters BEFORE the mutable session borrow
+                let prekey_params = if use_prekey_format {
+                    let identity_key = self.key_bundle.as_ref().unwrap().identity_key_pair.public_key.clone();
+                    let base_key = self.prekey_ephemeral_keys.get(&device_key).cloned();
+                    let signed_pre_key_id = self.key_bundle.as_ref().unwrap().signed_pre_key_id;
+                    let registration_id = self.device_id;
+                    let pre_key_id = self.key_bundle.as_ref().unwrap().one_time_pre_key_pairs.keys().next().copied();
+                    Some((identity_key, base_key, signed_pre_key_id, registration_id, pre_key_id))
+                } else {
+                    None
+                };
+                
                 // Add per-device timeout to prevent individual device hangs
                 let device_timeout = Duration::from_secs(8); // 8 seconds per device
                 info!("ENCRYPT_DEBUG: Getting or creating session for {}:{}", jid, device_id);
@@ -782,11 +801,31 @@ impl OmemoManager {
                 match session_result {
                     Ok(Ok(session)) => {
                         info!("ENCRYPT_DEBUG: Successfully got session for {}:{}", jid, device_id);
-                        // Encrypt the message key (aes_key + auth_tag) for this device
-                        match session.encrypt_key(&message_key) {
+                        
+                        let encrypt_result = if let Some((identity_key, base_key_opt, signed_pre_key_id, registration_id, pre_key_id)) = prekey_params {
+                            // Use the stored ephemeral key, or fall back to session ratchet key
+                            let base_key = base_key_opt
+                                .unwrap_or_else(|| session.ratchet_state.ratchet_key_pair.public_key.clone());
+                            
+                            session.encrypt_key_prekey(
+                                &message_key,
+                                registration_id,
+                                pre_key_id,
+                                signed_pre_key_id,
+                                &base_key,
+                                &identity_key,
+                            )
+                        } else {
+                            session.encrypt_key(&message_key)
+                        };
+                        
+                        match encrypt_result {
                             Ok(encrypted_key) => {
                                 encrypted_keys.insert(device_id, encrypted_key);
-                                info!("ENCRYPT_DEBUG: Successfully encrypted message key for {}:{}", jid, device_id);
+                                if use_prekey_format {
+                                    prekey_device_set.insert(device_id);
+                                }
+                                info!("ENCRYPT_DEBUG: Successfully encrypted message key for {}:{} (prekey={})", jid, device_id, use_prekey_format);
                                 
                                 // If this device was waiting for a PreKey message, mark it as sent
                                 if needs_prekey {
@@ -822,10 +861,7 @@ impl OmemoManager {
         info!("ENCRYPT_DEBUG: Final encrypted_keys map contains device IDs: {:?}", encrypted_keys.keys().collect::<Vec<_>>());
         
         // Check if this message contains any PreKey messages (devices with stored ephemeral keys)
-        let has_prekey_devices = device_list_copy.iter().any(|(jid, device_id)| {
-            let device_key = (jid.clone(), *device_id);
-            self.prekey_ephemeral_keys.contains_key(&device_key)
-        });
+        let has_prekey_devices = !prekey_device_set.is_empty();
         
         // If this is a PreKey message, we need to include an ephemeral key
         // For simplicity, use the first ephemeral key if multiple devices need PreKey messages
@@ -833,23 +869,13 @@ impl OmemoManager {
             device_list_copy.iter()
                 .find_map(|(jid, device_id)| {
                     let device_key = (jid.clone(), *device_id);
-                    let ephemeral = self.prekey_ephemeral_keys.get(&device_key).cloned();
-                    log::debug!("EPHEMERAL_DEBUG: Checking device {}:{}, has ephemeral: {}", 
-                        jid, device_id, ephemeral.is_some());
-                    if let Some(ref eph) = ephemeral {
-                        log::debug!("EPHEMERAL_DEBUG: Ephemeral key length: {}, first 16 bytes: {}", 
-                            eph.len(), hex::encode(&eph[..16.min(eph.len())]));
-                    }
-                    ephemeral
+                    self.prekey_ephemeral_keys.get(&device_key).cloned()
                 })
         } else {
             None
         };
         
-        log::debug!("EPHEMERAL_DEBUG: Final ephemeral key is_some: {}, has_prekey_devices: {}", 
-            ephemeral_key.is_some(), has_prekey_devices);
-        
-        // Create the complete OMEMO message using Dino-compatible AES-GCM format
+        // Create the complete OMEMO message using Signal wire format
         let message = OmemoMessage {
             sender_device_id: self.device_id,
             ratchet_key: self.key_bundle.as_ref().unwrap().signed_pre_key_pair.public_key.clone(),
@@ -861,6 +887,7 @@ impl OmemoManager {
             encrypted_keys,
             is_prekey: has_prekey_devices,
             ephemeral_key: ephemeral_key.clone(),
+            prekey_devices: prekey_device_set,
         };
         
         // Clear the ephemeral keys for devices that got PreKey messages
@@ -1162,11 +1189,17 @@ impl OmemoManager {
     /// according to XEP-0384 Section 4.2. It performs a PubSub request to 
     /// the user's server to retrieve the device list from the appropriate node.
     pub async fn fetch_device_list_from_server(&self, jid: &str) -> Result<Vec<u32>, OmemoError> {
-        info!("[OMEMO] fetch_device_list_from_server: Fetching OMEMO device list from server for {}", jid);
+        // Always use the bare JID for PubSub device list queries
+        let bare_jid = if jid.contains('/') {
+            jid.split('/').next().unwrap_or(jid)
+        } else {
+            jid
+        };
+        info!("[OMEMO] fetch_device_list_from_server: Fetching OMEMO device list from server for {}", bare_jid);
         debug!("[OMEMO] fetch_device_list_from_server: backtrace = {:?}", std::backtrace::Backtrace::capture());
 
         // Use the enhanced device discovery module to try all possible formats
-        match device_discovery::fetch_device_list_with_fallbacks(jid).await {
+        match device_discovery::fetch_device_list_with_fallbacks(bare_jid).await {
             Ok(devices) => {
                 info!("[OMEMO] Found {} devices with enhanced discovery: {:?}", devices.len(), devices);
                 return Ok(devices);
@@ -1183,7 +1216,7 @@ impl OmemoManager {
             // Try with the standard namespace first
             let standard_node = format!("{}:devices", OMEMO_NAMESPACE);
             info!("[OMEMO] Trying standard node: {}", standard_node);
-            match crate::xmpp::omemo_integration::request_pubsub_items(jid, &standard_node).await {
+            match crate::xmpp::omemo_integration::request_pubsub_items(bare_jid, &standard_node).await {
                 Ok(xml) => {
                     match self.parse_device_list_response(&xml) {
                         Ok(devices) if !devices.is_empty() => {
@@ -1206,7 +1239,7 @@ impl OmemoManager {
             // Try with the legacy namespace as fallback
             let legacy_node = "eu.siacs.conversations.axolotl:devices";
             info!("[OMEMO] Trying legacy node: {}", legacy_node);
-            match crate::xmpp::omemo_integration::request_pubsub_items(jid, &legacy_node).await {
+            match crate::xmpp::omemo_integration::request_pubsub_items(bare_jid, &legacy_node).await {
                 Ok(xml) => {
                     match self.parse_device_list_response(&xml) {
                         Ok(devices) => {
@@ -1601,7 +1634,6 @@ impl OmemoManager {
                 Ok(bundle) => bundle,
                 Err(e) => {
                     error!("Failed to generate bundle: {}", e);
-                    println!("[OMEMO ERROR] Failed to generate bundle: {}", e);
                     return Err(anyhow!("Failed to generate bundle: {}", e));
                 }
             };
@@ -1611,7 +1643,6 @@ impl OmemoManager {
             }
             if let Err(e) = self.publish_bundle(bundle).await {
                 error!("Failed to publish bundle: {}", e);
-                println!("[OMEMO ERROR] Failed to publish bundle: {}", e);
                 return Err(anyhow!("Failed to publish bundle: {}", e));
             }
             if let Err(e) = storage.mark_bundle_published(self.device_id).await {

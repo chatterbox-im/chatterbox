@@ -1128,9 +1128,14 @@ impl XMPPClient {
                 
                 // Collect encrypted keys for each device
                 let mut encrypted_keys = std::collections::HashMap::new();
+                let mut is_prekey_message = false;
                 for key_elem in header.children().filter(|e| e.name() == "key") {
                     if let (Some(rid_str), text) = (key_elem.attr("rid"), key_elem.text()) {
                         let key_base64 = text;
+                        // Check if this key element has prekey="true" attribute (Conversations format)
+                        if key_elem.attr("prekey") == Some("true") || key_elem.attr("prekey") == Some("1") {
+                            is_prekey_message = true;
+                        }
                         match rid_str.parse::<u32>() {
                             Ok(recipient_id) => {
                                 match base64::engine::general_purpose::STANDARD.decode(key_base64) {
@@ -1184,8 +1189,9 @@ impl XMPPClient {
                     mac: vec![],          // This will be verified by the session
                     iv,
                     encrypted_keys,
-                    is_prekey: false,     // Will be determined by session state
-                    ephemeral_key: None,  // Will be extracted from XML if present
+                    is_prekey: is_prekey_message, // Detected from prekey="true" attribute
+                    ephemeral_key: None,  // Will be extracted from wire format if present
+                    prekey_devices: std::collections::HashSet::new(),
                 };
                 
                 // Decrypt the message
@@ -1348,10 +1354,14 @@ impl XMPPClient {
         let mut header_element = Element::builder("header", custom_ns::OMEMO_V1).build();
         header_element.set_attr("sid", &encrypted_message.sender_device_id.to_string());
         
-        // Add key elements with OMEMO namespace
+        // Add key elements with OMEMO namespace, including prekey="true" for PreKeySignalMessages
         for (device_id, encrypted_key) in &encrypted_message.encrypted_keys {
             let mut key_element = Element::builder("key", custom_ns::OMEMO_V1).build();
             key_element.set_attr("rid", &device_id.to_string());
+            // Mark key elements as prekey when they contain a PreKeySignalMessage
+            if encrypted_message.prekey_devices.contains(device_id) {
+                key_element.set_attr("prekey", "true");
+            }
             key_element.append_text_node(&base64::engine::general_purpose::STANDARD.encode(encrypted_key));
             header_element.append_child(key_element);
         }
@@ -1369,6 +1379,17 @@ impl XMPPClient {
         encrypted_element.append_child(header_element);
         encrypted_element.append_child(payload_element);
         message_element.append_child(encrypted_element);
+        
+        // Add EME (Explicit Message Encryption) indicator for non-OMEMO clients (XEP-0380)
+        let mut eme_element = Element::builder("encryption", "urn:xmpp:eme:0").build();
+        eme_element.set_attr("namespace", custom_ns::OMEMO_V1);
+        eme_element.set_attr("name", "OMEMO");
+        message_element.append_child(eme_element);
+        
+        // Add body fallback for clients that don't support OMEMO (Conversations compatibility)
+        let mut body_element = Element::builder("body", "jabber:client").build();
+        body_element.append_text_node("I sent you an OMEMO encrypted message but your client doesn\u{2019}t seem to support that. Find more information on https://conversations.im/omemo");
+        message_element.append_child(body_element);
         
         // Add store hint for offline message delivery (XEP-0334)
         let store_hint = Element::builder("store", "urn:xmpp:hints").build();

@@ -6,7 +6,7 @@
 use anyhow::{anyhow, Result};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 use log::debug;
 
@@ -198,6 +198,9 @@ pub struct OmemoMessage {
     
     /// Ephemeral public key used for X3DH (only present in PreKey messages)
     pub ephemeral_key: Option<Vec<u8>>,
+
+    /// Set of device IDs that received a PreKeySignalMessage (for prekey="true" attribute)
+    pub prekey_devices: HashSet<DeviceId>,
 }
 
 /// Double Ratchet implementation for OMEMO
@@ -692,6 +695,7 @@ impl DoubleRatchet {
             encrypted_keys: std::collections::HashMap::new(),
             is_prekey: false, // Regular message, not a PreKey message
             ephemeral_key: None, // Only present in PreKey messages
+            prekey_devices: HashSet::new(),
         };
         
         // Increment message counter
@@ -843,69 +847,122 @@ impl DoubleRatchet {
         Ok(())
     }
 
-    /// Encrypt a message key for transport
+    /// Encrypt a message key for transport using Signal wire format.
+    /// Produces a serialized SignalMessage (version || protobuf || mac).
     pub fn encrypt_key(state: &mut RatchetState, key: &[u8]) -> Result<Vec<u8>, DoubleRatchetError> {
         debug!("Double Ratchet encrypt_key: key length: {}", key.len());
         debug!("Double Ratchet encrypt_key: key hex: {}", hex::encode(key));
         debug!("Double Ratchet encrypt_key: root_key: {}", hex::encode(&state.root_key));
-        
-        // Generate a random IV for AES-GCM mode (12 bytes) - Dino compatible
+
+        // Derive a message key from the sending chain
+        let message_key = Self::derive_next_sending_key(state);
+
+        // Generate a random IV for encryption (12 bytes for AES-GCM)
         let iv = crypto::generate_gcm_iv();
-        
-        debug!("Double Ratchet encrypt_key: IV: {}", hex::encode(&iv));
-        
-        // Derive a transport key from the root key (16 bytes for AES-128-GCM)
-        let transport_key_material = crypto::kdf(&state.root_key, &iv, b"transport");
-        let transport_key = &transport_key_material[0..16]; // Use first 16 bytes for AES-128
-        
-        debug!("Double Ratchet encrypt_key: transport_key: {}", hex::encode(transport_key));
-        
-        // Encrypt the key using AES-GCM
-        let encrypted_key = crypto::aes_gcm_encrypt(key, transport_key, &iv)
+
+        // Encrypt the OMEMO message key (aes_key + auth_tag) using the chain message key
+        let encrypted_payload = crypto::aes_gcm_encrypt(key, &message_key[..16], &iv)
             .map_err(DoubleRatchetError::CryptoError)?;
-        
-        debug!("Double Ratchet encrypt_key: encrypted_key: {}", hex::encode(&encrypted_key));
-        
-        // Concatenate IV and encrypted key for storage/transport
-        let mut result = Vec::new();
-        result.extend_from_slice(&iv);
-        result.extend_from_slice(&encrypted_key);
-        
-        debug!("Double Ratchet encrypt_key: result length: {}", result.len());
-        debug!("Double Ratchet encrypt_key: result hex: {}", hex::encode(&result));
-        
+
+        // Combine IV + encrypted payload as the ciphertext field of the SignalMessage
+        let mut ciphertext = Vec::with_capacity(iv.len() + encrypted_payload.len());
+        ciphertext.extend_from_slice(&iv);
+        ciphertext.extend_from_slice(&encrypted_payload);
+
+        // Build a SignalMessage in wire format
+        let signal_msg = crate::omemo::wire::SignalMessage {
+            ratchet_key: state.ratchet_key_pair.public_key.clone(),
+            counter: state.send_message_number,
+            previous_counter: state.prev_receive_message_number,
+            ciphertext,
+            mac: Vec::new(), // will be computed during serialization
+        };
+
+        // Increment the message number after using it
+        state.send_message_number += 1;
+
+        // Use the sending chain key as the MAC key
+        let mac_key = crypto::kdf(&state.send_chain_key, &state.root_key, b"mac");
+        let result = signal_msg.serialize(&mac_key);
+
+        debug!("Double Ratchet encrypt_key: result length: {} (Signal wire format)", result.len());
         Ok(result)
     }
-    
-    /// Decrypt a message key from transport
+
+    /// Decrypt a message key from Signal wire format (SignalMessage or PreKeySignalMessage).
     pub fn decrypt_key(state: &mut RatchetState, encrypted_key: &[u8]) -> Result<Vec<u8>, DoubleRatchetError> {
         debug!("Double Ratchet decrypt_key: encrypted_key length: {}", encrypted_key.len());
         debug!("Double Ratchet decrypt_key: encrypted_key hex: {}", hex::encode(encrypted_key));
-        
-        // Split IV and encrypted key (first 12 bytes are the IV for AES-GCM mode)
+
+        // Try parsing as PreKeySignalMessage first, then SignalMessage
+        let signal_msg = if let Some(prekey_msg) = crate::omemo::wire::PreKeySignalMessage::deserialize(encrypted_key) {
+            debug!("Double Ratchet decrypt_key: parsed as PreKeySignalMessage (reg_id={}, spk_id={})",
+                prekey_msg.registration_id, prekey_msg.signed_pre_key_id);
+            // For PreKey messages, the inner SignalMessage carries the encrypted key
+            // The session should already have been established using the X3DH parameters
+            // from the PreKeySignalMessage envelope
+            prekey_msg.message
+        } else if let Some(msg) = crate::omemo::wire::SignalMessage::deserialize(encrypted_key) {
+            debug!("Double Ratchet decrypt_key: parsed as SignalMessage (counter={})", msg.counter);
+            msg
+        } else {
+            // Fallback: try legacy format (IV || AES-GCM ciphertext) for backward compatibility
+            debug!("Double Ratchet decrypt_key: not Signal wire format, trying legacy format");
+            return Self::decrypt_key_legacy(state, encrypted_key);
+        };
+
+        // Check if we need a DH ratchet step
+        if !signal_msg.ratchet_key.is_empty() && signal_msg.ratchet_key != state.remote_ratchet_key {
+            debug!("Double Ratchet decrypt_key: performing DH ratchet step (new ratchet key)");
+            Self::dh_ratchet(state, &signal_msg.ratchet_key)?;
+        }
+
+        // Derive the message key for this counter position
+        // Skip keys if needed
+        while state.receive_message_number < signal_msg.counter {
+            let skipped_key = Self::derive_next_receiving_key(state);
+            let skip_index = (signal_msg.ratchet_key.clone(), state.receive_message_number - 1);
+            state.skipped_message_keys.insert(skip_index, skipped_key);
+        }
+
+        let message_key = Self::derive_next_receiving_key(state);
+
+        // The ciphertext in the SignalMessage is IV (12 bytes) + AES-GCM encrypted key
+        let ciphertext = &signal_msg.ciphertext;
+        if ciphertext.len() < 12 {
+            return Err(DoubleRatchetError::InvalidMessageFormatError(
+                "SignalMessage ciphertext too short for IV + payload".to_string()
+            ));
+        }
+
+        let iv = &ciphertext[..12];
+        let encrypted_payload = &ciphertext[12..];
+
+        // Decrypt the OMEMO message key
+        let key = crypto::aes_gcm_decrypt(encrypted_payload, &message_key[..16], iv)
+            .map_err(DoubleRatchetError::CryptoError)?;
+
+        debug!("Double Ratchet decrypt_key: decrypted key length: {}", key.len());
+        Ok(key)
+    }
+
+    /// Legacy decrypt_key for backward compatibility with existing sessions
+    fn decrypt_key_legacy(state: &mut RatchetState, encrypted_key: &[u8]) -> Result<Vec<u8>, DoubleRatchetError> {
         if encrypted_key.len() < 12 {
             return Err(DoubleRatchetError::InvalidMessageFormatError(
                 "Encrypted key too short for AES-GCM".to_string()
             ));
         }
-        
+
         let iv = &encrypted_key[0..12];
         let cipher = &encrypted_key[12..];
-        
-        debug!("Double Ratchet decrypt_key: IV: {}", hex::encode(iv));
-        debug!("Double Ratchet decrypt_key: cipher: {}", hex::encode(cipher));
-        debug!("Double Ratchet decrypt_key: root_key: {}", hex::encode(&state.root_key));
-        
-        // Derive the transport key (16 bytes for AES-128-GCM)
+
         let transport_key_material = crypto::kdf(&state.root_key, iv, b"transport");
-        let transport_key = &transport_key_material[0..16]; // Use first 16 bytes for AES-128
-        
-        debug!("Double Ratchet decrypt_key: transport_key: {}", hex::encode(transport_key));
-        
-        // Decrypt the key using AES-GCM
+        let transport_key = &transport_key_material[0..16];
+
         let key = crypto::aes_gcm_decrypt(cipher, transport_key, iv)
             .map_err(DoubleRatchetError::CryptoError)?;
-        
+
         Ok(key)
     }
 }
@@ -914,6 +971,7 @@ impl DoubleRatchet {
 pub mod utils {
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
     use roxmltree::Document;
+    use std::collections::HashSet;
     use thiserror::Error;
 
     use super::{DeviceIdentity, OmemoMessage};
@@ -1108,6 +1166,7 @@ pub mod utils {
             encrypted_keys,
             is_prekey: ephemeral_key.is_some(), // This is a PreKey message if ephemeral key is present
             ephemeral_key,            // Extracted from XML
+            prekey_devices: HashSet::new(),
         };
         
         Ok(message)
