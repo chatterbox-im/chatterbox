@@ -4,8 +4,10 @@
 use anyhow::{anyhow, Result};
 use log::{error, info, warn};
 use std::time::Duration;
+use std::pin::Pin;
+use std::task::Poll;
 use uuid::Uuid;
-use futures_util::StreamExt;
+use futures_util::Stream;
 use base64::Engine;
 
 use crate::models::{Message, DeliveryStatus};
@@ -85,17 +87,13 @@ impl super::XMPPClient {
     pub async fn get_message_history_with_pagination(&self, options: MAMQueryOptions) -> Result<MAMQueryResult> {
         info!("Fetching message history with options: {:?}", options);
         
-        if self.client.is_none() {
-            return Err(anyhow!("XMPP client not initialized"));
-        }
-        
         // Check OMEMO initialization state before proceeding
         let omemo_initialized = Self::is_omemo_fully_initialized().await;
         if !omemo_initialized {
             info!("OMEMO not fully initialized yet when fetching message history - encrypted messages may not be decrypted");
         }
         
-        let client = self.client.as_ref().unwrap();
+        let client = self.client.as_ref().ok_or_else(|| anyhow!("XMPP client not initialized"))?;
         
         // Generate a unique ID for this MAM query
         let query_id = Uuid::new_v4().to_string();
@@ -254,17 +252,14 @@ impl super::XMPPClient {
                 
                 match lock_result {
                     Ok(mut client_guard) => {
-                        match tokio::time::timeout(
-                            Duration::from_millis(500),
-                            client_guard.next()
-                        ).await {
-                            Ok(event) => event,
-                            Err(_) => {
-                                // Timeout on this check, release the lock and wait briefly
-                                tokio::time::sleep(Duration::from_millis(100)).await;
-                                continue;
+                        // Use poll_fn for a non-blocking check — avoids dropping next() mid-poll
+                        // which can leave tokio_xmpp's internal state machine corrupted
+                        futures_util::future::poll_fn(|cx| {
+                            match Pin::new(&mut *client_guard).poll_next(cx) {
+                                Poll::Ready(event) => Poll::Ready(event),
+                                Poll::Pending => Poll::Ready(None),
                             }
-                        }
+                        }).await
                     },
                     Err(_) => {
                         // Failed to acquire lock, wait briefly and retry
@@ -512,11 +507,7 @@ impl super::XMPPClient {
     pub async fn has_message_history(&self, jid: &str, limit: usize) -> Result<bool> {
         //debug!("Checking if message history exists for {}", jid);
         
-        if self.client.is_none() {
-            return Err(anyhow!("XMPP client not initialized"));
-        }
-        
-        let client = self.client.as_ref().unwrap();
+        let client = self.client.as_ref().ok_or_else(|| anyhow!("XMPP client not initialized"))?;
         
         // Generate a unique ID for this MAM query
         let query_id = Uuid::new_v4().to_string();
@@ -619,16 +610,13 @@ impl super::XMPPClient {
                 
                 match lock_result {
                     Ok(mut client_guard) => {
-                        match tokio::time::timeout(
-                            Duration::from_millis(500),
-                            client_guard.next()
-                        ).await {
-                            Ok(event) => event,
-                            Err(_) => {
-                                // Timeout just for this check, we'll retry
-                                None
+                        // Use poll_fn for a non-blocking check — avoids dropping next() mid-poll
+                        futures_util::future::poll_fn(|cx| {
+                            match Pin::new(&mut *client_guard).poll_next(cx) {
+                                Poll::Ready(event) => Poll::Ready(event),
+                                Poll::Pending => Poll::Ready(None),
                             }
-                        }
+                        }).await
                     },
                     Err(_) => {
                         // Failed to acquire lock, wait briefly and retry

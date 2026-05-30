@@ -16,14 +16,9 @@ use super::{XMPPClient, custom_ns, NS_JABBER_CLIENT};
 impl XMPPClient {
     /// Initialize the client
     pub async fn initialize_client(&mut self) -> Result<()> {
-        if self.client.is_none() {
-            return Err(anyhow!("Client not initialized"));
-        }
-        
         // Set the current client for OMEMO operations (still needed for pubsub internals)
-        if let Some(client_ref) = &self.client {
-            crate::xmpp::omemo_integration::set_current_client_arc(client_ref.clone());
-        }
+        let client_ref = self.client.as_ref().ok_or_else(|| anyhow!("Client not initialized"))?;
+        crate::xmpp::omemo_integration::set_current_client_arc(client_ref.clone());
         
         // Create the PubSub bridge with the XMPP client
         let pubsub_bridge: Arc<dyn crate::omemo::OmemoPubSub> = Arc::new(
@@ -135,6 +130,31 @@ impl XMPPClient {
                         return Err(anyhow!("OMEMO manager not initialized"));
                     }
                 };
+                
+                // Skip decryption if this is our own sent message (e.g. MAM replay)
+                // Per XEP-0384, the sender does not encrypt for its own device
+                {
+                    let manager_guard = omemo_manager.lock().await;
+                    let own_device_id = manager_guard.get_device_id();
+                    if sender_device_id == own_device_id {
+                        debug!("Skipping decryption of our own sent message (device {})", sender_device_id);
+                        // Use the "to" attribute as recipient (this is who we sent to)
+                        let to = element.attr("to").unwrap_or("unknown");
+                        let recipient_jid = to.split('/').next().unwrap_or(to).to_string();
+                        let message = Message {
+                            id: id.to_string(),
+                            sender_id: "me".to_string(),
+                            recipient_id: recipient_jid,
+                            content: "[Sent encrypted message]".to_string(),
+                            timestamp: chrono::Utc::now().timestamp() as u64,
+                            delivery_status: DeliveryStatus::Delivered,
+                        };
+                        if let Err(e) = self.msg_tx.send(message).await {
+                            error!("Failed to send own-message placeholder to UI: {}", e);
+                        }
+                        return Ok(());
+                    }
+                }
                 
                 // Process encrypted message using the OMEMO manager
                 

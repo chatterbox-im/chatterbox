@@ -3,12 +3,13 @@
 
 use anyhow::{anyhow, Result};
 use log::{error, info, warn};
+use std::pin::Pin;
+use std::task::Poll;
 use std::time::Duration;
 use uuid::Uuid;
 use xmpp_parsers::Element;
 use crate::xmpp::XMPPClient;
 use tokio_xmpp::Event as XMPPEvent;
-use futures_util::StreamExt; // Import for next() method on event stream
 
 impl XMPPClient {
     /// Get the roster (contact list) from the XMPP server
@@ -58,22 +59,36 @@ impl XMPPClient {
         
         // Process events until we get the roster response or timeout
         while tokio::time::Instant::now() - start_time < response_timeout {
-            // Wait for the next event with a short timeout
-            let event_result = tokio::time::timeout(
-                Duration::from_millis(500),
-                async {
-                    if let Some(client_ref) = &self.client {
-                        let mut client_guard = client_ref.lock().await;
-                        client_guard.next().await
-                    } else {
-                        return None;
+            // Non-blocking poll of the stream — avoids dropping next() mid-poll
+            // which can corrupt tokio_xmpp's internal state machine
+            let event_result = if let Some(client_ref) = &self.client {
+                let lock_result = tokio::time::timeout(
+                    Duration::from_millis(500),
+                    client_ref.lock()
+                ).await;
+                match lock_result {
+                    Ok(mut client_guard) => {
+                        use futures_util::Stream;
+                        let event = futures_util::future::poll_fn(|cx| {
+                            match Pin::new(&mut *client_guard).poll_next(cx) {
+                                Poll::Ready(event) => Poll::Ready(Some(event)),
+                                Poll::Pending => Poll::Ready(None),
+                            }
+                        }).await;
+                        event
+                    },
+                    Err(_) => {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        continue;
                     }
                 }
-            ).await;
+            } else {
+                None
+            };
             
             // Process the event if we got one
             match event_result {
-                Ok(Some(XMPPEvent::Stanza(stanza))) => {
+                Some(Some(XMPPEvent::Stanza(stanza))) => {
                     // Check if this is our roster response
                     if stanza.name() == "iq" && stanza.attr("id") == Some(&id) {
                         info!("Received roster response for ID: {}", id);
@@ -124,16 +139,17 @@ impl XMPPClient {
                         }
                     }
                 },
-                Ok(Some(XMPPEvent::Disconnected(e))) => {
+                Some(Some(XMPPEvent::Disconnected(e))) => {
                     error!("Disconnected while waiting for roster: {:?}", e);
                     return Err(anyhow!("Disconnected while waiting for roster: {:?}", e));
                 },
-                Ok(None) => {
+                Some(None) => {
                     error!("Connection closed while waiting for roster");
                     return Err(anyhow!("Connection closed while waiting for roster"));
                 },
-                Err(_) => {
-                    // Timeout on the event, continue the loop
+                None => {
+                    // No event ready, sleep briefly and retry
+                    tokio::time::sleep(Duration::from_millis(50)).await;
                     continue;
                 },
                 _ => {

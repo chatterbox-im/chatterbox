@@ -2,11 +2,13 @@
 //! Main XMPP event loop for handling incoming stanzas
 
 use log::{debug, error, info, warn};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex as TokioMutex};
 use std::sync::atomic::AtomicBool;
-use futures_util::StreamExt;
+use futures_util::Stream;
 
 use tokio_xmpp::{AsyncClient as XMPPAsyncClient, Event as XMPPEvent};
 
@@ -39,28 +41,38 @@ impl XMPPClient {
         
         // Main event loop
         loop {
-            // Use a timeout when acquiring the lock to prevent indefinite blocking
-            let event_result = tokio::time::timeout(
-                Duration::from_secs(2),
-                async {
-                    let mut client_guard = client.lock().await;
-                    client_guard.next().await
-                }
-            ).await;
-            
-            // Handle potential timeout when acquiring lock
-            let event = match event_result {
-                Ok(event) => event,
-                Err(_) => {
-                    // If we've already seen the online event, this is just normal operation
-                    if seen_online_event {
-                        //debug!("Timed out waiting for XMPP client event - this is normal");
-                    } else {
-                        //debug!("Timed out waiting for XMPP client lock or next event");
+            // Acquire lock with timeout, then do a non-blocking poll of the stream.
+            // IMPORTANT: We must not wrap client_guard.next() in tokio::time::timeout,
+            // because dropping that future mid-poll corrupts tokio_xmpp's internal state
+            // machine (leaves it in ClientState::Invalid, causing a panic on next poll).
+            let event = {
+                let lock_result = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    client.lock()
+                ).await;
+                
+                match lock_result {
+                    Ok(mut client_guard) => {
+                        futures_util::future::poll_fn(|cx| {
+                            match Pin::new(&mut *client_guard).poll_next(cx) {
+                                Poll::Ready(event) => Poll::Ready(Some(event)),
+                                Poll::Pending => Poll::Ready(None),
+                            }
+                        }).await
+                    },
+                    Err(_) => {
+                        // Timed out acquiring lock
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        continue;
                     }
-                    
-                    // Small sleep to avoid tight loop
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            };
+            
+            // If no event was ready (Pending), sleep briefly and retry
+            let event = match event {
+                Some(event) => event,
+                None => {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
                     continue;
                 }
             };
@@ -180,17 +192,18 @@ impl XMPPClient {
                             tokio::spawn(async move {
                                 warn!("Inside OMEMO async task - starting processing");
                                 
-                                // Get the global OMEMO manager if available
-                                let omemo_manager = match get_global_xmpp_client().await {
+                                // Get the global OMEMO manager and JID
+                                let (omemo_manager, jid) = match get_global_xmpp_client().await {
                                     Some(global_client) => {
                                         let client_guard = global_client.lock().await;
                                         let manager = client_guard.omemo_manager.clone();
+                                        let jid = client_guard.jid.clone();
                                         warn!("Retrieved global OMEMO manager: {:?}", manager.is_some());
-                                        manager
+                                        (manager, jid)
                                     },
                                     None => {
                                         warn!("No global XMPP client available");
-                                        None
+                                        (None, String::new())
                                     },
                                 };
                                 
@@ -202,7 +215,7 @@ impl XMPPClient {
                                 
                                 // Need to get an instance of XMPPClient to call handle_message_encrypted
                                 let mut temp_client = XMPPClient {
-                                    jid: String::new(),
+                                    jid,
                                     client: Some(client_clone),
                                     msg_tx: msg_tx_clone,
                                     pending_receipts: pending_receipts_clone,
@@ -244,8 +257,23 @@ impl XMPPClient {
                             }
                             
                             // Process carbon copies of messages
-                            if stanza.has_child("received", custom_ns::CARBONS) || 
-                               stanza.has_child("sent", custom_ns::CARBONS) {
+                            // XEP-0280 §6: Carbons MUST have from=user's bare JID (server-originated)
+                            let carbon_from = stanza.attr("from").unwrap_or("");
+                            let carbon_from_is_valid = if carbon_from.is_empty() {
+                                // No from attribute = implicitly from server (valid per RFC 6120)
+                                true
+                            } else if let Some(global) = get_global_xmpp_client().await {
+                                let guard = global.lock().await;
+                                let our_bare = guard.jid.split('/').next().unwrap_or("");
+                                let their_bare = carbon_from.split('/').next().unwrap_or("");
+                                our_bare == their_bare
+                            } else {
+                                // Can't verify — reject to be safe
+                                false
+                            };
+                            
+                            if carbon_from_is_valid && (stanza.has_child("received", custom_ns::CARBONS) || 
+                               stanza.has_child("sent", custom_ns::CARBONS)) {
                                 // Clone needed values for async task
                                 let stanza_clone = stanza.clone();
                                 let client_clone = client.clone();

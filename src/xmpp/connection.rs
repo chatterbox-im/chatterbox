@@ -245,13 +245,12 @@ impl XMPPClient {
 
     pub async fn disconnect(&mut self) -> Result<()> {
         info!("Disconnecting from XMPP server");
-        if self.client.is_none() {
-            //debug!("No active connection to disconnect");
-            return Ok(());
-        }
+        let client = match self.client.as_ref() {
+            Some(c) => c,
+            None => return Ok(()),
+        };
         let mut _disconnect_result = Ok(());
         {
-            let client = self.client.as_ref().unwrap();
             let mut client_guard = match tokio::time::timeout(
                 Duration::from_secs(5),
                 client.lock()

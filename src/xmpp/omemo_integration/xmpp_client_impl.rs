@@ -17,12 +17,10 @@ impl crate::xmpp::XMPPClient {
 
     /// Send an OMEMO encrypted message
     pub async fn send_omemo_encrypted_message(&self, recipient: &str, plaintext: &str) -> Result<()> {
-        if self.client.is_none() {
+        let _client = self.client.as_ref().ok_or_else(|| {
             error!("XMPP client not initialized when trying to send encrypted message");
-            return Err(anyhow!("XMPP client not initialized"));
-        }
-
-        let _client = self.client.as_ref().unwrap();
+            anyhow!("XMPP client not initialized")
+        })?;
         let _recipient_jid = match recipient.parse::<JidBare>() {
             Ok(jid) => jid,
             Err(e) => {
@@ -430,11 +428,7 @@ impl crate::xmpp::XMPPClient {
     /// Publish your OMEMO device list to the server
     /// This advertises which devices you have available for OMEMO encryption
     pub async fn publish_omemo_devicelist(&self, device_ids: &[DeviceId]) -> Result<()> {
-        if self.client.is_none() {
-            return Err(anyhow!("XMPP client not initialized"));
-        }
-        
-        let client = self.client.as_ref().unwrap();
+        let client = self.client.as_ref().ok_or_else(|| anyhow!("XMPP client not initialized"))?;
         let node_name = format!("{}.devicelist", custom_ns::OMEMO);
         
         // First, try to configure the node for open access
@@ -510,11 +504,7 @@ impl crate::xmpp::XMPPClient {
     /// Publish your OMEMO device bundle to the server
     /// This advertises your keys for encryption
     pub async fn publish_omemo_bundle(&self, device_id: DeviceId, bundle_data: &str) -> Result<()> {
-        if self.client.is_none() {
-            return Err(anyhow!("XMPP client not initialized"));
-        }
-        
-        let client = self.client.as_ref().unwrap();
+        let client = self.client.as_ref().ok_or_else(|| anyhow!("XMPP client not initialized"))?;
         
         // Configure the bundle node for open access before publishing
         let bundle_node_name = format!("{}.bundles:{}", custom_ns::OMEMO_V1, device_id);
@@ -923,11 +913,7 @@ impl crate::xmpp::XMPPClient {
 
     /// Configure a PubSub node for open access (required for OMEMO)
     async fn configure_node_for_open_access(&self, node_name: &str) -> Result<()> {
-        if self.client.is_none() {
-            return Err(anyhow!("XMPP client not initialized"));
-        }
-        
-        let client = self.client.as_ref().unwrap();
+        let client = self.client.as_ref().ok_or_else(|| anyhow!("XMPP client not initialized"))?;
         let config_id = Uuid::new_v4().to_string();
         
         // Create configuration form for open access

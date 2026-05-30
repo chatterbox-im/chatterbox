@@ -70,13 +70,11 @@ pub fn handle_chat_state(stanza: &Element) -> Result<()> {
 impl super::XMPPClient {
     /// Send a chat state notification (XEP-0085)
     pub async fn send_chat_state(&self, recipient: &str, state: &TypingStatus) -> Result<()> {
-        if self.client.is_none() {
-            error!("XMPP client not initialized when trying to send chat state");
-            return Err(anyhow!("XMPP client not initialized"));
-        }
-
         // Create a clone of what we need for the background task
-        let client_clone = self.client.as_ref().unwrap().clone();
+        let client_clone = self.client.as_ref().ok_or_else(|| {
+            error!("XMPP client not initialized when trying to send chat state");
+            anyhow!("XMPP client not initialized")
+        })?.clone();
         let recipient = recipient.to_string();
         let state = state.clone();
         

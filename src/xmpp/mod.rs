@@ -217,11 +217,7 @@ impl XMPPClient {
 
     /// Enable XML inspection for testing and debugging
     pub async fn enable_xml_inspection(&self, tx: mpsc::Sender<String>) -> Result<()> {
-        if self.client.is_none() {
-            return Err(anyhow!("XMPP client not initialized"));
-        }
-        
-        let client = self.client.as_ref().unwrap();
+        let client = self.client.as_ref().ok_or_else(|| anyhow!("XMPP client not initialized"))?;
         let client_guard = client.lock().await;
         
         introspection::register_inspector(tx);

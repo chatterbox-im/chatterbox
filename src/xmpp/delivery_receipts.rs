@@ -150,12 +150,10 @@ impl super::XMPPClient {
 
     /// Send a message to a recipient with delivery receipt support
     pub async fn send_message_with_receipt(&self, recipient: &str, content: &str) -> Result<()> {
-        if self.client.is_none() {
+        let client = self.client.as_ref().ok_or_else(|| {
             error!("XMPP client not initialized when trying to send message");
-            return Err(anyhow::anyhow!("XMPP client not initialized"));
-        }
-
-        let client = self.client.as_ref().unwrap();
+            anyhow::anyhow!("XMPP client not initialized")
+        })?;
         let recipient_jid: xmpp_parsers::BareJid = match recipient.parse() {
             Ok(jid) => jid,
             Err(e) => {

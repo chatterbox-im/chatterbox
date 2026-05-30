@@ -158,11 +158,14 @@ impl OmemoManager {
         
         // Decrypt the message key
         let (decrypted_key_data, session_state_to_store) = {
-            let ratchet_state = session.ratchet_state.clone();
             let decryption_result = session.decrypt_key(&encrypted_key);
             
             match decryption_result {
-                Ok(data) => (data, Some(ratchet_state)),
+                Ok(data) => {
+                    // Store ratchet state AFTER successful decrypt (it advances the ratchet)
+                    let ratchet_state = session.ratchet_state.clone();
+                    (data, Some(ratchet_state))
+                },
                 Err(session_error) => {
                     return self.handle_decryption_failure(sender_str, device_id, session_error).await;
                 }

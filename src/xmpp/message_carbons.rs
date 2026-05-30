@@ -3,7 +3,9 @@
 
 use anyhow::{anyhow, Result};
 use log::{debug, error, info, warn};
-use futures_util::StreamExt;
+use std::pin::Pin;
+use std::task::Poll;
+use futures_util::Stream;
 
 use xmpp_parsers::Element;
 use crate::models::{Message, DeliveryStatus};
@@ -14,12 +16,10 @@ use base64::Engine;
 impl super::XMPPClient {
     /// Enable Message Carbons feature
     pub async fn enable_carbons_protocol(&self) -> Result<bool> {
-        if self.client.is_none() {
+        let client = self.client.as_ref().ok_or_else(|| {
             error!("XMPP client not initialized when trying to enable message carbons");
-            return Err(anyhow!("XMPP client not initialized"));
-        }
-
-        let client = self.client.as_ref().unwrap();
+            anyhow!("XMPP client not initialized")
+        })?;
         
         // Generate a unique ID for the request
         let id = uuid::Uuid::new_v4().to_string();
@@ -62,21 +62,32 @@ impl super::XMPPClient {
         
         // Process events until we get a response or timeout
         while tokio::time::Instant::now() - start_time < response_timeout {
-            // Try to get the next event with a short timeout
-            let event_result = tokio::time::timeout(
-                tokio::time::Duration::from_millis(500),
-                async {
-                    if let Some(client_ref) = &self.client {
-                        let mut client_guard = client_ref.lock().await;
-                        client_guard.next().await
-                    } else {
-                        return None;
+            // Non-blocking poll — avoids dropping next() mid-poll which corrupts tokio_xmpp state
+            let event_result = if let Some(client_ref) = &self.client {
+                let lock_result = tokio::time::timeout(
+                    tokio::time::Duration::from_millis(500),
+                    client_ref.lock()
+                ).await;
+                match lock_result {
+                    Ok(mut client_guard) => {
+                        futures_util::future::poll_fn(|cx| {
+                            match Pin::new(&mut *client_guard).poll_next(cx) {
+                                Poll::Ready(event) => Poll::Ready(Some(event)),
+                                Poll::Pending => Poll::Ready(None),
+                            }
+                        }).await
+                    },
+                    Err(_) => {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                        continue;
                     }
                 }
-            ).await;
+            } else {
+                None
+            };
             
             match event_result {
-                Ok(Some(tokio_xmpp::Event::Stanza(stanza))) => {
+                Some(Some(tokio_xmpp::Event::Stanza(stanza))) => {
                     // Check if this is our response
                     if stanza.name() == "iq" && stanza.attr("id") == Some(&id) {
                         info!("Received message carbons response for ID: {}", id);
@@ -106,16 +117,17 @@ impl super::XMPPClient {
                         }
                     }
                 },
-                Ok(Some(tokio_xmpp::Event::Disconnected(e))) => {
+                Some(Some(tokio_xmpp::Event::Disconnected(e))) => {
                     error!("Disconnected while waiting for message carbons response: {:?}", e);
                     return Err(anyhow!("Disconnected while waiting for message carbons response: {:?}", e));
                 },
-                Ok(None) => {
+                Some(None) => {
                     error!("Connection closed while waiting for message carbons response");
                     return Err(anyhow!("Connection closed while waiting for message carbons response"));
                 },
-                Err(_) => {
-                    // Timeout waiting for event, continue in the loop
+                None => {
+                    // No event ready, sleep briefly and retry
+                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
                     continue;
                 },
                 _ => {
@@ -131,12 +143,10 @@ impl super::XMPPClient {
 
     /// Disable Message Carbons feature
     pub async fn disable_carbons(&self) -> Result<bool> {
-        if self.client.is_none() {
+        let client = self.client.as_ref().ok_or_else(|| {
             error!("XMPP client not initialized when trying to disable message carbons");
-            return Err(anyhow!("XMPP client not initialized"));
-        }
-
-        let client = self.client.as_ref().unwrap();
+            anyhow!("XMPP client not initialized")
+        })?;
         
         // Generate a unique ID for the request
         let id = uuid::Uuid::new_v4().to_string();
@@ -166,21 +176,32 @@ impl super::XMPPClient {
         
         // Process events until we get a response or timeout
         while tokio::time::Instant::now() - start_time < response_timeout {
-            // Try to get the next event with a short timeout
-            let event_result = tokio::time::timeout(
-                tokio::time::Duration::from_millis(500),
-                async {
-                    if let Some(client_ref) = &self.client {
-                        let mut client_guard = client_ref.lock().await;
-                        client_guard.next().await
-                    } else {
-                        return None;
+            // Non-blocking poll — avoids dropping next() mid-poll which corrupts tokio_xmpp state
+            let event_result = if let Some(client_ref) = &self.client {
+                let lock_result = tokio::time::timeout(
+                    tokio::time::Duration::from_millis(500),
+                    client_ref.lock()
+                ).await;
+                match lock_result {
+                    Ok(mut client_guard) => {
+                        futures_util::future::poll_fn(|cx| {
+                            match Pin::new(&mut *client_guard).poll_next(cx) {
+                                Poll::Ready(event) => Poll::Ready(Some(event)),
+                                Poll::Pending => Poll::Ready(None),
+                            }
+                        }).await
+                    },
+                    Err(_) => {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                        continue;
                     }
                 }
-            ).await;
+            } else {
+                None
+            };
             
             match event_result {
-                Ok(Some(tokio_xmpp::Event::Stanza(stanza))) => {
+                Some(Some(tokio_xmpp::Event::Stanza(stanza))) => {
                     // Check if this is our response
                     if stanza.name() == "iq" && stanza.attr("id") == Some(&id) {
                         info!("Received message carbons disable response for ID: {}", id);
@@ -202,16 +223,17 @@ impl super::XMPPClient {
                         }
                     }
                 },
-                Ok(Some(tokio_xmpp::Event::Disconnected(e))) => {
+                Some(Some(tokio_xmpp::Event::Disconnected(e))) => {
                     error!("Disconnected while waiting for message carbons disable response: {:?}", e);
                     return Err(anyhow!("Disconnected while waiting for message carbons disable response: {:?}", e));
                 },
-                Ok(None) => {
+                Some(None) => {
                     error!("Connection closed while waiting for message carbons disable response");
                     return Err(anyhow!("Connection closed while waiting for message carbons disable response"));
                 },
-                Err(_) => {
-                    // Timeout waiting for event, continue in the loop
+                None => {
+                    // No event ready, sleep briefly and retry
+                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
                     continue;
                 },
                 _ => {
@@ -325,9 +347,9 @@ impl super::XMPPClient {
                                     
                                     // Determine sender and recipient for UI message
                                     let (sender_id, recipient_id) = if is_sent {
-                                        (self.jid.clone(), to.to_string())
+                                        ("me".to_string(), to.to_string())
                                     } else {
-                                        (from.to_string(), self.jid.clone())
+                                        (from.to_string(), "me".to_string())
                                     };
                                     
                                     // Create a Message object for the UI
@@ -372,9 +394,9 @@ impl super::XMPPClient {
         // For sent carbons, we (the local user) are the sender
         // For received carbons, the other party is the sender
         let (sender_id, recipient_id) = if is_sent {
-            (self.jid.clone(), to.to_string())
+            ("me".to_string(), to.to_string())
         } else {
-            (from.to_string(), self.jid.clone())
+            (from.to_string(), "me".to_string())
         };
         
         // Create a Message object for the UI
@@ -487,6 +509,25 @@ impl super::XMPPClient {
             }
         }
         
+        // If the sender device is our own device, this is a sent carbon echo — skip decryption
+        if sender_device_id == own_device_id {
+            debug!("Skipping decryption of our own sent carbon (device {})", sender_device_id);
+            let msg_id = message.attr("id").map(|s| s.to_string()).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            let recipient_jid = to.split('/').next().unwrap_or(to).to_string();
+            let ui_message = Message {
+                id: msg_id,
+                sender_id: "me".to_string(),
+                recipient_id: recipient_jid,
+                content: "[Sent encrypted message]".to_string(),
+                timestamp: chrono::Utc::now().timestamp() as u64,
+                delivery_status: DeliveryStatus::Delivered,
+            };
+            if let Err(e) = self.msg_tx.send(ui_message).await {
+                error!("Failed to send own-carbon placeholder to UI: {}", e);
+            }
+            return Ok(());
+        }
+
         if !encrypted_keys.contains_key(&own_device_id) {
             debug!("No key found for our device ID {} in carbon message", own_device_id);
             
