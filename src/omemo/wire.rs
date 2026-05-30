@@ -58,6 +58,8 @@ pub struct PreKeySignalMessage {
     pub base_key: Vec<u8>,
     pub identity_key: Vec<u8>,
     pub message: SignalMessage,
+    /// Raw bytes of the inner SignalMessage (for MAC verification and re-embedding)
+    pub raw_message_bytes: Vec<u8>,
 }
 
 // --- Protobuf encoding helpers ---
@@ -138,6 +140,25 @@ impl SignalMessage {
 
         // Compute MAC over version + proto
         let mac = compute_mac(mac_key, &buf);
+        buf.extend_from_slice(&mac[..MAC_LENGTH]);
+        buf
+    }
+
+    /// Serialize with MAC including identity keys per Signal spec.
+    /// MAC = HMAC-SHA256(mac_key, sender_identity || receiver_identity || version || protobuf)[..8]
+    pub fn serialize_with_identity(&self, mac_key: &[u8], sender_identity: &[u8], receiver_identity: &[u8]) -> Vec<u8> {
+        let proto = self.encode_proto();
+        let mut buf = Vec::with_capacity(1 + proto.len() + MAC_LENGTH);
+        buf.push(VERSION_BYTE);
+        buf.extend_from_slice(&proto);
+
+        // MAC input: sender_identity || receiver_identity || version || protobuf
+        let mut mac_input = Vec::with_capacity(sender_identity.len() + receiver_identity.len() + buf.len());
+        mac_input.extend_from_slice(sender_identity);
+        mac_input.extend_from_slice(receiver_identity);
+        mac_input.extend_from_slice(&buf);
+
+        let mac = compute_mac(mac_key, &mac_input);
         buf.extend_from_slice(&mac[..MAC_LENGTH]);
         buf
     }
@@ -246,9 +267,8 @@ impl SignalMessage {
 impl PreKeySignalMessage {
     /// Serialize a PreKeySignalMessage to the Signal wire format.
     /// Format: version_byte || protobuf
-    pub fn serialize(&self, mac_key: &[u8]) -> Vec<u8> {
-        let inner_serialized = self.message.serialize(mac_key);
-
+    /// The inner SignalMessage is embedded as raw pre-serialized bytes (with its own MAC).
+    pub fn serialize_with_inner_bytes(&self, inner_signal_msg_bytes: &[u8]) -> Vec<u8> {
         let mut proto = Vec::new();
         proto.extend(encode_field_varint(prekey_message_tags::REGISTRATION_ID, self.registration_id));
         if let Some(pre_key_id) = self.pre_key_id {
@@ -257,12 +277,18 @@ impl PreKeySignalMessage {
         proto.extend(encode_field_varint(prekey_message_tags::SIGNED_PRE_KEY_ID, self.signed_pre_key_id));
         proto.extend(encode_field_bytes(prekey_message_tags::BASE_KEY, &self.base_key));
         proto.extend(encode_field_bytes(prekey_message_tags::IDENTITY_KEY, &self.identity_key));
-        proto.extend(encode_field_bytes(prekey_message_tags::MESSAGE, &inner_serialized));
+        proto.extend(encode_field_bytes(prekey_message_tags::MESSAGE, inner_signal_msg_bytes));
 
         let mut buf = Vec::with_capacity(1 + proto.len());
         buf.push(VERSION_BYTE);
         buf.extend(proto);
         buf
+    }
+
+    /// Legacy serialize that re-serializes inner message (kept for compatibility)
+    pub fn serialize(&self, mac_key: &[u8]) -> Vec<u8> {
+        let inner_serialized = self.message.serialize(mac_key);
+        self.serialize_with_inner_bytes(&inner_serialized)
     }
 
     /// Deserialize a PreKeySignalMessage from wire format.
@@ -341,6 +367,7 @@ impl PreKeySignalMessage {
             base_key,
             identity_key,
             message,
+            raw_message_bytes: message_bytes,
         })
     }
 }
@@ -412,6 +439,7 @@ mod tests {
             base_key: vec![3u8; 32],
             identity_key: vec![4u8; 32],
             message: inner,
+            raw_message_bytes: vec![],
         };
 
         let mac_key = vec![0x66u8; 32];

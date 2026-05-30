@@ -26,6 +26,44 @@ pub struct DeviceListEntry {
     pub last_update: i64,
 }
 
+/// BTBV (Blind Trust Before Verification) trust levels
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrustLevel {
+    /// First encounter — blindly trusted until user verifies any device for this contact
+    Undecided,
+    /// Explicitly trusted (user accepted but didn't verify fingerprint)
+    Trusted,
+    /// Manually verified (e.g. via QR code or fingerprint comparison)
+    Verified,
+    /// Explicitly untrusted / revoked
+    Untrusted,
+}
+
+impl TrustLevel {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TrustLevel::Undecided => "undecided",
+            TrustLevel::Trusted => "trusted",
+            TrustLevel::Verified => "verified",
+            TrustLevel::Untrusted => "untrusted",
+        }
+    }
+    
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "trusted" => TrustLevel::Trusted,
+            "verified" => TrustLevel::Verified,
+            "untrusted" => TrustLevel::Untrusted,
+            _ => TrustLevel::Undecided,
+        }
+    }
+    
+    /// Whether this trust level allows encryption/decryption
+    pub fn is_trusted(&self) -> bool {
+        matches!(self, TrustLevel::Undecided | TrustLevel::Trusted | TrustLevel::Verified)
+    }
+}
+
 /// Filesystem-based storage for OMEMO data
 pub struct OmemoStorage {
     /// Root directory for OMEMO storage
@@ -226,7 +264,7 @@ impl OmemoStorage {
         })
     }
     
-    /// Store a device identity
+    /// Store a device identity with BTBV trust model
     pub fn save_device_identity(&mut self, jid: &str, identity: &DeviceIdentity, trusted: bool) -> Result<()> {
         let jid_dir = self.get_jid_path("identities", jid);
         let device_dir = jid_dir.join(identity.id.to_string());
@@ -235,8 +273,20 @@ impl OmemoStorage {
         // Store the identity using binary serialization
         Self::write_binary_file(&device_dir.join("identity.bin"), &identity)?;
         
-        // Store trust status as plain text
-        Self::write_text_file(&device_dir.join("trusted"), &trusted.to_string())?;
+        // BTBV: determine initial trust level
+        let trust_level = if trusted {
+            TrustLevel::Trusted
+        } else if self.has_verified_device(jid).unwrap_or(false) {
+            // Contact has a verified device → new devices are untrusted until verified
+            TrustLevel::Untrusted
+        } else {
+            // No verified devices for this contact → blind trust
+            TrustLevel::Undecided
+        };
+        
+        Self::write_text_file(&device_dir.join("trust_level"), trust_level.as_str())?;
+        // Legacy compatibility
+        Self::write_text_file(&device_dir.join("trusted"), &trust_level.is_trusted().to_string())?;
         
         Ok(())
     }
@@ -256,32 +306,72 @@ impl OmemoStorage {
     
     /// Check if a device identity is trusted
     pub fn is_device_trusted(&self, jid: &str, device_id: DeviceId) -> Result<bool> {
+        let level = self.get_trust_level(jid, device_id)?;
+        // BTBV: "trusted" and "verified" both count as trusted
+        // "undecided" also counts as trusted (blind trust before verification)
+        // Only "untrusted" is explicitly not trusted
+        Ok(level != TrustLevel::Untrusted)
+    }
+    
+    /// Get the trust level for a device
+    pub fn get_trust_level(&self, jid: &str, device_id: DeviceId) -> Result<TrustLevel> {
         let jid_dir = self.get_jid_path("identities", jid);
         let device_dir = jid_dir.join(device_id.to_string());
-        let trusted_path = device_dir.join("trusted");
+        let trust_path = device_dir.join("trust_level");
         
-        if trusted_path.exists() {
-            let content = fs::read_to_string(&trusted_path)?;
-            content.trim().parse::<bool>()
-                .map_err(|e| anyhow!("Failed to parse trusted status: {}", e))
+        if trust_path.exists() {
+            let content = fs::read_to_string(&trust_path)?;
+            Ok(TrustLevel::from_str(content.trim()))
         } else {
-            // If no record exists, consider the device untrusted
-            Ok(false)
+            // Legacy: check old "trusted" file
+            let trusted_path = device_dir.join("trusted");
+            if trusted_path.exists() {
+                let content = fs::read_to_string(&trusted_path)?;
+                if content.trim() == "true" {
+                    Ok(TrustLevel::Trusted)
+                } else {
+                    Ok(TrustLevel::Undecided)
+                }
+            } else {
+                Ok(TrustLevel::Undecided)
+            }
         }
+    }
+    
+    /// Set the trust level for a device
+    pub fn set_trust_level(&self, jid: &str, device_id: DeviceId, level: TrustLevel) -> Result<()> {
+        let jid_dir = self.get_jid_path("identities", jid);
+        let device_dir = jid_dir.join(device_id.to_string());
+        fs::create_dir_all(&device_dir)?;
+        Self::write_text_file(&device_dir.join("trust_level"), level.as_str())?;
+        Ok(())
+    }
+    
+    /// Check if any device for a contact has been manually verified
+    pub fn has_verified_device(&self, jid: &str) -> Result<bool> {
+        let jid_dir = self.get_jid_path("identities", jid);
+        if !jid_dir.exists() {
+            return Ok(false);
+        }
+        for entry in fs::read_dir(&jid_dir)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                let trust_path = entry.path().join("trust_level");
+                if trust_path.exists() {
+                    let content = fs::read_to_string(&trust_path)?;
+                    if TrustLevel::from_str(content.trim()) == TrustLevel::Verified {
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+        Ok(false)
     }
     
     /// Set the trust status of a device identity
     pub fn set_device_trust(&self, jid: &str, device_id: DeviceId, trusted: bool) -> Result<()> {
-        let jid_dir = self.get_jid_path("identities", jid);
-        let device_dir = jid_dir.join(device_id.to_string());
-        
-        // Create directory if it doesn't exist
-        fs::create_dir_all(&device_dir)?;
-        
-        // Store trust status
-        Self::write_text_file(&device_dir.join("trusted"), &trusted.to_string())?;
-        
-        Ok(())
+        let level = if trusted { TrustLevel::Trusted } else { TrustLevel::Untrusted };
+        self.set_trust_level(jid, device_id, level)
     }
     
     /// Store a key bundle

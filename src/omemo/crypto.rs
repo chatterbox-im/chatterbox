@@ -4,15 +4,20 @@
 //! This module provides the cryptographic operations needed for OMEMO encryption.
 
 use aes_gcm::{
-    aead::{Aead, KeyInit},
+    aead::{Aead, KeyInit, Payload},
     Aes128Gcm, Nonce,
 };
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use rand::{rngs::OsRng, RngCore};
-use sha2::Sha256;
+use sha2::{Sha256, Sha512, Digest};
 use thiserror::Error;
 use x25519_dalek::{PublicKey, StaticSecret};
+use curve25519_dalek::{
+    edwards::CompressedEdwardsY,
+    montgomery::MontgomeryPoint,
+    scalar::Scalar,
+};
 use log::{trace, error};
 use hex;
 
@@ -96,16 +101,13 @@ pub fn generate_gcm_iv() -> Vec<u8> {
 /// Encrypt data using AES-128-GCM (Dino-compatible format)
 /// Returns ciphertext + auth_tag combined
 pub fn aes_gcm_encrypt(plaintext: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>, CryptoError> {
-    use aes_gcm::Aes128Gcm; // Use AES-128 for Dino compatibility
-    
-    // Add detailed debugging for AES-GCM encryption to match decryption analysis
-    error!("AES-GCM encrypt input analysis:");
-    error!("  Key length: {} bytes", key.len());
-    error!("  Key (hex): {}", hex::encode(key));
-    error!("  IV length: {} bytes", iv.len());
-    error!("  IV (hex): {}", hex::encode(iv));
-    error!("  Plaintext length: {} bytes", plaintext.len());
-    error!("  Plaintext (hex): {}", hex::encode(plaintext));
+    aes_gcm_encrypt_with_ad(plaintext, key, iv, &[])
+}
+
+/// Encrypt data using AES-128-GCM with Associated Data (AD)
+/// AD is authenticated but not encrypted — binds ciphertext to session context.
+pub fn aes_gcm_encrypt_with_ad(plaintext: &[u8], key: &[u8], iv: &[u8], ad: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    use aes_gcm::Aes128Gcm;
     
     if key.len() != AES_GCM_KEY_SIZE {
         return Err(CryptoError::InvalidInputError(format!(
@@ -126,12 +128,9 @@ pub fn aes_gcm_encrypt(plaintext: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8
     
     let nonce = Nonce::from_slice(iv);
     
-    let ciphertext = cipher.encrypt(nonce, plaintext)
+    let payload = Payload { msg: plaintext, aad: ad };
+    let ciphertext = cipher.encrypt(nonce, payload)
         .map_err(|e| CryptoError::AesGcmError(format!("AES-128-GCM encryption failed: {}", e)))?;
-    
-    error!("AES-GCM encrypt output analysis:");
-    error!("  Ciphertext+tag length: {} bytes", ciphertext.len());
-    error!("  Ciphertext+tag (hex): {}", hex::encode(&ciphertext));
     
     trace!("AES-128-GCM encryption successful: {} bytes plaintext -> {} bytes ciphertext+tag", 
         plaintext.len(), ciphertext.len());
@@ -142,16 +141,12 @@ pub fn aes_gcm_encrypt(plaintext: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8
 /// Decrypt data using AES-128-GCM (Dino-compatible format)
 /// Expects ciphertext + auth_tag combined
 pub fn aes_gcm_decrypt(ciphertext: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>, CryptoError> {
-    use aes_gcm::Aes128Gcm; // Use AES-128 for Dino compatibility
-    
-    // Add detailed debugging for AES-GCM decryption failure analysis
-    error!("AES-GCM decrypt input analysis:");
-    error!("  Key length: {} bytes", key.len());
-    error!("  Key (hex): {}", hex::encode(key));
-    error!("  IV length: {} bytes", iv.len());
-    error!("  IV (hex): {}", hex::encode(iv));
-    error!("  Ciphertext+tag length: {} bytes", ciphertext.len());
-    error!("  Ciphertext+tag (hex): {}", hex::encode(ciphertext));
+    aes_gcm_decrypt_with_ad(ciphertext, key, iv, &[])
+}
+
+/// Decrypt data using AES-128-GCM with Associated Data (AD)
+pub fn aes_gcm_decrypt_with_ad(ciphertext: &[u8], key: &[u8], iv: &[u8], ad: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    use aes_gcm::Aes128Gcm;
     
     if key.len() != AES_GCM_KEY_SIZE {
         return Err(CryptoError::InvalidInputError(format!(
@@ -172,9 +167,9 @@ pub fn aes_gcm_decrypt(ciphertext: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u
     
     let nonce = Nonce::from_slice(iv);
     
-    let plaintext = cipher.decrypt(nonce, ciphertext)
+    let payload = Payload { msg: ciphertext, aad: ad };
+    let plaintext = cipher.decrypt(nonce, payload)
         .map_err(|e| {
-            error!("AES-128-GCM decryption failed with detailed input logged above");
             CryptoError::AesGcmError(format!("AES-128-GCM decryption failed: {}", e))
         })?;
     
@@ -182,6 +177,58 @@ pub fn aes_gcm_decrypt(ciphertext: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u
         ciphertext.len(), plaintext.len());
     
     Ok(plaintext)
+}
+
+/// Encrypt using AES-256-CBC with PKCS7 padding (Signal protocol inner cipher)
+pub fn aes_256_cbc_encrypt(key: &[u8], iv: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    use cbc::cipher::{BlockEncryptMut, KeyIvInit, block_padding::Pkcs7};
+    type Aes256CbcEnc = cbc::Encryptor<aes::Aes256>;
+
+    if key.len() != 32 {
+        return Err(CryptoError::InvalidInputError(format!(
+            "Invalid key size for AES-256-CBC: {} (expected 32)", key.len()
+        )));
+    }
+    if iv.len() != 16 {
+        return Err(CryptoError::InvalidIV(format!(
+            "Invalid IV size for AES-256-CBC: {} (expected 16)", iv.len()
+        )));
+    }
+
+    let cipher = Aes256CbcEnc::new_from_slices(key, iv)
+        .map_err(|e| CryptoError::AesGcmError(format!("AES-256-CBC init failed: {}", e)))?;
+
+    // Allocate buffer with space for padding (up to one extra block of 16 bytes)
+    let mut buf = vec![0u8; plaintext.len() + 16];
+    buf[..plaintext.len()].copy_from_slice(plaintext);
+    let ct = cipher.encrypt_padded_mut::<Pkcs7>(&mut buf, plaintext.len())
+        .map_err(|_| CryptoError::AesGcmError("AES-256-CBC padding failed".to_string()))?;
+    Ok(ct.to_vec())
+}
+
+/// Decrypt using AES-256-CBC with PKCS7 padding (Signal protocol inner cipher)
+pub fn aes_256_cbc_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    use cbc::cipher::{BlockDecryptMut, KeyIvInit, block_padding::Pkcs7};
+    type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
+
+    if key.len() != 32 {
+        return Err(CryptoError::InvalidInputError(format!(
+            "Invalid key size for AES-256-CBC: {} (expected 32)", key.len()
+        )));
+    }
+    if iv.len() != 16 {
+        return Err(CryptoError::InvalidIV(format!(
+            "Invalid IV size for AES-256-CBC: {} (expected 16)", iv.len()
+        )));
+    }
+
+    let cipher = Aes256CbcDec::new_from_slices(key, iv)
+        .map_err(|e| CryptoError::AesGcmError(format!("AES-256-CBC init failed: {}", e)))?;
+
+    let mut buf = ciphertext.to_vec();
+    let pt = cipher.decrypt_padded_mut::<Pkcs7>(&mut buf)
+        .map_err(|_| CryptoError::AesGcmError("AES-256-CBC decryption/unpadding failed".to_string()))?;
+    Ok(pt.to_vec())
 }
 
 /// Validate an OMEMO initialization vector (IV)
@@ -350,7 +397,6 @@ pub fn sha256_hash(data: &[u8]) -> Vec<u8> {
     hasher.update(data);
     let hash = hasher.finalize().to_vec();
     
-    //debug!("SHA-256 hash computation successful in {:?}", duration);
     trace!("Hash result: {}", hex::encode(&hash));
     hash
 }
@@ -544,6 +590,143 @@ pub fn format_fingerprint(fingerprint: &[u8]) -> String {
     chunks.join(":")
 }
 
+/// XEdDSA: Sign a message using an X25519 private key.
+///
+/// This implements the XEdDSA signing algorithm used by Signal/OMEMO:
+/// 1. Clamp the X25519 private key to get the scalar
+/// 2. Compute the Edwards public key from the scalar
+/// 3. If the Edwards Y coordinate's sign bit is set, negate the scalar
+/// 4. Sign using Ed25519 with the adjusted scalar
+///
+/// This produces signatures compatible with libsignal's Curve25519.calculateSignature().
+pub fn xeddsa_sign(x25519_private_key: &[u8], message: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    if x25519_private_key.len() != 32 {
+        return Err(CryptoError::InvalidInputError(
+            format!("X25519 private key must be 32 bytes, got {}", x25519_private_key.len())
+        ));
+    }
+
+    // Step 1: Clamp the private key (X25519 clamping)
+    let mut clamped = [0u8; 32];
+    clamped.copy_from_slice(x25519_private_key);
+    clamped[0] &= 248;
+    clamped[31] &= 127;
+    clamped[31] |= 64;
+
+    // Step 2: Convert to a Scalar
+    let mut scalar = Scalar::from_bytes_mod_order(clamped);
+
+    // Step 3: Compute the Edwards public key
+    let edwards_point = curve25519_dalek::constants::ED25519_BASEPOINT_TABLE * &scalar;
+    let compressed = edwards_point.compress();
+    let edwards_bytes = compressed.to_bytes();
+
+    // Step 4: If the sign bit (high bit of last byte) is set, negate the scalar
+    if edwards_bytes[31] & 0x80 != 0 {
+        scalar = -scalar;
+    }
+
+    // Step 5: Compute the public key with positive sign
+    let public_point = curve25519_dalek::constants::ED25519_BASEPOINT_TABLE * &scalar;
+    let public_bytes = public_point.compress().to_bytes();
+
+    // Step 6: Generate a random nonce (64 bytes) for deterministic signing
+    let mut random = [0u8; 64];
+    OsRng.fill_bytes(&mut random);
+
+    // Step 7: Compute nonce: SHA-512(random || message)
+    let mut nonce_hash = Sha512::new();
+    nonce_hash.update(&random);
+    nonce_hash.update(message);
+    let nonce_digest = nonce_hash.finalize();
+    let nonce_scalar = Scalar::from_bytes_mod_order_wide(&nonce_digest.into());
+
+    // Step 8: R = nonce_scalar * B
+    let r_point = curve25519_dalek::constants::ED25519_BASEPOINT_TABLE * &nonce_scalar;
+    let r_bytes = r_point.compress().to_bytes();
+
+    // Step 9: Compute challenge: SHA-512(R || public_key || message)
+    let mut challenge_hash = Sha512::new();
+    challenge_hash.update(&r_bytes);
+    challenge_hash.update(&public_bytes);
+    challenge_hash.update(message);
+    let challenge_digest = challenge_hash.finalize();
+    let challenge = Scalar::from_bytes_mod_order_wide(&challenge_digest.into());
+
+    // Step 10: s = nonce_scalar + challenge * scalar
+    let s = nonce_scalar + challenge * scalar;
+
+    // Step 11: Signature = R || s
+    let mut signature = [0u8; 64];
+    signature[..32].copy_from_slice(&r_bytes);
+    signature[32..].copy_from_slice(&s.to_bytes());
+
+    Ok(signature.to_vec())
+}
+
+/// XEdDSA: Verify a signature using an X25519 public key (Montgomery point).
+///
+/// Converts the Montgomery public key to Edwards form and verifies using Ed25519.
+pub fn xeddsa_verify(x25519_public_key: &[u8], message: &[u8], signature: &[u8]) -> Result<bool, CryptoError> {
+    if x25519_public_key.len() != 32 {
+        return Err(CryptoError::InvalidInputError(
+            format!("X25519 public key must be 32 bytes, got {}", x25519_public_key.len())
+        ));
+    }
+    if signature.len() != 64 {
+        return Err(CryptoError::InvalidInputError(
+            format!("Signature must be 64 bytes, got {}", signature.len())
+        ));
+    }
+
+    // Step 1: Convert Montgomery public key to Edwards form
+    let montgomery = MontgomeryPoint(*<&[u8; 32]>::try_from(x25519_public_key).unwrap());
+
+    // to_edwards returns the Edwards point with positive sign (sign=0)
+    let edwards_point = match montgomery.to_edwards(0) {
+        Some(point) => point,
+        None => {
+            return Err(CryptoError::InvalidInputError(
+                "Failed to convert Montgomery point to Edwards".to_string()
+            ));
+        }
+    };
+
+    let public_bytes = edwards_point.compress().to_bytes();
+
+    // Step 2: Extract R and s from signature
+    let r_bytes: [u8; 32] = signature[..32].try_into().unwrap();
+    let s_bytes: [u8; 32] = signature[32..].try_into().unwrap();
+
+    // Decompress R
+    let r_compressed = CompressedEdwardsY(r_bytes);
+    let r_point = match r_compressed.decompress() {
+        Some(point) => point,
+        None => return Ok(false),
+    };
+
+    // Convert s to scalar
+    let s = match Scalar::from_canonical_bytes(s_bytes).into() {
+        Some(s) => s,
+        None => return Ok(false),
+    };
+
+    // Step 3: Compute challenge: SHA-512(R || public_key || message)
+    let mut challenge_hash = Sha512::new();
+    challenge_hash.update(&r_bytes);
+    challenge_hash.update(&public_bytes);
+    challenge_hash.update(message);
+    let challenge_digest = challenge_hash.finalize();
+    let challenge = Scalar::from_bytes_mod_order_wide(&challenge_digest.into());
+
+    // Step 4: Verify: s*B == R + challenge*A
+    let sb = curve25519_dalek::constants::ED25519_BASEPOINT_TABLE * &s;
+    let ca = edwards_point * challenge;
+    let expected = r_point + ca;
+
+    Ok(sb == expected)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -674,6 +857,30 @@ mod tests {
         assert!(secure_compare(&data1, &data2), "Identical data should compare as equal");
         assert!(!secure_compare(&data1, &data3), "Different data should compare as not equal");
         assert!(!secure_compare(&data1, &data4), "Different length data should compare as not equal");
+    }
+
+    #[test]
+    fn test_xeddsa_sign_verify_roundtrip() {
+        // Generate an X25519 key pair
+        let (private_key, public_key) = generate_x25519_keypair().unwrap();
+        let message = b"test message for XEdDSA";
+
+        // Sign with private key
+        let signature = xeddsa_sign(&private_key, message).unwrap();
+        assert_eq!(signature.len(), 64);
+
+        // Verify with public key
+        let valid = xeddsa_verify(&public_key, message, &signature).unwrap();
+        assert!(valid, "XEdDSA signature should verify with matching public key");
+
+        // Verify fails with wrong message
+        let valid = xeddsa_verify(&public_key, b"wrong message", &signature).unwrap();
+        assert!(!valid, "XEdDSA signature should not verify with wrong message");
+
+        // Verify fails with wrong key
+        let (_, other_public) = generate_x25519_keypair().unwrap();
+        let valid = xeddsa_verify(&other_public, message, &signature).unwrap();
+        assert!(!valid, "XEdDSA signature should not verify with wrong key");
     }
 
 

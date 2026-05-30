@@ -5,9 +5,8 @@
 
 use std::collections::HashMap;
 use thiserror::Error;
-use log::error;
+use log::debug;
 use anyhow::Result;
-use hex;
 
 use crate::omemo::protocol::{RatchetState, DoubleRatchet, DoubleRatchetError, KeyPair};
 use crate::omemo::device_id::DeviceId;
@@ -148,20 +147,7 @@ impl OmemoSession {
         ephemeral_key: Vec<u8>,
         local_device_id: DeviceId,
     ) -> Result<Self, SessionError> {
-        log::error!("=== OMEMO SESSION INITIATOR CREATION START ===");
-        log::error!("Session initiator: remote_jid: {}", remote_jid);
-        log::error!("Session initiator: remote_device_id: {}", remote_device_id);
-        log::error!("Session initiator: local_device_id: {}", local_device_id);
-        log::error!("Session initiator: local_identity_key_pair.public_key: {}", hex::encode(&local_identity_key_pair.public_key));
-        log::error!("Session initiator: local_identity_key_pair.private_key: {}", hex::encode(&local_identity_key_pair.private_key));
-        log::error!("Session initiator: remote_identity_key: {}", hex::encode(&remote_identity_key));
-        log::error!("Session initiator: remote_signed_prekey: {}", hex::encode(&remote_signed_prekey));
-        log::error!("Session initiator: ephemeral_key: {}", hex::encode(&ephemeral_key));
-        if let Some(ref otpk) = remote_one_time_prekey {
-            log::error!("Session initiator: remote_one_time_prekey: {}", hex::encode(otpk));
-        } else {
-            log::error!("Session initiator: remote_one_time_prekey: None");
-        }
+        debug!("Creating initiator session: remote_jid={}, remote_device_id={}", remote_jid, remote_device_id);
         
         let ratchet_state = DoubleRatchet::new_session_initiator_with_ephemeral(
             local_identity_key_pair,
@@ -173,9 +159,6 @@ impl OmemoSession {
             remote_device_id,
             remote_jid.clone(),
         )?;
-        
-        log::error!("Session initiator: Final ratchet_state.root_key: {}", hex::encode(&ratchet_state.root_key));
-        log::error!("=== OMEMO SESSION INITIATOR CREATION END ===");
         
         Ok(Self {
             remote_jid,
@@ -196,22 +179,7 @@ impl OmemoSession {
         remote_ephemeral_key: Vec<u8>,
         local_device_id: DeviceId,
     ) -> Result<Self, SessionError> {
-        log::error!("=== OMEMO SESSION RECIPIENT CREATION START ===");
-        log::error!("Session recipient: remote_jid: {}", remote_jid);
-        log::error!("Session recipient: remote_device_id: {}", remote_device_id);
-        log::error!("Session recipient: local_device_id: {}", local_device_id);
-        log::error!("Session recipient: local_identity_key_pair.public_key: {}", hex::encode(&local_identity_key_pair.public_key));
-        log::error!("Session recipient: local_identity_key_pair.private_key: {}", hex::encode(&local_identity_key_pair.private_key));
-        log::error!("Session recipient: remote_identity_key: {}", hex::encode(&remote_identity_key));
-        log::error!("Session recipient: local_signed_prekey_pair.public_key: {}", hex::encode(&local_signed_prekey_pair.public_key));
-        log::error!("Session recipient: local_signed_prekey_pair.private_key: {}", hex::encode(&local_signed_prekey_pair.private_key));
-        log::error!("Session recipient: remote_ephemeral_key: {}", hex::encode(&remote_ephemeral_key));
-        if let Some(ref otpk) = local_one_time_prekey_pair {
-            log::error!("Session recipient: local_one_time_prekey_pair.public_key: {}", hex::encode(&otpk.public_key));
-            log::error!("Session recipient: local_one_time_prekey_pair.private_key: {}", hex::encode(&otpk.private_key));
-        } else {
-            log::error!("Session recipient: local_one_time_prekey_pair: None");
-        }
+        debug!("Creating recipient session: remote_jid={}, remote_device_id={}", remote_jid, remote_device_id);
         
         let ratchet_state = DoubleRatchet::new_session_recipient(
             local_identity_key_pair,
@@ -223,9 +191,6 @@ impl OmemoSession {
             remote_device_id,
             remote_jid.clone(),
         )?;
-        
-        log::error!("Session recipient: Final ratchet_state.root_key: {}", hex::encode(&ratchet_state.root_key));
-        log::error!("=== OMEMO SESSION RECIPIENT CREATION END ===");
         
         Ok(Self {
             remote_jid,
@@ -359,33 +324,28 @@ impl OmemoSession {
             ));
         }
 
-        // First encrypt the key to get the inner SignalMessage bytes
+        // Encrypt the key — this produces a fully-serialized SignalMessage with correct MAC
         let inner_bytes = DoubleRatchet::encrypt_key(&mut self.ratchet_state, key)?;
 
-        // Parse the inner SignalMessage we just created
-        let inner_msg = crate::omemo::wire::SignalMessage::deserialize(&inner_bytes)
-            .ok_or_else(|| SessionError::SerializationError(
-                "Failed to parse inner SignalMessage for PreKey wrapping".to_string()
-            ))?;
-
-        // Wrap in PreKeySignalMessage
+        // Wrap in PreKeySignalMessage, embedding the raw inner bytes directly
+        // (no re-serialization, preserving the original MAC)
         let prekey_msg = crate::omemo::wire::PreKeySignalMessage {
             registration_id,
             pre_key_id,
             signed_pre_key_id,
             base_key: base_key.to_vec(),
             identity_key: identity_key.to_vec(),
-            message: inner_msg,
+            message: crate::omemo::wire::SignalMessage {
+                ratchet_key: vec![],
+                counter: 0,
+                previous_counter: 0,
+                ciphertext: vec![],
+                mac: vec![],
+            },
+            raw_message_bytes: inner_bytes.clone(),
         };
 
-        // Use the sending chain key as MAC key (same as in encrypt_key)
-        let mac_key = crate::omemo::crypto::kdf(
-            &self.ratchet_state.send_chain_key,
-            &self.ratchet_state.root_key,
-            b"mac",
-        );
-        let result = prekey_msg.serialize(&mac_key);
-
+        let result = prekey_msg.serialize_with_inner_bytes(&inner_bytes);
         Ok(result)
     }
     

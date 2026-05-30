@@ -279,8 +279,8 @@ fn get_identity_key_file_path() -> Result<PathBuf> {
 /// According to XEP-0384, the Identity Key is a long-term key used for authentication
 /// and initial key agreement.
 pub fn generate_identity_key() -> Result<KeyPair> {
-    // Generate new X25519 key pair for Identity Key
-    let (public_key, private_key) = crypto::generate_x25519_keypair()?;
+    // generate_x25519_keypair returns (private_key, public_key)
+    let (private_key, public_key) = crypto::generate_x25519_keypair()?;
     
     Ok(KeyPair {
         public_key,

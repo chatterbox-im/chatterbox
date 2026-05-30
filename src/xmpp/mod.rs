@@ -1727,16 +1727,45 @@ impl XMPPClient {
     /// Get device IDs for a user
     pub async fn get_device_ids_for_user(&self, jid: &str) -> Result<Vec<DeviceId>> {
         if let Some(omemo_manager) = &self.omemo_manager {
-            // First try to request the device list from the server
-            if let Err(e) = self.request_omemo_devicelist(jid).await {
-                warn!("Failed to request device list from server, using cached data: {}", e);
-            }
-            
-            // Then get the device IDs from the manager
-            let manager = omemo_manager.lock().await;
-            match manager.get_device_ids_for_test(jid).await {
-                Ok(devices) => Ok(devices),
-                Err(e) => Err(anyhow!("Failed to get device IDs: {}", e))
+            // Normalize to bare JID
+            let bare_jid = if jid.contains('/') {
+                jid.split('/').next().unwrap_or(jid)
+            } else {
+                jid
+            };
+
+            // Try to acquire the lock without blocking; if contended, read from storage directly
+            match omemo_manager.try_lock() {
+                Ok(manager) => {
+                    match manager.get_device_ids_for_test(bare_jid).await {
+                        Ok(devices) => Ok(devices),
+                        Err(e) => Err(anyhow!("Failed to get device IDs: {}", e))
+                    }
+                },
+                Err(_) => {
+                    // Manager is busy (held by encryption/decryption operations).
+                    // Read cached device list directly from storage without waiting.
+                    info!("OMEMO manager lock contended, reading device list from cache for {}", bare_jid);
+                    // Brief wait then try to get just the storage reference
+                    let storage = {
+                        // Use a short timeout to get the storage Arc
+                        match tokio::time::timeout(
+                            std::time::Duration::from_secs(2),
+                            omemo_manager.lock()
+                        ).await {
+                            Ok(manager) => manager.get_storage(),
+                            Err(_) => {
+                                return Err(anyhow!("OMEMO manager busy, could not read device list"));
+                            }
+                        }
+                    };
+                    let storage_guard = storage.lock().await;
+                    match storage_guard.load_device_list(bare_jid) {
+                        Ok(entry) if !entry.device_ids.is_empty() => Ok(entry.device_ids),
+                        Ok(_) => Ok(vec![]),
+                        Err(e) => Err(anyhow!("No cached device list for {}: {}", bare_jid, e))
+                    }
+                }
             }
         } else {
             Err(anyhow!("OMEMO manager not initialized"))
