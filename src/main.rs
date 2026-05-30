@@ -17,8 +17,6 @@ use crate::{
 // Import the XMPP client and types from our new module structure
 use chatterbox::{xmpp::{XMPPClient, chat_states::TypingStatus}, models::{Message, DeliveryStatus}};
 use chatterbox::xmpp::message_archive::MAMQueryOptions;
-// Import ServiceDiscovery for XEP-0030
-use chatterbox::xmpp::discovery::ServiceDiscovery;
 
 /// Command line arguments for Sermo
 #[derive(Parser, Debug)]

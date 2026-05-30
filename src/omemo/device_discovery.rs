@@ -215,7 +215,7 @@ pub async fn fetch_device_list_with_fallbacks(jid: &str) -> Result<Vec<DeviceId>
     
     let client_guard = client.lock().await;
     let mut combined_devices = Vec::new();
-    let mut any_success = false;
+    let any_success = false;
     
     // Try each namespace
     for namespace in &OMEMO_NAMESPACES {
@@ -250,8 +250,6 @@ pub async fn fetch_device_list_with_fallbacks(jid: &str) -> Result<Vec<DeviceId>
                                     combined_devices.push(device_id);
                                 }
                             }
-                            
-                            any_success = true;
                             
                             // Return immediately when we find devices to avoid unnecessary delays
                             drop(client_guard);
@@ -356,7 +354,7 @@ pub async fn fetch_device_list_with_fallbacks(jid: &str) -> Result<Vec<DeviceId>
 /// Try to fetch bundles for common device IDs as a last resort
 async fn try_fetch_bundle_for_common_device_ids(
     jid: &str, 
-    client_guard: &crate::xmpp::XMPPClient
+    _client_guard: &crate::xmpp::XMPPClient
 ) -> Result<Vec<DeviceId>, OmemoError> {
     let common_device_ids = [1, 2, 3, 4, 5]; // Most common device IDs
     let mut found_devices = Vec::new();

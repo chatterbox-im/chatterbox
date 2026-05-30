@@ -1,0 +1,486 @@
+// src/omemo/encrypt.rs
+//! OMEMO message encryption
+
+use log::{debug, error, info, warn};
+use std::collections::{HashMap, HashSet};
+use tokio::time::{timeout, Duration};
+
+use crate::omemo::crypto;
+use crate::omemo::device_id::DeviceId;
+use crate::omemo::protocol::{self, OmemoMessage, DeviceIdentity};
+use crate::omemo::session::{self, OmemoSession};
+use crate::omemo::{OmemoError, OmemoManager, OMEMO_NAMESPACE, EncryptionVerificationError};
+
+impl OmemoManager {
+    /// Get or create a session with a remote device (with consistent initiator/recipient roles)
+    pub async fn get_or_create_session(
+        &mut self,
+        remote_jid: &str,
+        remote_device_id: u32
+    ) -> Result<&mut OmemoSession, OmemoError> {
+        // Normalize the JID to bare JID for consistent session lookup
+        let bare_jid = Self::normalize_jid_to_bare(remote_jid);
+        let key = (bare_jid.clone(), remote_device_id);
+        
+        info!("SESSION_DEBUG: get_or_create_session called for {}:{}", bare_jid, remote_device_id);
+
+        // Check if this device is marked for session rebuild due to previous reset
+        let needs_rebuild = self.pending_session_rebuilds.contains(&key);
+        if needs_rebuild {
+            info!("SESSION_DEBUG: Forcing fresh session rebuild for {}:{} after previous reset", bare_jid, remote_device_id);
+            // Remove any existing session
+            self.sessions.remove(&key);
+            // Remove from rebuild set since we're rebuilding now
+            self.pending_session_rebuilds.remove(&key);
+        }
+
+        // Check if we already have a session (early return, no borrow held)
+        let session_exists_and_initialized = self.sessions.get(&key).map(|s| s.is_initialized()).unwrap_or(false);
+        if session_exists_and_initialized && !needs_rebuild {
+            info!("SESSION_DEBUG: Reusing existing session for {}:{}", bare_jid, remote_device_id);
+            return self.sessions.get_mut(&key).ok_or_else(|| OmemoError::SessionError(
+                session::SessionError::InvalidStateError("Session not found after check".to_string())
+            ));
+        }
+
+        info!("SESSION_DEBUG: Creating new session for {}:{} (exists: {}, needs_rebuild: {})", 
+            bare_jid, remote_device_id, session_exists_and_initialized, needs_rebuild);
+
+        info!("SESSION_DEBUG: Creating initiator session with {}:{} (our device: {}, their device: {})", 
+            bare_jid, remote_device_id, self.device_id, remote_device_id
+        );
+
+        // Gather all data and perform async calls BEFORE mutably borrowing self
+        let our_identity_key_pair = match &self.key_bundle {
+            Some(bundle) => bundle.identity_key_pair.clone(),
+            None => return Err(OmemoError::SessionError(
+                session::SessionError::InvalidStateError("Key bundle not initialized".to_string())
+            )),
+        };
+        
+        info!("SESSION_DEBUG: Getting device identity for {}:{}", bare_jid, remote_device_id);
+        let remote_identity = self.get_device_identity(&bare_jid, remote_device_id).await?;
+        info!("SESSION_DEBUG: Successfully retrieved device identity for {}:{}", bare_jid, remote_device_id);
+
+        // Verify the signed prekey signature before using the bundle
+        match protocol::X3DHProtocol::verify_pre_key(
+            &remote_identity.identity_key,
+            &remote_identity.signed_pre_key.public_key,
+            &remote_identity.signed_pre_key.signature,
+        ) {
+            Ok(true) => {
+                debug!("Signed prekey signature verified for {}:{}", bare_jid, remote_device_id);
+            }
+            Ok(false) => {
+                warn!("Signed prekey signature INVALID for {}:{} - possible MITM", bare_jid, remote_device_id);
+                return Err(OmemoError::ProtocolError(format!(
+                    "Signed prekey signature verification failed for {}:{}", bare_jid, remote_device_id
+                )));
+            }
+            Err(e) => {
+                warn!("Signed prekey signature verification error for {}:{}: {}", bare_jid, remote_device_id, e);
+                return Err(OmemoError::ProtocolError(format!(
+                    "Signed prekey signature verification error for {}:{}: {}", bare_jid, remote_device_id, e
+                )));
+            }
+        }
+
+        // In OMEMO, when we want to SEND to a device, we always act as X3DH initiator
+        // (fetch their bundle and create a session). Recipient sessions are only created
+        // when we RECEIVE a PreKeyMessage from them.
+        // Generate a random ephemeral key pair for X3DH
+        let ephemeral_key_pair = protocol::X3DHProtocol::generate_key_pair()
+            .map_err(|e| OmemoError::CryptoError(crypto::CryptoError::KdfError(e.to_string())))?;
+        
+        // Store the ephemeral public key for this device to include in PreKey messages
+        let device_key = (bare_jid.clone(), remote_device_id);
+        self.prekey_ephemeral_keys.insert(device_key, ephemeral_key_pair.public_key.clone());
+        
+        let session = OmemoSession::new_initiator_with_ephemeral(
+            bare_jid.clone(),
+            remote_device_id,
+            our_identity_key_pair,
+            remote_identity.identity_key,
+            remote_identity.signed_pre_key.public_key,
+            if remote_identity.pre_keys.is_empty() {
+                None
+            } else {
+                Some(remote_identity.pre_keys[0].public_key.clone())
+            },
+            ephemeral_key_pair.private_key,
+            self.device_id
+        )?;
+        
+        let ratchet_state = session.ratchet_state.clone();
+
+        // Now, after all awaits, mutably borrow self and insert
+        self.sessions.insert(key.clone(), session);
+        self.store_session_state(&bare_jid, remote_device_id, &ratchet_state).await?;
+        return self.sessions.get_mut(&key).ok_or_else(|| OmemoError::SessionError(
+                session::SessionError::InvalidStateError("Session not found after check".to_string())
+            ));
+    }
+
+    /// Get a device identity from storage or fetch it
+    pub(crate) async fn get_device_identity(&self, remote_jid: &str, device_id: DeviceId) -> Result<DeviceIdentity, OmemoError> {
+        debug!("Getting device identity for {}:{}", remote_jid, device_id);
+        
+        // First try to get from storage
+        let mut storage_guard = self.storage.lock().await;
+        if let Ok(identity) = storage_guard.load_device_identity(remote_jid, device_id) {
+            debug!("Found device identity in storage for {}:{}", remote_jid, device_id);
+            return Ok(identity);
+        }
+        drop(storage_guard);
+        
+        // If not in storage, try to fetch it from the server
+        info!("Device identity not found in storage for {}:{}, fetching from server", remote_jid, device_id);
+        
+        let bundle_node = format!("{}.bundles:{}", OMEMO_NAMESPACE, device_id);
+        
+        // Make the request
+        let response = match crate::xmpp::omemo_integration::request_pubsub_items(remote_jid, &bundle_node).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                warn!("Failed to fetch device bundle for {}:{}: {}", remote_jid, device_id, e);
+                return Err(OmemoError::MissingDataError(format!("Failed to fetch device bundle: {}", e)));
+            }
+        };
+        
+        // Parse the response to extract the device bundle
+        let identity = self.parse_device_bundle_response(&response, device_id)?;
+        
+        // Store the identity
+        let mut storage_guard = self.storage.lock().await;
+        storage_guard.save_device_identity(remote_jid, &identity, false)
+            .map_err(|e| OmemoError::StorageError(format!("Failed to store device identity: {}", e)))?;
+        
+        Ok(identity)
+    }
+
+    /// Encrypt a message for a recipient
+    pub async fn encrypt_message(&mut self, recipient: &str, plaintext: &str) -> Result<OmemoMessage, OmemoError> {
+        debug!("encrypt_message called for recipient '{}'", recipient);
+        info!("Encrypting message for {}", recipient);
+        
+        // Get the device list for the recipient with timeout protection
+        let device_discovery_timeout = Duration::from_secs(15);
+        info!("Forcing fresh device list fetch for {} (NO CACHE FALLBACK)", recipient);
+        let recipient_device_ids = match timeout(device_discovery_timeout, self.get_device_ids_with_force_refresh(recipient, true)).await {
+            Ok(Ok(devices)) => devices,
+            Ok(Err(e)) => {
+                error!("Fresh device list fetch failed for {}: {} - NO FALLBACK, failing fast", recipient, e);
+                return Err(e);
+            },
+            Err(_) => {
+                error!("Timeout while fetching fresh device list for {} - NO FALLBACK, failing fast", recipient);
+                return Err(OmemoError::TimeoutError("Device list fetch timeout".to_string()));
+            }
+        };
+        
+        info!("ENCRYPT_DEBUG: Recipient device discovery for {}: {:?}", recipient, recipient_device_ids);
+        
+        let final_recipient_device_ids = if recipient_device_ids.is_empty() {
+            error!("ENCRYPT_DEBUG: No devices found for recipient {}, trying fallback", recipient);
+            
+            // FALLBACK: Try to use known sessions as a source of device IDs
+            warn!("ENCRYPT_DEBUG: Falling back to known sessions for device discovery");
+            let fallback_devices: Vec<u32> = self.sessions.keys()
+                .filter(|(jid, _device_id)| {
+                    let recipient_bare = Self::normalize_jid_to_bare(recipient);
+                    *jid == recipient_bare
+                })
+                .map(|(_jid, device_id)| *device_id)
+                .collect();
+            
+            if !fallback_devices.is_empty() {
+                warn!("ENCRYPT_DEBUG: Found {} devices from known sessions: {:?}", fallback_devices.len(), fallback_devices);
+                fallback_devices
+            } else {
+                error!("ENCRYPT_DEBUG: No devices found even in fallback, cannot encrypt");
+                return Err(OmemoError::NoDeviceError(recipient.to_string()));
+            }
+        } else {
+            recipient_device_ids
+        };
+        
+        // Get our own device IDs (important for message carbons) with timeout
+        let local_username = self.local_jid.split('@').next().unwrap_or(&self.local_jid);
+        let local_domain = self.local_jid.split('@').nth(1).unwrap_or("");
+        let user_bare_jid = format!("{}@{}", local_username, local_domain);
+        info!("Forcing fresh device list fetch for own JID {} (NO CACHE FALLBACK)", user_bare_jid);
+        let own_device_ids = match timeout(device_discovery_timeout, self.get_device_ids_with_force_refresh(&user_bare_jid, true)).await {
+            Ok(Ok(devices)) => devices,
+            Ok(Err(e)) => {
+                warn!("Failed to get fresh own device list: {} - continuing with recipient devices only", e);
+                Vec::new()
+            },
+            Err(_) => {
+                warn!("Timeout while fetching fresh own device list - continuing with recipient devices only");
+                Vec::new()
+            }
+        };
+        
+        info!("ENCRYPT_DEBUG: Own device discovery for {}: {:?}", user_bare_jid, own_device_ids);
+        info!("ENCRYPT_DEBUG: Our current device ID: {}", self.device_id);
+        
+        info!("Found {} devices for recipient {}: {:?}", final_recipient_device_ids.len(), recipient, final_recipient_device_ids);
+        info!("Found {} own devices: {:?}", own_device_ids.len(), own_device_ids);
+        
+        // Generate a 16-byte AES key and 12-byte IV
+        let aes_key = crypto::generate_aes_key(); // 16 bytes
+        let iv = crypto::generate_gcm_iv(); // 12 bytes
+        debug!("Generated 16-byte AES-GCM key and 12-byte IV (Dino-compatible format)");
+        
+        // Encrypt the plaintext with AES-GCM
+        let gcm_result = crypto::aes_gcm_encrypt(plaintext.as_bytes(), &aes_key, &iv)
+            .map_err(OmemoError::CryptoError)?;
+        
+        if gcm_result.len() < 16 {
+            return Err(OmemoError::CryptoError(crypto::CryptoError::InvalidInputError(
+                "AES-GCM result too short".to_string()
+            )));
+        }
+        
+        let ciphertext_len = gcm_result.len() - 16;
+        let ciphertext = gcm_result[0..ciphertext_len].to_vec();
+        let auth_tag = gcm_result[ciphertext_len..].to_vec();
+        
+        debug!("Encrypted payload with AES-GCM: ciphertext {} bytes, auth tag {} bytes", 
+            ciphertext.len(), auth_tag.len());
+        
+        // For Dino compatibility, the message key is aes_key + auth_tag (32 bytes total)
+        let mut message_key = aes_key.clone();
+        message_key.extend_from_slice(&auth_tag);
+        debug!("Created message key: {} bytes (16-byte AES key + 16-byte auth tag)", message_key.len());
+        
+        // Now encrypt the random key for each recipient device and our own devices
+        let mut encrypted_keys = HashMap::new();
+        let mut all_devices = Vec::new();
+        
+        // Add recipient devices (filter out explicitly untrusted devices per BTBV)
+        let storage_guard = self.storage.lock().await;
+        for device_id in final_recipient_device_ids {
+            let trust_level = storage_guard.get_trust_level(recipient, device_id)
+                .unwrap_or(crate::omemo::storage::TrustLevel::Undecided);
+            if trust_level == crate::omemo::storage::TrustLevel::Untrusted {
+                warn!("ENCRYPT_DEBUG: Skipping untrusted device {}:{}", recipient, device_id);
+                continue;
+            }
+            if !all_devices.contains(&(recipient.to_string(), device_id)) {
+                all_devices.push((recipient.to_string(), device_id));
+                info!("ENCRYPT_DEBUG: Added recipient device {}:{}", recipient, device_id);
+            } else {
+                warn!("ENCRYPT_DEBUG: Duplicate recipient device {}:{} found", recipient, device_id);
+            }
+        }
+        drop(storage_guard);
+        
+        // Add our own devices (for message carbons), but exclude our current device
+        for device_id in own_device_ids {
+            if device_id == self.device_id {
+                debug!("ENCRYPT_DEBUG: Skipping our current device {} for message encryption", device_id);
+                continue;
+            }
+            
+            if !all_devices.contains(&(user_bare_jid.clone(), device_id)) {
+                all_devices.push((user_bare_jid.clone(), device_id));
+                info!("ENCRYPT_DEBUG: Added own device {}:{}", user_bare_jid, device_id);
+            } else {
+                warn!("ENCRYPT_DEBUG: Duplicate own device {}:{} found", user_bare_jid, device_id);
+            }
+        }
+        
+        info!("ENCRYPT_DEBUG: Final merged device list for encryption: {:?}", all_devices);
+        info!("ENCRYPT_DEBUG: Total devices to encrypt for: {}", all_devices.len());
+        for (jid, device_id) in &all_devices {
+            info!("ENCRYPT_DEBUG: Target device: {}:{}", jid, device_id);
+        }
+        
+        info!("Encrypting message key for {} total devices", all_devices.len());
+        
+        let device_list_copy = all_devices.clone();
+        
+        // Encrypt the message key for all devices
+        let overall_timeout = Duration::from_secs(15);
+        let mut prekey_device_set: HashSet<DeviceId> = HashSet::new();
+        let session_creation_future = async {
+            for (jid, device_id) in all_devices {
+                info!("ENCRYPT_DEBUG: Processing device {}:{}", jid, device_id);
+                let device_key = (jid.clone(), device_id);
+                
+                let needs_prekey = self.pending_prekey_sends.contains(&device_key);
+                info!("ENCRYPT_DEBUG: Device {}:{} needs_prekey: {}", jid, device_id, needs_prekey);
+                
+                // Skip ignored devices UNLESS they need a PreKey message
+                if !needs_prekey {
+                    if let Ok(true) = self.is_device_ignored(&jid, device_id).await {
+                        warn!("ENCRYPT_DEBUG: Skipping ignored device {}:{} (no PreKey needed)", jid, device_id);
+                        continue;
+                    }
+                }
+                
+                // Determine if this is a new session that needs PreKey wrapping
+                let has_ephemeral = self.prekey_ephemeral_keys.contains_key(&device_key);
+                let use_prekey_format = needs_prekey || has_ephemeral;
+                
+                // Capture PreKey parameters BEFORE the mutable session borrow
+                let prekey_params = if use_prekey_format {
+                    let identity_key = self.key_bundle.as_ref().unwrap().identity_key_pair.public_key.clone();
+                    let base_key = self.prekey_ephemeral_keys.get(&device_key).cloned();
+                    let signed_pre_key_id = self.key_bundle.as_ref().unwrap().signed_pre_key_id;
+                    let registration_id = self.device_id;
+                    let pre_key_id = self.key_bundle.as_ref().unwrap().one_time_pre_key_pairs.keys().next().copied();
+                    Some((identity_key, base_key, signed_pre_key_id, registration_id, pre_key_id))
+                } else {
+                    None
+                };
+                
+                let device_timeout = Duration::from_secs(8);
+                info!("ENCRYPT_DEBUG: Getting or creating session for {}:{}", jid, device_id);
+                let session_result = timeout(device_timeout, self.get_or_create_session(&jid, device_id)).await;
+                
+                match session_result {
+                    Ok(Ok(session)) => {
+                        info!("ENCRYPT_DEBUG: Successfully got session for {}:{}", jid, device_id);
+                        
+                        let encrypt_result = if let Some((identity_key, base_key_opt, signed_pre_key_id, registration_id, pre_key_id)) = prekey_params {
+                            let base_key = base_key_opt
+                                .unwrap_or_else(|| session.ratchet_state.ratchet_key_pair.public_key.clone());
+                            
+                            session.encrypt_key_prekey(
+                                &message_key,
+                                registration_id,
+                                pre_key_id,
+                                signed_pre_key_id,
+                                &base_key,
+                                &identity_key,
+                            )
+                        } else {
+                            session.encrypt_key(&message_key)
+                        };
+                        
+                        match encrypt_result {
+                            Ok(encrypted_key) => {
+                                encrypted_keys.insert(device_id, encrypted_key);
+                                if use_prekey_format {
+                                    prekey_device_set.insert(device_id);
+                                }
+                                info!("ENCRYPT_DEBUG: Successfully encrypted message key for {}:{} (prekey={})", jid, device_id, use_prekey_format);
+                                
+                                if needs_prekey {
+                                    self.pending_prekey_sends.remove(&device_key);
+                                    info!("ENCRYPT_DEBUG: Sent PreKey message to {}:{}, removing from pending list", jid, device_id);
+                                }
+                            },
+                            Err(e) => {
+                                error!("ENCRYPT_DEBUG: Failed to encrypt message key for {}:{}: {}", jid, device_id, e);
+                            }
+                        }
+                    },
+                    Ok(Err(e)) => {
+                        error!("ENCRYPT_DEBUG: Failed to get or create session with {}:{}: {}", jid, device_id, e);
+                    },
+                    Err(_) => {
+                        error!("ENCRYPT_DEBUG: Timeout getting session with {}:{}, skipping device", jid, device_id);
+                    }
+                }
+            }
+        };
+        
+        if let Err(_) = timeout(overall_timeout, session_creation_future).await {
+            warn!("Overall timeout while creating sessions for message encryption");
+        }
+        
+        info!("ENCRYPT_DEBUG: Message encrypted successfully for {} devices", encrypted_keys.len());
+        info!("ENCRYPT_DEBUG: Final encrypted_keys map contains device IDs: {:?}", encrypted_keys.keys().collect::<Vec<_>>());
+        
+        let has_prekey_devices = !prekey_device_set.is_empty();
+        
+        let ephemeral_key = if has_prekey_devices {
+            device_list_copy.iter()
+                .find_map(|(jid, device_id)| {
+                    let device_key = (jid.clone(), *device_id);
+                    self.prekey_ephemeral_keys.get(&device_key).cloned()
+                })
+        } else {
+            None
+        };
+        
+        // Create the complete OMEMO message
+        let message = OmemoMessage {
+            sender_device_id: self.device_id,
+            ratchet_key: self.key_bundle.as_ref().unwrap().signed_pre_key_pair.public_key.clone(),
+            previous_counter: 0,
+            counter: 0,
+            ciphertext,
+            mac: vec![],
+            iv: iv.to_vec(),
+            encrypted_keys,
+            is_prekey: has_prekey_devices,
+            ephemeral_key: ephemeral_key.clone(),
+            prekey_devices: prekey_device_set,
+        };
+        
+        // Clear the ephemeral keys for devices that got PreKey messages
+        if has_prekey_devices {
+            for (jid, device_id) in &device_list_copy {
+                let device_key = (jid.clone(), *device_id);
+                self.prekey_ephemeral_keys.remove(&device_key);
+            }
+        }
+        
+        Ok(message)
+    }
+
+    /// Convert an OMEMO message to XML for sending
+    pub fn message_to_xml(&self, message: &OmemoMessage) -> String {
+        debug!("Converting OMEMO message to XML");
+        protocol::utils::omemo_message_to_xml(message)
+    }
+
+    /// Verify that a message is encrypted and isn't leaking plaintext
+    pub fn verify_message_encryption(&self, xml: &str, plaintext: &str) -> Result<(), EncryptionVerificationError> {
+        debug!("Verifying message encryption");
+        if xml.contains(plaintext) {
+            error!("Plaintext detected in encrypted message");
+            return Err(EncryptionVerificationError::PlaintextDetected);
+        }
+        Ok(())
+    }
+
+    /// Derive a deterministic "ephemeral" key for consistent session creation
+    #[allow(dead_code)]
+    pub(crate) fn derive_deterministic_ephemeral_key(
+        local_identity: &[u8],
+        remote_identity: &[u8], 
+        local_device_id: u32,
+        remote_device_id: u32
+    ) -> Result<Vec<u8>, OmemoError> {
+        let mut input = Vec::new();
+        
+        if local_device_id < remote_device_id {
+            input.extend_from_slice(local_identity);
+            input.extend_from_slice(remote_identity);
+            input.extend_from_slice(&local_device_id.to_be_bytes());
+            input.extend_from_slice(&remote_device_id.to_be_bytes());
+        } else {
+            input.extend_from_slice(remote_identity);
+            input.extend_from_slice(local_identity);
+            input.extend_from_slice(&remote_device_id.to_be_bytes());
+            input.extend_from_slice(&local_device_id.to_be_bytes());
+        }
+        
+        input.extend_from_slice(b"EPHEMERAL_KEY_DERIVATION");
+        
+        let salt = b"omemo_ephemeral_salt";
+        let derived_key = crypto::hkdf_derive(salt, &input, b"ephemeral", 32)
+            .map_err(|e| OmemoError::CryptoError(e))?;
+        
+        debug!("Derived deterministic ephemeral key: {}", hex::encode(&derived_key));
+        debug!("Ephemeral key derivation inputs - local_device_id: {}, remote_device_id: {}", local_device_id, remote_device_id);
+        debug!("Ephemeral key derivation inputs - local_identity: {}", hex::encode(local_identity));
+        debug!("Ephemeral key derivation inputs - remote_identity: {}", hex::encode(remote_identity));
+        Ok(derived_key)
+    }
+}

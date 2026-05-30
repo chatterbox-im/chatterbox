@@ -7,10 +7,10 @@ implementing XMPP and OMEMO. It is proudly made with Rust.
 
 ## Project Stats
 
-- Total lines of Rust code: 20866 lines
-- OMEMO implementation: 8335 lines
-- XMPP integration: 9061 lines
-- UI and app logic: 3470 lines
+- Total lines of Rust code: 20361 lines
+- OMEMO implementation: 8109 lines
+- XMPP integration: 8784 lines
+- UI and app logic: 3468 lines
 
 ## Implemented XEPs
 
