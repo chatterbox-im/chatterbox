@@ -281,28 +281,6 @@ impl ServiceDiscovery {
         }
     }
 
-    /// Returns true if the entity supports OMEMO
-    pub async fn supports_omemo(&self, jid: &str) -> bool {
-        let discovered_features = self.discovered_features.lock().await;
-        
-        if let Some(features) = discovered_features.get(jid) {
-            features.iter().any(|f| f.namespace == "eu.siacs.conversations.axolotl")
-        } else {
-            false
-        }
-    }
-
-    /// Returns true if the entity supports message carbons
-    pub async fn supports_carbons(&self, jid: &str) -> bool {
-        let discovered_features = self.discovered_features.lock().await;
-        
-        if let Some(features) = discovered_features.get(jid) {
-            features.iter().any(|f| f.namespace == "urn:xmpp:carbons:2")
-        } else {
-            false
-        }
-    }
-
     /// Advertises supported features for this client
     pub async fn advertise_features(&self) -> Result<()> {
         let mut client = self.client.lock().await;
@@ -353,30 +331,6 @@ impl ServiceDiscovery {
         client.send_stanza(iq).await?;
         info!("Advertised supported features");
 
-        Ok(())
-    }
-
-    /// Get all discovered features for a JID
-    pub async fn get_features(&self, jid: &str) -> Option<Vec<String>> {
-        let discovered_features = self.discovered_features.lock().await;
-        
-        if let Some(features) = discovered_features.get(jid) {
-            Some(features.iter().map(|f| f.namespace.clone()).collect())
-        } else {
-            None
-        }
-    }
-
-    /// Discover a roster contact's capabilities
-    pub async fn discover_contact_capabilities(&self, contact_jid: &str) -> Result<()> {
-        info!("Discovering capabilities for contact: {}", contact_jid);
-        
-        // Send a disco#info query to get contact's features
-        self.send_disco_info_request(contact_jid).await?;
-        
-        // We won't wait for the response here, as it will be handled asynchronously
-        // by the handle_disco_response method when it arrives
-        
         Ok(())
     }
 

@@ -2,7 +2,6 @@
 //! Main XMPP event loop for handling incoming stanzas
 
 use log::{debug, error, info, warn};
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex as TokioMutex};
@@ -209,8 +208,6 @@ impl XMPPClient {
                                     pending_receipts: pending_receipts_clone,
                                     connected: true,
                                     omemo_manager: omemo_manager,
-                                    message_id_map: Arc::new(TokioMutex::new(HashMap::new())),
-                                    recipient_message_map: Arc::new(TokioMutex::new(HashMap::new())),
                                     carbons_enabled: Arc::new(AtomicBool::new(true)),
                                 };
                                 
@@ -278,8 +275,6 @@ impl XMPPClient {
                                         pending_receipts: pending_receipts_clone,
                                         connected: true,
                                         omemo_manager: omemo_manager,
-                                        message_id_map: Arc::new(TokioMutex::new(HashMap::new())),
-                                        recipient_message_map: Arc::new(TokioMutex::new(HashMap::new())),
                                         carbons_enabled: Arc::new(AtomicBool::new(true)),
                                     };
                                     

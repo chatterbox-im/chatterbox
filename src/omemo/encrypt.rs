@@ -113,6 +113,18 @@ impl OmemoManager {
         
         let ratchet_state = session.ratchet_state.clone();
 
+        // Evict oldest sessions if we exceed the cap to prevent unbounded memory growth
+        const MAX_SESSIONS: usize = 500;
+        if self.sessions.len() >= MAX_SESSIONS {
+            // Remove a session that isn't the one we're about to use
+            let evict_key = self.sessions.keys()
+                .find(|k| **k != key)
+                .cloned();
+            if let Some(k) = evict_key {
+                self.sessions.remove(&k);
+            }
+        }
+
         // Now, after all awaits, mutably borrow self and insert
         self.sessions.insert(key.clone(), session);
         self.store_session_state(&bare_jid, remote_device_id, &ratchet_state).await?;
@@ -447,40 +459,5 @@ impl OmemoManager {
             return Err(EncryptionVerificationError::PlaintextDetected);
         }
         Ok(())
-    }
-
-    /// Derive a deterministic "ephemeral" key for consistent session creation
-    #[allow(dead_code)]
-    pub(crate) fn derive_deterministic_ephemeral_key(
-        local_identity: &[u8],
-        remote_identity: &[u8], 
-        local_device_id: u32,
-        remote_device_id: u32
-    ) -> Result<Vec<u8>, OmemoError> {
-        let mut input = Vec::new();
-        
-        if local_device_id < remote_device_id {
-            input.extend_from_slice(local_identity);
-            input.extend_from_slice(remote_identity);
-            input.extend_from_slice(&local_device_id.to_be_bytes());
-            input.extend_from_slice(&remote_device_id.to_be_bytes());
-        } else {
-            input.extend_from_slice(remote_identity);
-            input.extend_from_slice(local_identity);
-            input.extend_from_slice(&remote_device_id.to_be_bytes());
-            input.extend_from_slice(&local_device_id.to_be_bytes());
-        }
-        
-        input.extend_from_slice(b"EPHEMERAL_KEY_DERIVATION");
-        
-        let salt = b"omemo_ephemeral_salt";
-        let derived_key = crypto::hkdf_derive(salt, &input, b"ephemeral", 32)
-            .map_err(|e| OmemoError::CryptoError(e))?;
-        
-        debug!("Derived deterministic ephemeral key: {}", hex::encode(&derived_key));
-        debug!("Ephemeral key derivation inputs - local_device_id: {}, remote_device_id: {}", local_device_id, remote_device_id);
-        debug!("Ephemeral key derivation inputs - local_identity: {}", hex::encode(local_identity));
-        debug!("Ephemeral key derivation inputs - remote_identity: {}", hex::encode(remote_identity));
-        Ok(derived_key)
     }
 }

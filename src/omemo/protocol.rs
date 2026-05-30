@@ -712,6 +712,20 @@ impl DoubleRatchet {
             state.skipped_message_keys.insert(key, message_key);
         }
         
+        // Prune oldest skipped keys if we exceed the storage cap
+        const MAX_STORED_SKIPPED_KEYS: usize = 256;
+        while state.skipped_message_keys.len() > MAX_STORED_SKIPPED_KEYS {
+            // Remove the entry with the lowest counter (oldest skipped key)
+            if let Some(oldest_key) = state.skipped_message_keys.keys()
+                .min_by_key(|(_, counter)| *counter)
+                .cloned()
+            {
+                state.skipped_message_keys.remove(&oldest_key);
+            } else {
+                break;
+            }
+        }
+        
         Ok(())
     }
     

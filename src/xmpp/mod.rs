@@ -61,8 +61,6 @@ pub struct XMPPClient {
     pub(crate) pending_receipts: Arc<TokioMutex<HashMap<String, PendingMessage>>>,
     pub(crate) connected: bool,
     pub(crate) omemo_manager: Option<Arc<TokioMutex<crate::omemo::OmemoManager>>>,
-    pub(crate) message_id_map: Arc<TokioMutex<HashMap<String, String>>>,
-    pub(crate) recipient_message_map: Arc<TokioMutex<HashMap<String, HashMap<String, String>>>>,
     pub(crate) carbons_enabled: Arc<AtomicBool>,
 }
 
@@ -95,8 +93,6 @@ impl XMPPClient {
             pending_receipts,
             connected: false,
             omemo_manager: None,
-            message_id_map: Arc::new(TokioMutex::new(HashMap::new())),
-            recipient_message_map: Arc::new(TokioMutex::new(HashMap::new())),
             carbons_enabled: Arc::new(AtomicBool::new(true)),
         }, msg_rx)
     }
@@ -161,8 +157,6 @@ impl XMPPClient {
             pending_receipts: self.pending_receipts.clone(),
             connected: self.connected,
             omemo_manager: self.omemo_manager.clone(),
-            message_id_map: self.message_id_map.clone(),
-            recipient_message_map: self.recipient_message_map.clone(),
             carbons_enabled: self.carbons_enabled.clone(),
         }
     }

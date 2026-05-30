@@ -202,7 +202,10 @@ async fn main() -> Result<()> {
                 Ok(_) => {
                     info!("OMEMO encryption initialized successfully");
                 },
-                Err(e) => panic!("Failed to initialize OMEMO encryption: {}, some messages may not be decrypted", e)
+                Err(e) => {
+                    error!("Failed to initialize OMEMO encryption: {}. Continuing without E2E encryption.", e);
+                    eprintln!("Warning: OMEMO encryption unavailable: {}", e);
+                }
             }
             
             // Register the client in the global registry AFTER OMEMO initialization
@@ -449,7 +452,6 @@ async fn main() -> Result<()> {
     check_pending_key_verifications(&mut chat_ui, &xmpp_client).await?;
 
     // Main event loop
-    run_main_loop(&mut chat_ui, &mut terminal, &mut xmpp_client, &mut msg_rx, args.disable_mam).await?;
     run_main_loop(&mut chat_ui, &mut terminal, &mut xmpp_client, &mut msg_rx, args.disable_mam).await?;
 
     // Restore terminal

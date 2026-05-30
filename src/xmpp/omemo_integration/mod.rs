@@ -191,9 +191,8 @@ impl OmemoIntegration {
                                     let error_msg = format!("Failed to publish device list: {} ({})", error_text, error_type);
                                     error!("{}", error_msg);
                                     
-                                    // Panic if we get an "invalid item" error for debugging
                                     if error_text.contains("invalid item") {
-                                        panic!("FATAL: Invalid item when publishing device list: {:?}", stanza);
+                                        error!("Invalid item when publishing device list: {:?}", stanza);
                                     }
                                     
                                     return Err(anyhow!(error_msg));

@@ -43,16 +43,6 @@ pub fn register_inspector(tx: mpsc::Sender<String>) {
     }
 }
 
-/// Unregister an XML inspector
-pub fn unregister_inspector(tx: &mpsc::Sender<String>) {
-    if let Ok(mut inspectors) = INSPECTORS.write() {
-        inspectors.retain(|i| !std::ptr::eq(i, tx));
-        //debug!("Unregistered XML inspector. Remaining inspectors: {}", inspectors.len());
-    } else {
-        //debug!("Failed to acquire write lock for XML inspectors");
-    }
-}
-
 /// Inspect outbound XML stanzas
 pub fn inspect_outbound_xml(xml: &str) {
     trace!("OUTBOUND XML: {}", xml);
@@ -87,12 +77,6 @@ pub fn inspect_outbound_xml(xml: &str) {
     } else {
         //debug!("No XML inspectors registered, but stanza was buffered");
     }
-}
-
-/// Inspect inbound XML stanzas
-pub fn inspect_inbound_xml(xml: &str) {
-    trace!("INBOUND XML: {}", xml);
-    // Currently only handling outbound for testing purposes
 }
 
 /// Helper function to convert Element to String

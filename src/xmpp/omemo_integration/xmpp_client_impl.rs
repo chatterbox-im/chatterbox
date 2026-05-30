@@ -44,8 +44,6 @@ impl crate::xmpp::XMPPClient {
             pending_receipts: self.pending_receipts.clone(),
             connected: self.connected,
             omemo_manager: self.omemo_manager.clone(),
-            message_id_map: self.message_id_map.clone(),
-            recipient_message_map: self.recipient_message_map.clone(),
             carbons_enabled: self.carbons_enabled.clone(),
         };
         

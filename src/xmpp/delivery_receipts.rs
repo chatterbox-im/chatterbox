@@ -417,6 +417,20 @@ impl super::XMPPClient {
                 debug!("Tried to update status for unknown message ID: {}", msg_id);
                 return;
             }
+            
+            // Remove from tracking once delivered (no longer pending)
+            if new_status == DeliveryStatus::Delivered || new_status == DeliveryStatus::Read {
+                pending_receipts_lock.remove(msg_id);
+            }
+            
+            // Evict stale entries older than 1 hour to prevent unbounded growth
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            if pending_receipts_lock.len() > 100 {
+                pending_receipts_lock.retain(|_, v| now - v.timestamp < 3600);
+            }
         }
         
         // If we found and updated the message, send an update to the UI

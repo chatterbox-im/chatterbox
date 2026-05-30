@@ -324,7 +324,7 @@ pub async fn process_subscription(client: &mut XMPPAsyncClient, stanza: &Element
                     }
                     
                     // Check if we've already sent a notification for this contact
-                    let mut auto_accepted = AUTO_ACCEPTED_REQUESTS.write().unwrap();
+                    let mut auto_accepted = AUTO_ACCEPTED_REQUESTS.write().unwrap_or_else(|e| e.into_inner());
                     let bare_jid_str = bare_jid.to_string();
                     
                     if !auto_accepted.contains(&bare_jid_str) {
@@ -332,7 +332,7 @@ pub async fn process_subscription(client: &mut XMPPAsyncClient, stanza: &Element
                         auto_accepted.insert(bare_jid_str.clone());
                         
                         // Send notification through channel
-                        if let Some(tx) = FRIEND_REQUEST_TX.read().unwrap().as_ref() {
+                        if let Some(tx) = FRIEND_REQUEST_TX.read().unwrap_or_else(|e| e.into_inner()).as_ref() {
                             match tx.try_send(bare_jid_str.clone()) {
                                 Ok(_) => {
                                     info!("Sent UI notification for auto-accepted friend request from {}", bare_jid);
@@ -396,7 +396,7 @@ pub async fn process_subscription(client: &mut XMPPAsyncClient, stanza: &Element
 /// Returns a channel to receive friend request notifications
 pub fn subscribe_to_friend_requests() -> mpsc::Receiver<String> {
     let (friend_req_tx, friend_req_rx) = mpsc::channel(100);
-    FRIEND_REQUEST_TX.write().unwrap().replace(friend_req_tx);
+    FRIEND_REQUEST_TX.write().unwrap_or_else(|e| e.into_inner()).replace(friend_req_tx);
     friend_req_rx
 }
 

@@ -650,15 +650,6 @@ impl OmemoManager {
         storage_guard.get_device_failure_count(remote_jid, remote_device_id).unwrap_or(0)
     }
 
-    /// Reset failure count for a device after successful decryption
-    #[allow(dead_code)]
-    pub(crate) async fn reset_device_failure_count(&self, remote_jid: &str, remote_device_id: u32) {
-        let storage_guard = self.storage.lock().await;
-        if let Err(e) = storage_guard.reset_device_failure_count(remote_jid, remote_device_id) {
-            warn!("Failed to reset failure count for {}:{}: {}", remote_jid, remote_device_id, e);
-        }
-    }
-
     /// Reset a session with a specific device
     pub async fn reset_session(&mut self, remote_jid: &str, remote_device_id: u32) -> Result<(), OmemoError> {
         let bare_jid = Self::normalize_jid_to_bare(remote_jid);
