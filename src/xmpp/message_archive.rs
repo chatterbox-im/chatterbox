@@ -4,10 +4,7 @@
 use anyhow::{anyhow, Result};
 use log::{error, info, warn};
 use std::time::Duration;
-use std::pin::Pin;
-use std::task::Poll;
 use uuid::Uuid;
-use futures_util::Stream;
 use base64::Engine;
 
 use crate::models::{Message, DeliveryStatus};
@@ -98,6 +95,12 @@ impl super::XMPPClient {
         // Generate a unique ID for this MAM query
         let query_id = Uuid::new_v4().to_string();
         
+        // Register for both MAM messages and the final IQ BEFORE sending
+        let (mut msg_rx, mut iq_rx) = {
+            let mut registry = self.iq_registry.lock().await;
+            registry.register_mam(query_id.clone())
+        };
+        
         // Build query element
         let mut query = xmpp_parsers::Element::builder("query", custom_ns::MAM)
             .attr("queryid", &query_id);
@@ -106,7 +109,7 @@ impl super::XMPPClient {
         let mut x_data = xmpp_parsers::Element::builder("x", "jabber:x:data")
             .attr("type", "submit");
 
-        // Add form type field - this needs proper namespace
+        // Add form type field
         let mut form_type_field = xmpp_parsers::Element::builder("field", "jabber:x:data")
             .attr("var", "FORM_TYPE")
             .attr("type", "hidden")
@@ -120,8 +123,6 @@ impl super::XMPPClient {
 
         // Add "with" filter if specified
         if let Some(with_jid) = &options.with {
-            //debug!("Adding 'with' filter for JID: {}", with_jid);
-            
             let mut with_field = xmpp_parsers::Element::builder("field", "jabber:x:data")
                 .attr("var", "with")
                 .build();
@@ -136,7 +137,6 @@ impl super::XMPPClient {
         // Add start time filter if specified
         if let Some(start_time) = options.start {
             let start_str = start_time.format("%Y-%m-%dT%H:%M:%SZ").to_string();
-            //debug!("Adding 'start' filter: {}", start_str);
             
             let mut start_field = xmpp_parsers::Element::builder("field", "jabber:x:data")
                 .attr("var", "start")
@@ -152,7 +152,6 @@ impl super::XMPPClient {
         // Add end time filter if specified
         if let Some(end_time) = options.end {
             let end_str = end_time.format("%Y-%m-%dT%H:%M:%SZ").to_string();
-            //debug!("Adding 'end' filter: {}", end_str);
             
             let mut end_field = xmpp_parsers::Element::builder("field", "jabber:x:data")
                 .attr("var", "end")
@@ -168,17 +167,13 @@ impl super::XMPPClient {
         // Add Result Set Management (RSM) for pagination
         let mut set = xmpp_parsers::Element::builder("set", "http://jabber.org/protocol/rsm").build();
         
-        // Add limit if specified
         if let Some(limit) = options.limit {
-            //debug!("Adding 'max' limit: {}", limit);
             let mut max_element = xmpp_parsers::Element::builder("max", "http://jabber.org/protocol/rsm").build();
             max_element.append_text_node(&limit.to_string());
             set.append_child(max_element);
         }
         
-        // Add 'after' token if specified for pagination
         if let Some(after) = &options.after {
-            //debug!("Adding 'after' token for pagination: {}", after);
             let mut after_element = xmpp_parsers::Element::builder("after", "http://jabber.org/protocol/rsm").build();
             after_element.append_text_node(after);
             set.append_child(after_element);
@@ -186,7 +181,6 @@ impl super::XMPPClient {
         
         query = query.append(set);
         
-        // Finalize the query
         let query_element = query
             .append(x_data.build())
             .build();
@@ -200,271 +194,92 @@ impl super::XMPPClient {
         
         info!("Sending MAM query with ID: {}", query_id);
         
-        // Collect messages from the archive
+        // Send the MAM query
+        {
+            let mut client_guard = client.lock().await;
+            client_guard.send_stanza(iq).await
+                .map_err(|e| anyhow!("Failed to send MAM query: {}", e))?;
+        }
+        
+        // Collect messages until the final IQ arrives or timeout
         let mut archived_messages = Vec::new();
         let mut result_complete = false;
         let mut rsm_first = None;
         let mut rsm_last = None;
         let mut rsm_count = None;
         
-        // Send the MAM query with a short-lived lock
-        let send_result = {
-            // Acquire lock only for the duration of sending the stanza
-            let lock_timeout = Duration::from_secs(5);
-            let mut client_guard = match tokio::time::timeout(lock_timeout, client.lock()).await {
-                Ok(guard) => guard,
-                Err(_) => return Err(anyhow!("Timed out acquiring client lock for message history request")),
-            };
-            
-            // Send the query within a timeout
-            tokio::time::timeout(
-                Duration::from_secs(5),
-                async { client_guard.send_stanza(iq).await }
-            ).await
-        };
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         
-        // Check if send was successful
-        match send_result {
-            Ok(Ok(_)) => {
-                //debug!("MAM query sent successfully, waiting for responses");
-            },
-            Ok(Err(e)) => {
-                error!("Failed to send MAM query: {}", e);
-                return Err(anyhow!("Failed to send MAM query: {}", e));
-            },
-            Err(_) => {
-                error!("Timed out sending MAM query");
-                return Err(anyhow!("Timed out sending MAM query"));
-            }
-        }
-        
-        // Process responses until we get the IQ result or timeout
-        let response_timeout = Duration::from_secs(30); // Timeout for archive queries
-        let start_time = tokio::time::Instant::now();
-        
-        while !result_complete && tokio::time::Instant::now() - start_time < response_timeout {
-            // Acquire lock only for short durations to check for events
-            let event = {
-                let lock_result = tokio::time::timeout(
-                    Duration::from_secs(1),
-                    client.lock()
-                ).await;
-                
-                match lock_result {
-                    Ok(mut client_guard) => {
-                        // Use poll_fn for a non-blocking check — avoids dropping next() mid-poll
-                        // which can leave tokio_xmpp's internal state machine corrupted
-                        futures_util::future::poll_fn(|cx| {
-                            match Pin::new(&mut *client_guard).poll_next(cx) {
-                                Poll::Ready(event) => Poll::Ready(event),
-                                Poll::Pending => Poll::Ready(None),
-                            }
-                        }).await
-                    },
-                    Err(_) => {
-                        // Failed to acquire lock, wait briefly and retry
-                        //debug!("Failed to acquire lock for MAM response check, retrying");
-                        tokio::time::sleep(Duration::from_millis(500)).await;
-                        continue;
-                    }
-                }
-            };
-            
-            // Process the event if we got one
-            match event {
-                Some(tokio_xmpp::Event::Stanza(stanza)) => {
-                    // IQ result indicates the end of the archive query
-                    if stanza.name() == "iq" && 
-                       stanza.attr("id") == Some(&query_id) {
-                        if stanza.attr("type") == Some("result") {
-                            info!("Received MAM query result - archiving complete");
-                            result_complete = true;
-                            
-                            // Extract RSM set info from the result
-                            if let Some(fin) = stanza.get_child("fin", custom_ns::MAM) {
-                                // Check if there are more results available
-                                if let Some(complete) = fin.attr("complete") {
-                                    result_complete = complete == "true";
-                                }
-                                
-                                // Extract RSM information
-                                if let Some(set) = fin.get_child("set", "http://jabber.org/protocol/rsm") {
-                                    // Get first item
-                                    if let Some(first) = set.get_child("first", "http://jabber.org/protocol/rsm") {
-                                        rsm_first = Some(first.text());
-                                    }
-                                    
-                                    // Get last item
-                                    if let Some(last) = set.get_child("last", "http://jabber.org/protocol/rsm") {
-                                        rsm_last = Some(last.text());
-                                    }
-                                    
-                                    // Get count
-                                    if let Some(count) = set.get_child("count", "http://jabber.org/protocol/rsm") {
-                                        if let Ok(count_val) = count.text().parse::<usize>() {
-                                            rsm_count = Some(count_val);
-                                        }
-                                    }
-                                }
-                            }
-                            
-                            continue;
-                        } else if stanza.attr("type") == Some("error") {
-                            // Check for error information
-                            if let Some(error) = stanza.get_child("error", "") {
-                                let error_type = error.attr("type").unwrap_or("unknown");
-                                let mut error_msg = format!("MAM query failed with error type: {}", error_type);
-                                
-                                // Try to get error text
-                                if let Some(text) = error.get_child("text", "urn:ietf:params:xml:ns:xmpp-stanzas") {
-                                    error_msg = format!("{} - {}", error_msg, text.text());
-                                }
-                                
-                                error!("{}", error_msg);
-                                return Err(anyhow!(error_msg));
-                            }
-                            result_complete = true; // Even with an error, consider the query complete
+        loop {
+            tokio::select! {
+                // Receive a MAM message from the collector
+                msg = msg_rx.recv() => {
+                    match msg {
+                        Some(stanza) => {
+                            self.process_mam_message_stanza(&stanza, &query_id, &mut archived_messages).await;
+                        },
+                        None => {
+                            // Channel closed (registry evicted or dropped)
+                            break;
                         }
-                        continue;
                     }
-                    
-                    // Process MAM message results
-                    if stanza.name() == "message" {
-                        if let Some(result) = stanza.get_child("result", custom_ns::MAM) {
-                            if result.attr("queryid") == Some(&query_id) {
-                                // Store the result ID for pagination
-                                let _result_id = result.attr("id").map(|s| s.to_string());
+                },
+                // Receive the final IQ result
+                iq_result = &mut iq_rx => {
+                    match iq_result {
+                        Ok(stanza) => {
+                            if stanza.attr("type") == Some("result") {
+                                info!("Received MAM query result - archiving complete");
+                                result_complete = true;
                                 
-                                if let Some(forwarded) = result.get_child("forwarded", "urn:xmpp:forward:0") {
-                                    // Extract the original message and delay info
-                                    if let Some(message_stanza) = forwarded.get_child("message", "jabber:client") {
-                                        if let Some(delay) = forwarded.get_child("delay", "urn:xmpp:delay") {
-                                            // Process and extract the message content as before
-                                            let from = message_stanza.attr("from").map(|s| s.to_string());
-                                            let to = message_stanza.attr("to").map(|s| s.to_string());
-                                            
-                                            // Process timestamp from delay element
-                                            let timestamp_str = delay.attr("stamp").unwrap_or("");
-                                            let timestamp = if !timestamp_str.is_empty() {
-                                                match chrono::DateTime::parse_from_rfc3339(timestamp_str) {
-                                                    Ok(dt) => dt.timestamp() as u64,
-                                                    Err(_) => chrono::Utc::now().timestamp() as u64
-                                                }
-                                            } else {
-                                                chrono::Utc::now().timestamp() as u64
-                                            };
-                                            
-                                            let message_id = message_stanza.attr("id")
-                                                .map(|s| s.to_string())
-                                                .unwrap_or_else(|| Uuid::new_v4().to_string());
-                                            
-                                            // Only create a message if we have the required fields
-                                            if let (Some(from), Some(to)) = (from.clone(), to.clone()) {
-                                                // Determine message direction (from me or to me)
-                                                let (sender_id, recipient_id) = if from.contains(&self.jid) {
-                                                    ("me".to_string(), to)
-                                                } else {
-                                                    (from.clone(), "me".to_string())
-                                                };
-                                                
-                                                // Check if this is an OMEMO encrypted message (try both namespaces)
-                                                let has_omemo_v1 = message_stanza.has_child("encrypted", custom_ns::OMEMO);
-                                                let has_omemo_axolotl = message_stanza.has_child("encrypted", custom_ns::OMEMO_V1);
-                                                if has_omemo_v1 || has_omemo_axolotl {
-                                                    info!("Found OMEMO encrypted message in archive from {} (v1={}, axolotl={})", sender_id, has_omemo_v1, has_omemo_axolotl);
-                                                    
-                                                    // Try to decrypt the message if we have an OMEMO manager
-                                                    if let Some(_omemo_manager) = &self.omemo_manager {
-                                                        // This is similar to how we process live encrypted messages
-                                                        match Self::decrypt_archived_omemo_message(&message_stanza, &from).await {
-                                                            Ok(Some(decrypted_content)) => {
-                                                                // Successfully decrypted
-                                                                let message = Message {
-                                                                    id: message_id,
-                                                                    sender_id,
-                                                                    recipient_id,
-                                                                    content: decrypted_content,
-                                                                    timestamp,
-                                                                    delivery_status: DeliveryStatus::Delivered,
-                                                                };
-                                                                archived_messages.push(message);
-                                                                continue;
-                                                            },
-                                                            Ok(None) => {
-                                                                //debug!("No encrypted content found in message from archive");
-                                                            },
-                                                            Err(e) => {
-                                                                warn!("Failed to decrypt archived message: {}", e);
-                                                                
-                                                                // Add a message with a note that decryption failed
-                                                                let message = Message {
-                                                                    id: message_id,
-                                                                    sender_id,
-                                                                    recipient_id,
-                                                                    content: format!("[Encrypted message - couldn't decrypt: {}]", e),
-                                                                    timestamp,
-                                                                    delivery_status: DeliveryStatus::Delivered,
-                                                                };
-                                                                archived_messages.push(message);
-                                                                continue;
-                                                            }
-                                                        }
-                                                    } else {
-                                                        //debug!("OMEMO manager not available for decrypting archived message");
-                                                        
-                                                        // Add an informative message that OMEMO isn't initialized
-                                                        let message = Message {
-                                                            id: message_id,
-                                                            sender_id,
-                                                            recipient_id,
-                                                            content: "[Encrypted message - OMEMO not initialized]".to_string(),
-                                                            timestamp,
-                                                            delivery_status: DeliveryStatus::Delivered,
-                                                        };
-                                                        archived_messages.push(message);
-                                                        continue;
-                                                    }
-                                                }
-                                                
-                                                // Fall back to regular body content for non-OMEMO or failed decryption
-                                                if let Some(body) = message_stanza.get_child("body", "jabber:client").map(|b| b.text()) {
-                                                    if !body.is_empty() {
-                                                        let message = Message {
-                                                            id: message_id,
-                                                            sender_id,
-                                                            recipient_id,
-                                                            content: body,
-                                                            timestamp,
-                                                            delivery_status: DeliveryStatus::Delivered,
-                                                        };
-                                                        
-                                                        archived_messages.push(message);
-                                                    }
-                                                }
+                                if let Some(fin) = stanza.get_child("fin", custom_ns::MAM) {
+                                    if let Some(complete) = fin.attr("complete") {
+                                        result_complete = complete == "true";
+                                    }
+                                    
+                                    if let Some(set) = fin.get_child("set", "http://jabber.org/protocol/rsm") {
+                                        if let Some(first) = set.get_child("first", "http://jabber.org/protocol/rsm") {
+                                            rsm_first = Some(first.text());
+                                        }
+                                        if let Some(last) = set.get_child("last", "http://jabber.org/protocol/rsm") {
+                                            rsm_last = Some(last.text());
+                                        }
+                                        if let Some(count) = set.get_child("count", "http://jabber.org/protocol/rsm") {
+                                            if let Ok(count_val) = count.text().parse::<usize>() {
+                                                rsm_count = Some(count_val);
                                             }
                                         }
                                     }
                                 }
+                            } else if stanza.attr("type") == Some("error") {
+                                if let Some(error) = stanza.get_child("error", "") {
+                                    let error_type = error.attr("type").unwrap_or("unknown");
+                                    let mut error_msg = format!("MAM query failed with error type: {}", error_type);
+                                    if let Some(text) = error.get_child("text", "urn:ietf:params:xml:ns:xmpp-stanzas") {
+                                        error_msg = format!("{} - {}", error_msg, text.text());
+                                    }
+                                    error!("{}", error_msg);
+                                    return Err(anyhow!(error_msg));
+                                }
                             }
+                        },
+                        Err(_) => {
+                            warn!("IQ response channel closed for MAM query");
                         }
                     }
+                    break;
                 },
-                Some(tokio_xmpp::Event::Disconnected(err)) => {
-                    return Err(anyhow!("Disconnected while retrieving message history: {:?}", err));
-                },
-                Some(_) => {}, // Ignore other events
-                None => {
-                    error!("Stream ended while waiting for MAM response");
+                // Timeout
+                _ = tokio::time::sleep_until(deadline) => {
+                    warn!("MAM query timed out before completion - returning partial results");
                     break;
                 }
             }
-            
-            // Sleep a little between checks to avoid tight loop
-            tokio::time::sleep(Duration::from_millis(50)).await;
         }
         
-        if !result_complete {
-            warn!("MAM query timed out before completion - returning partial results");
+        // Drain any remaining messages that arrived before the IQ
+        while let Ok(stanza) = msg_rx.try_recv() {
+            self.process_mam_message_stanza(&stanza, &query_id, &mut archived_messages).await;
         }
         
         info!("Retrieved {} archived messages", archived_messages.len());
@@ -472,16 +287,113 @@ impl super::XMPPClient {
         // Sort messages by timestamp from oldest to newest
         archived_messages.sort_by(|a: &Message, b: &Message| a.timestamp.cmp(&b.timestamp));
         
-        // Create the result structure with pagination info
-        let result = MAMQueryResult {
+        Ok(MAMQueryResult {
             messages: archived_messages,
             complete: result_complete,
             rsm_first,
             rsm_last,
             rsm_count,
-        };
-        
-        Ok(result)
+        })
+    }
+    
+    /// Process a single MAM message stanza received from the collector channel.
+    async fn process_mam_message_stanza(&self, stanza: &xmpp_parsers::Element, query_id: &str, archived_messages: &mut Vec<Message>) {
+        if let Some(result) = stanza.get_child("result", custom_ns::MAM) {
+            if result.attr("queryid") != Some(query_id) {
+                return;
+            }
+            
+            if let Some(forwarded) = result.get_child("forwarded", "urn:xmpp:forward:0") {
+                if let Some(message_stanza) = forwarded.get_child("message", "jabber:client") {
+                    if let Some(delay) = forwarded.get_child("delay", "urn:xmpp:delay") {
+                        let from = message_stanza.attr("from").map(|s| s.to_string());
+                        let to = message_stanza.attr("to").map(|s| s.to_string());
+                        
+                        let timestamp_str = delay.attr("stamp").unwrap_or("");
+                        let timestamp = if !timestamp_str.is_empty() {
+                            match chrono::DateTime::parse_from_rfc3339(timestamp_str) {
+                                Ok(dt) => dt.timestamp() as u64,
+                                Err(_) => chrono::Utc::now().timestamp() as u64
+                            }
+                        } else {
+                            chrono::Utc::now().timestamp() as u64
+                        };
+                        
+                        let message_id = message_stanza.attr("id")
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| Uuid::new_v4().to_string());
+                        
+                        if let (Some(from), Some(to)) = (from.clone(), to.clone()) {
+                            let (sender_id, recipient_id) = if from.contains(&self.jid) {
+                                ("me".to_string(), to)
+                            } else {
+                                (from.clone(), "me".to_string())
+                            };
+                            
+                            // Check for OMEMO encrypted message
+                            let has_omemo_v1 = message_stanza.has_child("encrypted", custom_ns::OMEMO);
+                            let has_omemo_axolotl = message_stanza.has_child("encrypted", custom_ns::OMEMO_V1);
+                            if has_omemo_v1 || has_omemo_axolotl {
+                                info!("Found OMEMO encrypted message in archive from {}", sender_id);
+                                
+                                if self.omemo_manager.is_some() {
+                                    match Self::decrypt_archived_omemo_message(&message_stanza, &from).await {
+                                        Ok(Some(decrypted_content)) => {
+                                            archived_messages.push(Message {
+                                                id: message_id,
+                                                sender_id,
+                                                recipient_id,
+                                                content: decrypted_content,
+                                                timestamp,
+                                                delivery_status: DeliveryStatus::Delivered,
+                                            });
+                                            return;
+                                        },
+                                        Ok(None) => {},
+                                        Err(e) => {
+                                            warn!("Failed to decrypt archived message: {}", e);
+                                            archived_messages.push(Message {
+                                                id: message_id,
+                                                sender_id,
+                                                recipient_id,
+                                                content: format!("[Encrypted message - couldn't decrypt: {}]", e),
+                                                timestamp,
+                                                delivery_status: DeliveryStatus::Delivered,
+                                            });
+                                            return;
+                                        }
+                                    }
+                                } else {
+                                    archived_messages.push(Message {
+                                        id: message_id,
+                                        sender_id,
+                                        recipient_id,
+                                        content: "[Encrypted message - OMEMO not initialized]".to_string(),
+                                        timestamp,
+                                        delivery_status: DeliveryStatus::Delivered,
+                                    });
+                                    return;
+                                }
+                            }
+                            
+                            // Fall back to regular body content
+                            if let Some(body) = message_stanza.get_child("body", "jabber:client").map(|b| b.text()) {
+                                if !body.is_empty() {
+                                    archived_messages.push(Message {
+                                        id: message_id,
+                                        sender_id,
+                                        recipient_id,
+                                        content: body,
+                                        timestamp,
+                                        delivery_status: DeliveryStatus::Delivered,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Simplified wrapper around get_message_history_with_pagination
@@ -505,22 +417,24 @@ impl super::XMPPClient {
     /// 
     /// A Result containing a boolean: true if history exists, false otherwise
     pub async fn has_message_history(&self, jid: &str, limit: usize) -> Result<bool> {
-        //debug!("Checking if message history exists for {}", jid);
-        
         let client = self.client.as_ref().ok_or_else(|| anyhow!("XMPP client not initialized"))?;
         
         // Generate a unique ID for this MAM query
         let query_id = Uuid::new_v4().to_string();
         
+        // Register for both MAM messages and the final IQ
+        let (mut msg_rx, iq_rx) = {
+            let mut registry = self.iq_registry.lock().await;
+            registry.register_mam(query_id.clone())
+        };
+        
         // Build query element with minimal parameters for a quick check
         let mut query = xmpp_parsers::Element::builder("query", custom_ns::MAM)
             .attr("queryid", &query_id);
         
-        // Create the data form
         let mut x_data = xmpp_parsers::Element::builder("x", "jabber:x:data")
             .attr("type", "submit");
 
-        // Add form type field - properly namespaced
         let mut form_type_field = xmpp_parsers::Element::builder("field", "jabber:x:data")
             .attr("var", "FORM_TYPE")
             .attr("type", "hidden")
@@ -532,7 +446,7 @@ impl super::XMPPClient {
         
         x_data = x_data.append(form_type_field);
         
-        // Add "with" filter - properly namespaced
+        // Add "with" filter
         let mut with_field = xmpp_parsers::Element::builder("field", "jabber:x:data")
             .attr("var", "with")
             .build();
@@ -543,7 +457,7 @@ impl super::XMPPClient {
             
         x_data = x_data.append(with_field);
         
-        // Add a very small limit for the check (XEP-0059 Result Set Management)
+        // Small limit
         let mut set = xmpp_parsers::Element::builder("set", "http://jabber.org/protocol/rsm").build();
         let mut max_element = xmpp_parsers::Element::builder("max", "http://jabber.org/protocol/rsm").build();
         max_element.append_text_node(&limit.to_string());
@@ -551,139 +465,51 @@ impl super::XMPPClient {
         
         query = query.append(set);
         
-        // Create the full query element
         let query_element = query
             .append(x_data.build())
             .build();
         
-        // Create the IQ stanza
         let iq = xmpp_parsers::Element::builder("iq", "jabber:client")
             .attr("type", "set")
             .attr("id", &query_id)
             .append(query_element)
             .build();
         
-        //debug!("Sending lightweight MAM check query with ID: {}", query_id);
-        
-        // Use a short-lived lock to send the query
-        let send_result = {
-            let lock_timeout = Duration::from_secs(2);
-            match tokio::time::timeout(lock_timeout, client.lock()).await {
-                Ok(mut client_guard) => {
-                    tokio::time::timeout(
-                        Duration::from_secs(2),
-                        client_guard.send_stanza(iq)
-                    ).await
-                },
-                Err(_) => return Err(anyhow!("Timed out acquiring client lock for history check")),
-            }
-        };
-        
-        // Check if send was successful
-        match send_result {
-            Ok(Ok(_)) => {
-                //debug!("MAM history check query sent successfully, waiting for responses");
-            },
-            Ok(Err(e)) => {
-                error!("Failed to send MAM history check query: {}", e);
-                return Err(anyhow!("Failed to send MAM history check query: {}", e));
-            },
-            Err(_) => {
-                error!("Timed out sending MAM history check query");
-                return Err(anyhow!("Timed out sending MAM history check query"));
-            }
+        // Send the query
+        {
+            let mut client_guard = client.lock().await;
+            client_guard.send_stanza(iq).await
+                .map_err(|e| anyhow!("Failed to send MAM history check query: {}", e))?;
         }
         
-        // Process responses with a short timeout
-        let response_timeout = Duration::from_secs(5); // Short timeout for quick check
-        let start_time = tokio::time::Instant::now();
-        let mut has_messages = false;
-        let mut query_complete = false;
+        // Wait for either a message (means history exists) or the final IQ
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         
-        while !query_complete && tokio::time::Instant::now() - start_time < response_timeout {
-            // Acquire lock only for short durations to check for events
-            let event = {
-                let lock_result = tokio::time::timeout(
-                    Duration::from_millis(500),
-                    client.lock()
-                ).await;
-                
-                match lock_result {
-                    Ok(mut client_guard) => {
-                        // Use poll_fn for a non-blocking check — avoids dropping next() mid-poll
-                        futures_util::future::poll_fn(|cx| {
-                            match Pin::new(&mut *client_guard).poll_next(cx) {
-                                Poll::Ready(event) => Poll::Ready(event),
-                                Poll::Pending => Poll::Ready(None),
-                            }
-                        }).await
-                    },
-                    Err(_) => {
-                        // Failed to acquire lock, wait briefly and retry
-                        //debug!("Failed to acquire lock for MAM response check, retrying");
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                        continue;
-                    }
-                }
-            };
-            
-            // Process the event if we got one
-            match event {
-                Some(tokio_xmpp::Event::Stanza(stanza)) => {
-                    // IQ result indicates the end of the archive query
-                    if stanza.name() == "iq" && stanza.attr("id") == Some(&query_id) {
-                        if stanza.attr("type") == Some("result") {
-                            query_complete = true;
-                        } else if stanza.attr("type") == Some("error") {
-                            // Check for error information
+        tokio::select! {
+            msg = msg_rx.recv() => {
+                // Got a MAM message — history exists
+                Ok(msg.is_some())
+            },
+            iq_result = iq_rx => {
+                // Got the final IQ without any messages first — no history
+                // (or there was an error)
+                match iq_result {
+                    Ok(stanza) => {
+                        if stanza.attr("type") == Some("error") {
                             if let Some(error) = stanza.get_child("error", "") {
                                 let error_type = error.attr("type").unwrap_or("unknown");
                                 error!("MAM history check query returned error: {}", error_type);
-                                
-                                // Try to get error text
-                                if let Some(text) = error.get_child("text", "urn:ietf:params:xml:ns:xmpp-stanzas") {
-                                    error!("Error details: {}", text.text());
-                                }
-                            } else {
-                                error!("MAM history check query returned unknown error");
-                            }
-                            query_complete = true;
-                        }
-                        continue;
-                    }
-                    
-                    // If we receive any MAM message, we have history
-                    if stanza.name() == "message" {
-                        if let Some(result) = stanza.get_child("result", custom_ns::MAM) {
-                            if result.attr("queryid") == Some(&query_id) {
-                                //debug!("Found message history for {}", jid);
-                                has_messages = true;
-                                // We can exit early since we just need to know if any history exists
-                                break;
                             }
                         }
-                    }
-                },
-                Some(tokio_xmpp::Event::Disconnected(err)) => {
-                    return Err(anyhow!("Disconnected while checking for message history: {:?}", err));
-                },
-                Some(_) => {}, // Ignore other events
-                None => {
-                    //debug!("No events while checking for message history");
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    continue;
+                        Ok(false)
+                    },
+                    Err(_) => Ok(false),
                 }
+            },
+            _ = tokio::time::sleep_until(deadline) => {
+                Ok(false)
             }
-            
-            // Small sleep to avoid tight loop
-            tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        
-        if !query_complete {
-            //debug!("History check query timed out, but we have sufficient results");
-        }
-        
-        Ok(has_messages)
     }
 
     // Helper method for decrypting archived OMEMO messages

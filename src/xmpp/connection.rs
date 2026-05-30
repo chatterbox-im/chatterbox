@@ -67,10 +67,12 @@ impl XMPPClient {
             let client_arc = Arc::new(TokioMutex::new(client));
             let msg_tx_clone = self.msg_tx.clone();
             let pending_receipts_clone = self.pending_receipts.clone();
+            let iq_registry_clone = self.iq_registry.clone();
             tokio::spawn(Self::handle_incoming_messages(
                 client_arc.clone(),
                 msg_tx_clone,
                 pending_receipts_clone,
+                iq_registry_clone,
             ));
             self.client = Some(client_arc);
             

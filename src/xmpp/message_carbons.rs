@@ -3,9 +3,6 @@
 
 use anyhow::{anyhow, Result};
 use log::{debug, error, info, warn};
-use std::pin::Pin;
-use std::task::Poll;
-use futures_util::Stream;
 
 use xmpp_parsers::Element;
 use crate::models::{Message, DeliveryStatus};
@@ -24,6 +21,12 @@ impl super::XMPPClient {
         // Generate a unique ID for the request
         let id = uuid::Uuid::new_v4().to_string();
         
+        // Register for the response BEFORE sending (so we can't miss it)
+        let rx = {
+            let mut registry = self.iq_registry.lock().await;
+            registry.register(id.clone())
+        };
+        
         // Create the enable carbons IQ stanza
         let enable = Element::builder("enable", custom_ns::CARBONS).build();
         let iq = Element::builder("iq", "jabber:client")
@@ -34,111 +37,41 @@ impl super::XMPPClient {
         
         info!("Sending request to enable message carbons with ID: {}", id);
         
-        // Send the stanza with a timeout
-        let send_result = tokio::time::timeout(
-            tokio::time::Duration::from_secs(5),
-            async {
-                let mut client_guard = client.lock().await;
-                client_guard.send_stanza(iq).await
-            }
-        ).await;
-        
-        // Handle potential timeout or error when sending
-        if let Err(e) = send_result {
-            error!("Timed out sending message carbons enable request: {}", e);
-            return Err(anyhow!("Timed out sending message carbons enable request"));
+        // Send the stanza
+        {
+            let mut client_guard = client.lock().await;
+            client_guard.send_stanza(iq).await
+                .map_err(|e| anyhow!("Failed to send message carbons enable request: {}", e))?;
         }
         
-        if let Err(e) = send_result.unwrap() {
-            error!("Failed to send message carbons enable request: {}", e);
-            return Err(anyhow!("Failed to send message carbons enable request: {}", e));
-        }
+        // Wait for the event loop to route the response to us
+        let response = tokio::time::timeout(
+            tokio::time::Duration::from_secs(10),
+            rx
+        ).await
+            .map_err(|_| anyhow!("Timed out waiting for message carbons response"))?
+            .map_err(|_| anyhow!("IQ response channel closed"))?;
         
-        info!("Message carbons enable request sent, waiting for response...");
-        
-        // Wait for the response with the matching ID
-        let response_timeout = tokio::time::Duration::from_secs(10);
-        let start_time = tokio::time::Instant::now();
-        
-        // Process events until we get a response or timeout
-        while tokio::time::Instant::now() - start_time < response_timeout {
-            // Non-blocking poll — avoids dropping next() mid-poll which corrupts tokio_xmpp state
-            let event_result = if let Some(client_ref) = &self.client {
-                let lock_result = tokio::time::timeout(
-                    tokio::time::Duration::from_millis(500),
-                    client_ref.lock()
-                ).await;
-                match lock_result {
-                    Ok(mut client_guard) => {
-                        futures_util::future::poll_fn(|cx| {
-                            match Pin::new(&mut *client_guard).poll_next(cx) {
-                                Poll::Ready(event) => Poll::Ready(Some(event)),
-                                Poll::Pending => Poll::Ready(None),
-                            }
-                        }).await
-                    },
-                    Err(_) => {
-                        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                        continue;
-                    }
+        // Process the response
+        match response.attr("type") {
+            Some("result") => {
+                info!("Message carbons successfully enabled");
+                self.set_carbons_enabled(true);
+                Ok(true)
+            },
+            Some("error") => {
+                error!("Server returned error for message carbons enable request");
+                if let Some(error) = response.get_child("error", "") {
+                    let error_type = error.attr("type").unwrap_or("unknown");
+                    error!("Error type: {}", error_type);
                 }
-            } else {
-                None
-            };
-            
-            match event_result {
-                Some(Some(tokio_xmpp::Event::Stanza(stanza))) => {
-                    // Check if this is our response
-                    if stanza.name() == "iq" && stanza.attr("id") == Some(&id) {
-                        info!("Received message carbons response for ID: {}", id);
-                        
-                        match stanza.attr("type") {
-                            Some("result") => {
-                                info!("Message carbons successfully enabled");
-                                // Update the client's carbon state
-                                self.set_carbons_enabled(true);
-                                return Ok(true);
-                            },
-                            Some("error") => {
-                                error!("Server returned error for message carbons enable request");
-                                // Log error details if available
-                                if let Some(error) = stanza.get_child("error", "") {
-                                    let error_type = error.attr("type").unwrap_or("unknown");
-                                    error!("Error type: {}", error_type);
-                                    for child in error.children() {
-                                        error!("Error condition: {}", child.name());
-                                    }
-                                }
-                                return Err(anyhow!("Server rejected message carbons enable request"));
-                            },
-                            _ => {
-                                debug!("Unexpected IQ type in message carbons response: {:?}", stanza.attr("type"));
-                            }
-                        }
-                    }
-                },
-                Some(Some(tokio_xmpp::Event::Disconnected(e))) => {
-                    error!("Disconnected while waiting for message carbons response: {:?}", e);
-                    return Err(anyhow!("Disconnected while waiting for message carbons response: {:?}", e));
-                },
-                Some(None) => {
-                    error!("Connection closed while waiting for message carbons response");
-                    return Err(anyhow!("Connection closed while waiting for message carbons response"));
-                },
-                None => {
-                    // No event ready, sleep briefly and retry
-                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-                    continue;
-                },
-                _ => {
-                    // Other events, continue in the loop
-                    continue;
-                }
+                Err(anyhow!("Server rejected message carbons enable request"))
+            },
+            _ => {
+                warn!("Unexpected IQ type in message carbons response");
+                Err(anyhow!("Unexpected response type"))
             }
         }
-        
-        warn!("Timed out waiting for message carbons response");
-        Err(anyhow!("Timed out waiting for message carbons response"))
     }
 
     /// Disable Message Carbons feature
@@ -151,6 +84,12 @@ impl super::XMPPClient {
         // Generate a unique ID for the request
         let id = uuid::Uuid::new_v4().to_string();
         
+        // Register for the response BEFORE sending
+        let rx = {
+            let mut registry = self.iq_registry.lock().await;
+            registry.register(id.clone())
+        };
+        
         // Create the disable carbons IQ stanza
         let disable = Element::builder("disable", custom_ns::CARBONS).build();
         let iq = Element::builder("iq", "jabber:client")
@@ -162,92 +101,43 @@ impl super::XMPPClient {
         info!("Sending request to disable message carbons with ID: {}", id);
         
         // Send the stanza
-        let mut client_guard = client.lock().await;
-        if let Err(e) = client_guard.send_stanza(iq).await {
-            error!("Failed to send message carbons disable request: {}", e);
-            return Err(anyhow!("Failed to send message carbons disable request: {}", e));
+        {
+            let mut client_guard = client.lock().await;
+            client_guard.send_stanza(iq).await
+                .map_err(|e| anyhow!("Failed to send message carbons disable request: {}", e))?;
         }
         
-        // Wait for response with the matching ID
-        let response_timeout = tokio::time::Duration::from_secs(5);
-        drop(client_guard); // Release the lock before waiting
+        // Wait for the event loop to route the response to us
+        let response = tokio::time::timeout(
+            tokio::time::Duration::from_secs(10),
+            rx
+        ).await;
         
-        let start_time = tokio::time::Instant::now();
-        
-        // Process events until we get a response or timeout
-        while tokio::time::Instant::now() - start_time < response_timeout {
-            // Non-blocking poll — avoids dropping next() mid-poll which corrupts tokio_xmpp state
-            let event_result = if let Some(client_ref) = &self.client {
-                let lock_result = tokio::time::timeout(
-                    tokio::time::Duration::from_millis(500),
-                    client_ref.lock()
-                ).await;
-                match lock_result {
-                    Ok(mut client_guard) => {
-                        futures_util::future::poll_fn(|cx| {
-                            match Pin::new(&mut *client_guard).poll_next(cx) {
-                                Poll::Ready(event) => Poll::Ready(Some(event)),
-                                Poll::Pending => Poll::Ready(None),
-                            }
-                        }).await
+        match response {
+            Ok(Ok(stanza)) => {
+                match stanza.attr("type") {
+                    Some("result") => {
+                        info!("Message carbons successfully disabled");
+                        self.set_carbons_enabled(false);
+                        Ok(true)
                     },
-                    Err(_) => {
-                        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                        continue;
+                    Some("error") => {
+                        error!("Server returned error for message carbons disable request");
+                        Err(anyhow!("Server rejected message carbons disable request"))
+                    },
+                    _ => {
+                        warn!("Unexpected IQ type in message carbons disable response");
+                        Err(anyhow!("Unexpected response type"))
                     }
                 }
-            } else {
-                None
-            };
-            
-            match event_result {
-                Some(Some(tokio_xmpp::Event::Stanza(stanza))) => {
-                    // Check if this is our response
-                    if stanza.name() == "iq" && stanza.attr("id") == Some(&id) {
-                        info!("Received message carbons disable response for ID: {}", id);
-                        
-                        match stanza.attr("type") {
-                            Some("result") => {
-                                info!("Message carbons successfully disabled");
-                                // Update the client's carbon state
-                                self.set_carbons_enabled(false);
-                                return Ok(true);
-                            },
-                            Some("error") => {
-                                error!("Server returned error for message carbons disable request");
-                                return Err(anyhow!("Server rejected message carbons disable request"));
-                            },
-                            _ => {
-                                debug!("Unexpected IQ type in message carbons disable response");
-                            }
-                        }
-                    }
-                },
-                Some(Some(tokio_xmpp::Event::Disconnected(e))) => {
-                    error!("Disconnected while waiting for message carbons disable response: {:?}", e);
-                    return Err(anyhow!("Disconnected while waiting for message carbons disable response: {:?}", e));
-                },
-                Some(None) => {
-                    error!("Connection closed while waiting for message carbons disable response");
-                    return Err(anyhow!("Connection closed while waiting for message carbons disable response"));
-                },
-                None => {
-                    // No event ready, sleep briefly and retry
-                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-                    continue;
-                },
-                _ => {
-                    // Other events, continue in the loop
-                    continue;
-                }
+            },
+            _ => {
+                // Timed out or channel closed — soft failure
+                warn!("Timed out waiting for message carbons disable response, assuming success");
+                self.set_carbons_enabled(false);
+                Ok(true)
             }
         }
-        
-        // If we got here, we timed out waiting for a response
-        // For disabling, we'll consider this a soft failure and return success anyway
-        warn!("Timed out waiting for message carbons disable response, assuming success");
-        self.set_carbons_enabled(false);
-        Ok(true)
     }
 
     /// Process a received carbon message

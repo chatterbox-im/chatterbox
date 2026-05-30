@@ -24,6 +24,7 @@ pub mod roster;
 pub mod introspection;
 pub mod connection;
 pub mod discovery;
+pub mod iq_registry;
 mod event_loop;
 mod omemo_handler;
 mod send;
@@ -62,6 +63,7 @@ pub struct XMPPClient {
     pub(crate) connected: bool,
     pub(crate) omemo_manager: Option<Arc<TokioMutex<crate::omemo::OmemoManager>>>,
     pub(crate) carbons_enabled: Arc<AtomicBool>,
+    pub(crate) iq_registry: Arc<TokioMutex<iq_registry::IqResponseRegistry>>,
 }
 
 // Make the typing notification channel accessible from outside
@@ -94,6 +96,7 @@ impl XMPPClient {
             connected: false,
             omemo_manager: None,
             carbons_enabled: Arc::new(AtomicBool::new(true)),
+            iq_registry: Arc::new(TokioMutex::new(iq_registry::IqResponseRegistry::new())),
         }, msg_rx)
     }
 
@@ -158,6 +161,7 @@ impl XMPPClient {
             connected: self.connected,
             omemo_manager: self.omemo_manager.clone(),
             carbons_enabled: self.carbons_enabled.clone(),
+            iq_registry: self.iq_registry.clone(),
         }
     }
 

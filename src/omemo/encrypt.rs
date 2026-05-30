@@ -94,7 +94,16 @@ impl OmemoManager {
         
         // Store the ephemeral public key for this device to include in PreKey messages
         let device_key = (bare_jid.clone(), remote_device_id);
-        self.prekey_ephemeral_keys.insert(device_key, ephemeral_key_pair.public_key.clone());
+        self.prekey_ephemeral_keys.insert(device_key.clone(), ephemeral_key_pair.public_key.clone());
+        
+        // Store the remote device's PreKey IDs so the PreKeySignalMessage can reference them
+        let remote_spk_id = remote_identity.signed_pre_key.id;
+        let remote_opk_id = if remote_identity.pre_keys.is_empty() {
+            None
+        } else {
+            Some(remote_identity.pre_keys[0].id)
+        };
+        self.remote_prekey_ids.insert(device_key, (remote_spk_id, remote_opk_id));
         
         let session = OmemoSession::new_initiator_with_ephemeral(
             bare_jid.clone(),
@@ -332,69 +341,86 @@ impl OmemoManager {
                     }
                 }
                 
-                // Determine if this is a new session that needs PreKey wrapping
-                let has_ephemeral = self.prekey_ephemeral_keys.contains_key(&device_key);
-                let use_prekey_format = needs_prekey || has_ephemeral;
-                
-                // Capture PreKey parameters BEFORE the mutable session borrow
-                let prekey_params = if use_prekey_format {
-                    let identity_key = self.key_bundle.as_ref().unwrap().identity_key_pair.public_key.clone();
-                    let base_key = self.prekey_ephemeral_keys.get(&device_key).cloned();
-                    let signed_pre_key_id = self.key_bundle.as_ref().unwrap().signed_pre_key_id;
-                    let registration_id = self.device_id;
-                    let pre_key_id = self.key_bundle.as_ref().unwrap().one_time_pre_key_pairs.keys().next().copied();
-                    Some((identity_key, base_key, signed_pre_key_id, registration_id, pre_key_id))
-                } else {
-                    None
-                };
-                
                 let device_timeout = Duration::from_secs(8);
                 info!("ENCRYPT_DEBUG: Getting or creating session for {}:{}", jid, device_id);
                 let session_result = timeout(device_timeout, self.get_or_create_session(&jid, device_id)).await;
                 
-                match session_result {
-                    Ok(Ok(session)) => {
-                        info!("ENCRYPT_DEBUG: Successfully got session for {}:{}", jid, device_id);
-                        
-                        let encrypt_result = if let Some((identity_key, base_key_opt, signed_pre_key_id, registration_id, pre_key_id)) = prekey_params {
-                            let base_key = base_key_opt
-                                .unwrap_or_else(|| session.ratchet_state.ratchet_key_pair.public_key.clone());
-                            
-                            session.encrypt_key_prekey(
-                                &message_key,
-                                registration_id,
-                                pre_key_id,
-                                signed_pre_key_id,
-                                &base_key,
-                                &identity_key,
-                            )
-                        } else {
-                            session.encrypt_key(&message_key)
-                        };
-                        
-                        match encrypt_result {
-                            Ok(encrypted_key) => {
-                                encrypted_keys.insert(device_id, encrypted_key);
-                                if use_prekey_format {
-                                    prekey_device_set.insert(device_id);
-                                }
-                                info!("ENCRYPT_DEBUG: Successfully encrypted message key for {}:{} (prekey={})", jid, device_id, use_prekey_format);
-                                
-                                if needs_prekey {
-                                    self.pending_prekey_sends.remove(&device_key);
-                                    info!("ENCRYPT_DEBUG: Sent PreKey message to {}:{}, removing from pending list", jid, device_id);
-                                }
-                            },
-                            Err(e) => {
-                                error!("ENCRYPT_DEBUG: Failed to encrypt message key for {}:{}: {}", jid, device_id, e);
-                            }
-                        }
-                    },
+                // Check if session creation succeeded. We can't hold the session
+                // reference while accessing other self fields, so just check success here.
+                let session_ok = match &session_result {
+                    Ok(Ok(_)) => true,
                     Ok(Err(e)) => {
                         error!("ENCRYPT_DEBUG: Failed to get or create session with {}:{}: {}", jid, device_id, e);
+                        false
                     },
                     Err(_) => {
                         error!("ENCRYPT_DEBUG: Timeout getting session with {}:{}, skipping device", jid, device_id);
+                        false
+                    }
+                };
+                
+                if !session_ok {
+                    continue;
+                }
+                // Drop the borrow from session_result
+                drop(session_result);
+                
+                // Now we can safely access other self fields
+                let has_ephemeral = self.prekey_ephemeral_keys.contains_key(&device_key);
+                let use_prekey_format = needs_prekey || has_ephemeral;
+                
+                let prekey_params = if use_prekey_format {
+                    let identity_key = self.key_bundle.as_ref().unwrap().identity_key_pair.public_key.clone();
+                    let base_key = self.prekey_ephemeral_keys.get(&device_key).cloned();
+                    let registration_id = self.device_id;
+                    // Get the REMOTE device's PreKey IDs (stored during session creation)
+                    let (remote_spk_id, remote_opk_id) = self.remote_prekey_ids
+                        .get(&device_key)
+                        .copied()
+                        .unwrap_or_else(|| {
+                            warn!("ENCRYPT_DEBUG: No stored remote prekey IDs for {}:{}, using defaults", jid, device_id);
+                            (0, None)
+                        });
+                    Some((identity_key, base_key, registration_id, remote_spk_id, remote_opk_id))
+                } else {
+                    None
+                };
+                
+                // Re-acquire the session (it's in self.sessions now)
+                let session_key = (jid.clone(), device_id);
+                let session = self.sessions.get_mut(&session_key).unwrap();
+                
+                let encrypt_result = if let Some((identity_key, base_key_opt, registration_id, remote_spk_id, remote_opk_id)) = prekey_params {
+                    let base_key = base_key_opt
+                        .unwrap_or_else(|| session.ratchet_state.ratchet_key_pair.public_key.clone());
+                    
+                    session.encrypt_key_prekey(
+                        &message_key,
+                        registration_id,
+                        remote_opk_id,
+                        remote_spk_id,
+                        &base_key,
+                        &identity_key,
+                    )
+                } else {
+                    session.encrypt_key(&message_key)
+                };
+                
+                match encrypt_result {
+                    Ok(encrypted_key) => {
+                        encrypted_keys.insert(device_id, encrypted_key);
+                        if use_prekey_format {
+                            prekey_device_set.insert(device_id);
+                        }
+                        info!("ENCRYPT_DEBUG: Successfully encrypted message key for {}:{} (prekey={})", jid, device_id, use_prekey_format);
+                        
+                        if needs_prekey {
+                            self.pending_prekey_sends.remove(&device_key);
+                            info!("ENCRYPT_DEBUG: Sent PreKey message to {}:{}, removing from pending list", jid, device_id);
+                        }
+                    },
+                    Err(e) => {
+                        error!("ENCRYPT_DEBUG: Failed to encrypt message key for {}:{}: {}", jid, device_id, e);
                     }
                 }
             }
@@ -434,11 +460,12 @@ impl OmemoManager {
             prekey_devices: prekey_device_set,
         };
         
-        // Clear the ephemeral keys for devices that got PreKey messages
+        // Clear the ephemeral keys and remote prekey IDs for devices that got PreKey messages
         if has_prekey_devices {
             for (jid, device_id) in &device_list_copy {
                 let device_key = (jid.clone(), *device_id);
                 self.prekey_ephemeral_keys.remove(&device_key);
+                self.remote_prekey_ids.remove(&device_key);
             }
         }
         

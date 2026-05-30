@@ -3,13 +3,10 @@
 
 use anyhow::{anyhow, Result};
 use log::{error, info, warn};
-use std::pin::Pin;
-use std::task::Poll;
 use std::time::Duration;
 use uuid::Uuid;
 use xmpp_parsers::Element;
 use crate::xmpp::XMPPClient;
-use tokio_xmpp::Event as XMPPEvent;
 
 impl XMPPClient {
     /// Get the roster (contact list) from the XMPP server
@@ -18,8 +15,14 @@ impl XMPPClient {
             return Err(anyhow!("XMPP client not initialized or unavailable"));
         }
 
-        //debug!("Requesting roster (contact list)");
         let id = Uuid::new_v4().to_string();
+        
+        // Register for the response BEFORE sending
+        let rx = {
+            let mut registry = self.iq_registry.lock().await;
+            registry.register(id.clone())
+        };
+        
         let query = Element::builder("query", "jabber:iq:roster").build();
         let iq = Element::builder("iq", "jabber:client")
             .attr("type", "get")
@@ -28,141 +31,56 @@ impl XMPPClient {
             .build();
         info!("Sending roster request with ID: {}", id);
         
-        // Get client reference
-        let client = self.client.as_ref().ok_or_else(|| anyhow!("XMPP client not initialized"))?;
-        
         // Send the roster request
-        let send_result = tokio::time::timeout(
-            Duration::from_secs(5),
-            async {
-                let mut client_guard = client.lock().await;
-                client_guard.send_stanza(iq).await
-            }
-        ).await;
-        
-        // Handle send errors
-        if let Err(e) = send_result {
-            error!("Timed out sending roster request: {}", e);
-            return Err(anyhow!("Timed out sending roster request"));
-        }
-        if let Err(e) = send_result.unwrap() {
-            error!("Failed to send roster request: {}", e);
-            return Err(anyhow!("Failed to send roster request: {}", e));
+        {
+            let client = self.client.as_ref().ok_or_else(|| anyhow!("XMPP client not initialized"))?;
+            let mut client_guard = client.lock().await;
+            client_guard.send_stanza(iq).await
+                .map_err(|e| anyhow!("Failed to send roster request: {}", e))?;
         }
         
         info!("Roster request sent, waiting for response...");
         
-        // Wait for the response with a timeout
-        let response_timeout = Duration::from_secs(10);
-        let start_time = tokio::time::Instant::now();
-        let mut roster_contacts = Vec::new();
+        // Wait for the event loop to route the response to us
+        let response = tokio::time::timeout(Duration::from_secs(10), rx).await;
         
-        // Process events until we get the roster response or timeout
-        while tokio::time::Instant::now() - start_time < response_timeout {
-            // Non-blocking poll of the stream — avoids dropping next() mid-poll
-            // which can corrupt tokio_xmpp's internal state machine
-            let event_result = if let Some(client_ref) = &self.client {
-                let lock_result = tokio::time::timeout(
-                    Duration::from_millis(500),
-                    client_ref.lock()
-                ).await;
-                match lock_result {
-                    Ok(mut client_guard) => {
-                        use futures_util::Stream;
-                        let event = futures_util::future::poll_fn(|cx| {
-                            match Pin::new(&mut *client_guard).poll_next(cx) {
-                                Poll::Ready(event) => Poll::Ready(Some(event)),
-                                Poll::Pending => Poll::Ready(None),
-                            }
-                        }).await;
-                        event
-                    },
-                    Err(_) => {
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                        continue;
-                    }
-                }
-            } else {
-                None
-            };
-            
-            // Process the event if we got one
-            match event_result {
-                Some(Some(XMPPEvent::Stanza(stanza))) => {
-                    // Check if this is our roster response
-                    if stanza.name() == "iq" && stanza.attr("id") == Some(&id) {
-                        info!("Received roster response for ID: {}", id);
-                        
-                        // Handle different response types
-                        match stanza.attr("type") {
-                            Some("result") => {
-                                // Process the roster items if we have a query
-                                if let Some(query) = stanza.get_child("query", "jabber:iq:roster") {
-                                    for item in query.children() {
-                                        if item.name() == "item" {
-                                            if let Some(jid) = item.attr("jid") {
-                                                info!("Found contact: {}", jid);
-                                                roster_contacts.push(jid.to_string());
-                                            }
-                                        }
-                                    }
-                                    
-                                    info!("Found {} contacts in roster", roster_contacts.len());
-                                    
-                                    // Return the contacts immediately
-                                    if roster_contacts.is_empty() {
-                                        info!("No contacts found in roster");
-                                    } else {
-                                        info!("Returning {} contacts from roster", roster_contacts.len());
-                                    }
-                                    
-                                    return Ok(Some(roster_contacts));
-                                } else {
-                                    info!("Roster response contains no query element");
-                                    return Ok(Some(Vec::new()));
-                                }
-                            },
-                            Some("error") => {
-                                error!("Server returned error for roster request");
-                                if let Some(error) = stanza.get_child("error", "") {
-                                    let error_type = error.attr("type").unwrap_or("unknown");
-                                    error!("Error type: {}", error_type);
-                                    for child in error.children() {
-                                        error!("Error condition: {}", child.name());
+        match response {
+            Ok(Ok(stanza)) => {
+                match stanza.attr("type") {
+                    Some("result") => {
+                        let mut roster_contacts = Vec::new();
+                        if let Some(query) = stanza.get_child("query", "jabber:iq:roster") {
+                            for item in query.children() {
+                                if item.name() == "item" {
+                                    if let Some(jid) = item.attr("jid") {
+                                        info!("Found contact: {}", jid);
+                                        roster_contacts.push(jid.to_string());
                                     }
                                 }
-                                return Ok(Some(Vec::new()));
-                            },
-                            _ => {
-                                //debug!("Unexpected IQ type in roster response: {:?}", stanza.attr("type"));
                             }
                         }
+                        info!("Found {} contacts in roster", roster_contacts.len());
+                        Ok(Some(roster_contacts))
+                    },
+                    Some("error") => {
+                        error!("Server returned error for roster request");
+                        Ok(Some(Vec::new()))
+                    },
+                    _ => {
+                        warn!("Unexpected IQ type in roster response");
+                        Ok(Some(Vec::new()))
                     }
-                },
-                Some(Some(XMPPEvent::Disconnected(e))) => {
-                    error!("Disconnected while waiting for roster: {:?}", e);
-                    return Err(anyhow!("Disconnected while waiting for roster: {:?}", e));
-                },
-                Some(None) => {
-                    error!("Connection closed while waiting for roster");
-                    return Err(anyhow!("Connection closed while waiting for roster"));
-                },
-                None => {
-                    // No event ready, sleep briefly and retry
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                    continue;
-                },
-                _ => {
-                    // Other event, continue the loop
-                    continue;
                 }
+            },
+            Ok(Err(_)) => {
+                warn!("IQ response channel closed while waiting for roster");
+                Ok(Some(Vec::new()))
+            },
+            Err(_) => {
+                warn!("Timed out waiting for roster response, returning empty roster");
+                Ok(Some(Vec::new()))
             }
         }
-        
-        // If we reach here, we timed out waiting for the roster response
-        warn!("Timed out waiting for roster response, returning empty roster");
-        
-        Ok(Some(roster_contacts))
     }
 
     /// Add a contact to the roster

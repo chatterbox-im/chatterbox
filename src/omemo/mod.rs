@@ -182,6 +182,10 @@ pub struct OmemoManager {
     /// Ephemeral keys for pending PreKey messages to specific devices
     pub(crate) prekey_ephemeral_keys: HashMap<(String, DeviceId), Vec<u8>>,
 
+    /// Remote device PreKey IDs captured during session creation:
+    /// (jid, device_id) → (signed_pre_key_id, Option<one_time_pre_key_id>)
+    pub(crate) remote_prekey_ids: HashMap<(String, DeviceId), (u32, Option<u32>)>,
+
     /// PubSub operations — injected dependency instead of global access
     pub(crate) pubsub: Arc<dyn OmemoPubSub>,
 }
@@ -262,6 +266,7 @@ impl OmemoManager {
             pending_session_rebuilds: HashSet::new(),
             pending_prekey_sends: HashSet::new(),
             prekey_ephemeral_keys: HashMap::new(),
+            remote_prekey_ids: HashMap::new(),
             pubsub,
         };
         

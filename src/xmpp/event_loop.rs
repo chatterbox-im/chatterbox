@@ -22,6 +22,7 @@ impl XMPPClient {
         client: Arc<TokioMutex<XMPPAsyncClient>>,
         msg_tx: mpsc::Sender<Message>,
         pending_receipts: Arc<TokioMutex<std::collections::HashMap<String, PendingMessage>>>,
+        iq_registry: Arc<TokioMutex<crate::xmpp::iq_registry::IqResponseRegistry>>,
     ) {
         // Create a channel for typing notifications
         let (typing_tx, _typing_rx) = mpsc::channel::<(String, chat_states::TypingStatus)>(100);
@@ -104,6 +105,17 @@ impl XMPPClient {
                             }
                         });
                     } else if stanza.name() == "message" {
+                        // Check if this is a MAM result that should be routed to a collector
+                        if let Some(result) = stanza.get_child("result", custom_ns::MAM) {
+                            if let Some(query_id) = result.attr("queryid") {
+                                let registry = iq_registry.lock().await;
+                                if registry.try_route_mam(query_id, stanza.clone()) {
+                                    debug!("Routed MAM message to collector for query {}", query_id);
+                                    continue;
+                                }
+                            }
+                        }
+                        
                         // Process message here or call into message handler
                         let from = stanza.attr("from").unwrap_or("");
                         let to = stanza.attr("to").unwrap_or("");
@@ -222,6 +234,7 @@ impl XMPPClient {
                                     connected: true,
                                     omemo_manager: omemo_manager,
                                     carbons_enabled: Arc::new(AtomicBool::new(true)),
+                                    iq_registry: Arc::new(TokioMutex::new(crate::xmpp::iq_registry::IqResponseRegistry::new())),
                                 };
                                 
                                 warn!("Calling handle_message_encrypted method");
@@ -304,6 +317,7 @@ impl XMPPClient {
                                         connected: true,
                                         omemo_manager: omemo_manager,
                                         carbons_enabled: Arc::new(AtomicBool::new(true)),
+                                        iq_registry: Arc::new(TokioMutex::new(crate::xmpp::iq_registry::IqResponseRegistry::new())),
                                     };
                                     
                                     if let Err(e) = temp_client.process_carbon(&stanza_clone).await {
@@ -356,6 +370,17 @@ impl XMPPClient {
                             }
                         }
                     } else if stanza.name() == "iq" {
+                        // Route IQ responses through the registry FIRST
+                        if let Some(stanza_id) = stanza.attr("id") {
+                            let mut registry = iq_registry.lock().await;
+                            if registry.try_route(stanza_id, stanza.clone()) {
+                                debug!("Routed IQ response {} to waiting caller", stanza_id);
+                                // Also evict stale entries periodically
+                                registry.evict_stale(std::time::Duration::from_secs(60));
+                                continue;
+                            }
+                        }
+                        
                         // Check if this is a service discovery response
                         if let Some(_query) = stanza.get_child("query", "http://jabber.org/protocol/disco#info") {
                             if let Err(e) = service_discovery.handle_disco_response(&stanza).await {
@@ -395,6 +420,14 @@ impl XMPPClient {
                                     let xml_string = crate::xmpp::omemo_integration::element_to_xml_string(&stanza);
                                     crate::xmpp::omemo_integration::store_pubsub_response(stanza_id.to_string(), xml_string).await;
                                 }
+                            }
+                        } else if stanza.attr("type") == Some("error") {
+                            // Store error IQ responses so pubsub callers receive them
+                            // instead of waiting for a timeout. Without this, error responses
+                            // for pubsub requests (e.g. item-not-found) get dropped.
+                            if let Some(stanza_id) = stanza.attr("id") {
+                                let xml_string = crate::xmpp::omemo_integration::element_to_xml_string(&stanza);
+                                crate::xmpp::omemo_integration::store_pubsub_response(stanza_id.to_string(), xml_string).await;
                             }
                         }
                     }
