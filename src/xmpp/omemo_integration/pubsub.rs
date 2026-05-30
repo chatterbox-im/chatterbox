@@ -721,6 +721,10 @@ pub async fn request_pubsub_items(
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     
+    // Clean up: remove the entry in case a late response arrives after we give up
+    // This prevents unbounded growth of PUBSUB_RESPONSES on repeated timeouts
+    get_pubsub_response(&request_id).await;
+    
     error!("Timeout waiting for PubSub response for request {}", request_id);
     Err(anyhow!("Timeout waiting for PubSub response"))
 }
@@ -728,6 +732,14 @@ pub async fn request_pubsub_items(
 /// Store a pubsub response by request ID
 pub async fn store_pubsub_response(request_id: String, xml_response: String) {
     let mut responses = PUBSUB_RESPONSES.lock().await;
+    // Cap the map size to prevent unbounded growth from orphaned responses
+    if responses.len() > 100 {
+        // Remove some old entries (HashMap order is arbitrary but sufficient for eviction)
+        let keys_to_remove: Vec<String> = responses.keys().take(20).cloned().collect();
+        for key in keys_to_remove {
+            responses.remove(&key);
+        }
+    }
     responses.insert(request_id, xml_response);
 }
 

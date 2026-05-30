@@ -3,13 +3,15 @@
 
 use anyhow::{anyhow, Result};
 use log::{debug, error, info, warn};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::Duration;
 use std::str::FromStr;
 use tokio::sync::Mutex as TokioMutex;
 use tokio_xmpp::{AsyncClient as XMPPAsyncClient, Event as XMPPEvent, BareJid as TokioBareJid};
 use crate::xmpp::XMPPClient;
-use futures_util::StreamExt; // For next() on AsyncClient
+use futures_util::Stream;
 use futures_util::SinkExt; // For close() on AsyncClient
 
 /// Enum for representing client state
@@ -149,98 +151,75 @@ impl XMPPClient {
     }
 
     async fn wait_for_connection(&self, timeout: Duration) -> Result<bool> {
-        if let Some(client) = &self.client {
-            let _start_time = tokio::time::Instant::now();
-            let (status_tx, mut status_rx) = tokio::sync::mpsc::channel(1);
-            let client_clone = client.clone();
-            tokio::spawn(async move {
-                let check_online = async {
-                    loop {
-                        let event = {
-                            let mut client_guard = client_clone.lock().await;
-                            client_guard.next().await
-                        };
-                        match event {
-                            Some(XMPPEvent::Online { .. }) => {
-                                if let Err(e) = status_tx.send(true).await {
-                                    error!("Failed to send connection status: {}", e);
-                                }
-                                break;
-                            },
-                            Some(XMPPEvent::Disconnected(e)) => {
-                                // Provide more detailed error information based on the disconnect reason
-                                match e {
-                                    tokio_xmpp::Error::Auth(_) => {
-                                        error!("Authentication failed - check username and password");
-                                    },
-                                    tokio_xmpp::Error::Io(io_err) => {
-                                        error!("Network error during connection: {}", io_err);
-                                        if io_err.kind() == std::io::ErrorKind::ConnectionRefused {
-                                            error!("Connection refused - server may be down or not accepting connections");
-                                        } else if io_err.kind() == std::io::ErrorKind::TimedOut {
-                                            error!("Connection timed out - check server address and network connectivity");
-                                        } else if io_err.kind() == std::io::ErrorKind::ConnectionReset {
-                                            error!("Connection reset by server - check server configuration");
-                                        }
-                                    },
-                                    tokio_xmpp::Error::Tls(err) => {
-                                        error!("TLS error during connection: {}", err);
-                                    },
-                                    // Handle other errors with a generic message
-                                    other => {
-                                        error!("Connection error: {:?}", other);
-                                    }
-                                }
-                                
-                                if let Err(e) = status_tx.send(false).await {
-                                    error!("Failed to send connection status: {}", e);
-                                }
-                                break;
-                            },
-                            None => {
-                                error!("XMPP stream ended during connection attempt");
-                                if let Err(e) = status_tx.send(false).await {
-                                    error!("Failed to send connection status: {}", e);
-                                }
-                                break;
-                            },
-                            _ => {
-                                tokio::time::sleep(Duration::from_millis(10)).await;
-                            }
+        let client = self.client.as_ref().ok_or_else(|| anyhow!("Client not initialized"))?;
+        let start_time = tokio::time::Instant::now();
+        
+        // Poll the stream non-blockingly until we see Online/Disconnected or timeout.
+        // IMPORTANT: We must not drop a .next() future mid-poll as it corrupts
+        // tokio_xmpp's internal state machine.
+        while tokio::time::Instant::now() - start_time < timeout {
+            let lock_result = tokio::time::timeout(
+                Duration::from_millis(500),
+                client.lock()
+            ).await;
+            
+            match lock_result {
+                Ok(mut client_guard) => {
+                    let event = futures_util::future::poll_fn(|cx| {
+                        match Pin::new(&mut *client_guard).poll_next(cx) {
+                            Poll::Ready(event) => Poll::Ready(Some(event)),
+                            Poll::Pending => Poll::Ready(None),
                         }
-                    }
-                };
-                if tokio::time::timeout(timeout, check_online).await.is_err() {
-                    error!("Connection timed out after {:?}", timeout);
-                    if let Err(e) = status_tx.send(false).await {
-                        error!("Failed to send connection timeout status: {}", e);
-                    }
-                }
-            });
-            tokio::select! {
-                status = status_rx.recv() => {
-                    match status {
-                        Some(true) => {
-                            //debug!("Connection established successfully via status channel");
+                    }).await;
+                    
+                    match event {
+                        Some(Some(XMPPEvent::Online { .. })) => {
                             return Ok(true);
                         },
-                        Some(false) => {
-                            return Err(anyhow!("Connection failed - see logs for details"));
+                        Some(Some(XMPPEvent::Disconnected(e))) => {
+                            match e {
+                                tokio_xmpp::Error::Auth(_) => {
+                                    error!("Authentication failed - check username and password");
+                                },
+                                tokio_xmpp::Error::Io(ref io_err) => {
+                                    error!("Network error during connection: {}", io_err);
+                                    if io_err.kind() == std::io::ErrorKind::ConnectionRefused {
+                                        error!("Connection refused - server may be down");
+                                    } else if io_err.kind() == std::io::ErrorKind::TimedOut {
+                                        error!("Connection timed out - check server address");
+                                    }
+                                },
+                                tokio_xmpp::Error::Tls(ref err) => {
+                                    error!("TLS error during connection: {}", err);
+                                },
+                                ref other => {
+                                    error!("Connection error: {:?}", other);
+                                }
+                            }
+                            return Err(anyhow!("Connection failed: {:?}", e));
+                        },
+                        Some(None) => {
+                            error!("XMPP stream ended during connection attempt");
+                            return Err(anyhow!("XMPP stream ended unexpectedly"));
+                        },
+                        Some(Some(_)) => {
+                            // Other event (e.g. stanza arrived early), continue polling
                         },
                         None => {
-                            return Err(anyhow!("Connection status channel closed unexpectedly"));
+                            // No event ready, sleep briefly
+                            tokio::time::sleep(Duration::from_millis(50)).await;
                         }
                     }
                 },
-                _ = tokio::time::sleep(timeout) => {
-                    //debug!("Timed out waiting for explicit Online event, checking connection status");
-                    warn!("Connection timeout after {:?} but client exists - assuming connected", timeout);
-                    return Ok(true);
+                Err(_) => {
+                    // Lock acquisition timed out, retry
+                    tokio::time::sleep(Duration::from_millis(50)).await;
                 }
             }
-        } else {
-            Err(anyhow!("Client not initialized"))
         }
+        
+        error!("Connection timed out after {:?}", timeout);
+        Err(anyhow!("Connection timed out after {:?}", timeout))
     }
 
     pub async fn disconnect(&mut self) -> Result<()> {
