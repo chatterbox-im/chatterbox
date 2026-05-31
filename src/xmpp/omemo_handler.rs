@@ -24,6 +24,11 @@ impl XMPPClient {
         // so the bridge and event loop share the same Arc map.
         let responses = crate::xmpp::omemo_integration::new_pubsub_responses();
         self.pubsub_responses = Some(responses.clone());
+
+        // Publish late state NOW so the event loop can route PubSub IQ responses
+        // back to us during the rest of initialization (device list fetch, etc.)
+        crate::xmpp::publish_late_state(self);
+
         let pubsub_bridge: Arc<dyn crate::omemo::OmemoPubSub> = Arc::new(
             crate::xmpp::omemo_integration::XmppPubSubBridge::new(
                 stanza_tx,
@@ -63,6 +68,10 @@ impl XMPPClient {
         // Store the OMEMO manager in the client
         self.omemo_manager = Some(Arc::new(TokioMutex::new(omemo_manager)));
         info!("OMEMO initialized successfully");
+
+        // Re-publish late state with the OMEMO manager now available
+        // so the event loop can decrypt incoming messages
+        crate::xmpp::publish_late_state(self);
         
         // Force refresh device lists after initialization to ensure fresh data
         info!("Forcing device list refresh for known contacts to avoid stale data");
