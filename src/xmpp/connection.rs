@@ -80,7 +80,7 @@ impl XMPPClient {
             ));
             
             // Wait for connection
-            match self.wait_for_connection(Duration::from_secs(10), online_rx).await {
+            match self.wait_for_connection(Duration::from_secs(20), online_rx).await {
                 Ok(true) => {
                     info!("Connected to XMPP server successfully");
                     
