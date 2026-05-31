@@ -85,6 +85,21 @@ impl OmemoPubSub for XmppPubSubBridge {
     }
 
     async fn publish_device_list(&self, device_ids: &[DeviceId]) -> Result<()> {
+        // Try with publish-options first, then retry without on error.
+        // This mirrors Conversations' approach: when the server returns
+        // precondition-not-met (node config doesn't match publish-options),
+        // we retry without publish-options to just publish the item as-is.
+        let result = self.send_device_list_iq(device_ids, true).await;
+        if result.is_ok() {
+            return result;
+        }
+        info!("Device list publish with publish-options failed, retrying without publish-options (node may already exist with different config)");
+        self.send_device_list_iq(device_ids, false).await
+    }
+}
+
+impl XmppPubSubBridge {
+    async fn send_device_list_iq(&self, device_ids: &[DeviceId], with_publish_options: bool) -> Result<()> {
         use crate::xmpp::transport;
         use uuid::Uuid;
         use tokio::time::Duration;
@@ -116,40 +131,41 @@ impl OmemoPubSub for XmppPubSubBridge {
             .append(item_element)
             .build();
 
-        // Add publish-options for open access (required for OMEMO interop)
-        let publish_options = xmpp_parsers::Element::builder("publish-options", "http://jabber.org/protocol/pubsub")
-            .append(
-                xmpp_parsers::Element::builder("x", "jabber:x:data")
-                    .attr("type", "submit")
-                    .append(
-                        xmpp_parsers::Element::builder("field", "jabber:x:data")
-                            .attr("var", "FORM_TYPE")
-                            .attr("type", "hidden")
-                            .append({
-                                let mut v = xmpp_parsers::Element::builder("value", "jabber:x:data").build();
-                                v.append_text_node("http://jabber.org/protocol/pubsub#publish-options");
-                                v
-                            })
-                            .build()
-                    )
-                    .append(
-                        xmpp_parsers::Element::builder("field", "jabber:x:data")
-                            .attr("var", "pubsub#access_model")
-                            .append({
-                                let mut v = xmpp_parsers::Element::builder("value", "jabber:x:data").build();
-                                v.append_text_node("open");
-                                v
-                            })
-                            .build()
-                    )
-                    .build()
-            )
+        let mut pubsub_element = xmpp_parsers::Element::builder("pubsub", "http://jabber.org/protocol/pubsub")
+            .append(publish_element)
             .build();
 
-        let pubsub_element = xmpp_parsers::Element::builder("pubsub", "http://jabber.org/protocol/pubsub")
-            .append(publish_element)
-            .append(publish_options)
-            .build();
+        if with_publish_options {
+            let publish_options = xmpp_parsers::Element::builder("publish-options", "http://jabber.org/protocol/pubsub")
+                .append(
+                    xmpp_parsers::Element::builder("x", "jabber:x:data")
+                        .attr("type", "submit")
+                        .append(
+                            xmpp_parsers::Element::builder("field", "jabber:x:data")
+                                .attr("var", "FORM_TYPE")
+                                .attr("type", "hidden")
+                                .append({
+                                    let mut v = xmpp_parsers::Element::builder("value", "jabber:x:data").build();
+                                    v.append_text_node("http://jabber.org/protocol/pubsub#publish-options");
+                                    v
+                                })
+                                .build()
+                        )
+                        .append(
+                            xmpp_parsers::Element::builder("field", "jabber:x:data")
+                                .attr("var", "pubsub#access_model")
+                                .append({
+                                    let mut v = xmpp_parsers::Element::builder("value", "jabber:x:data").build();
+                                    v.append_text_node("open");
+                                    v
+                                })
+                                .build()
+                        )
+                        .build()
+                )
+                .build();
+            pubsub_element.append_child(publish_options);
+        }
 
         let iq = xmpp_parsers::Element::builder("iq", "jabber:client")
             .attr("type", "set")
@@ -157,7 +173,7 @@ impl OmemoPubSub for XmppPubSubBridge {
             .append(pubsub_element)
             .build();
 
-        info!("Sending device list publish stanza with ID: {}", iq_id);
+        info!("Sending device list publish stanza with ID: {} (publish-options: {})", iq_id, with_publish_options);
 
         transport::send_stanza(&self.stanza_tx, iq)
             .map_err(|e| anyhow!("Failed to send device list publish stanza: {}", e))?;
@@ -171,7 +187,15 @@ impl OmemoPubSub for XmppPubSubBridge {
                         Ok(())
                     }
                     Some("error") => {
-                        error!("Server returned error for device list publish");
+                        // Log the error details like Conversations does
+                        let error_xml = element_to_xml_string(&response);
+                        let is_precondition_not_met = error_xml.contains("precondition-not-met");
+                        error!(
+                            "Server returned error for device list publish (publish-options: {}, precondition-not-met: {}): {}",
+                            with_publish_options,
+                            is_precondition_not_met,
+                            &error_xml[..error_xml.len().min(500)]
+                        );
                         Err(anyhow!("Server rejected device list publish"))
                     }
                     other => {
