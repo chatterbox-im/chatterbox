@@ -2,6 +2,7 @@
 //! OMEMO message decryption
 
 use log::{debug, error, info, warn};
+use std::time::Instant;
 use hex;
 
 use crate::omemo::crypto;
@@ -135,7 +136,7 @@ impl OmemoManager {
         
         let key = (bare_jid.clone(), device_id);
         
-        if self.pending_prekey_sends.contains(&key) {
+        if self.pending_prekey_sends.contains_key(&key) {
             info!("Receiving message from {}:{} while waiting to send PreKey message - processing normally", bare_jid, device_id);
         }
         
@@ -321,7 +322,7 @@ impl OmemoManager {
         
         // Mark this device as needing a fresh PreKey exchange
         let key = (bare_jid.clone(), device_id);
-        self.pending_prekey_sends.insert(key.clone());
+        self.pending_prekey_sends.insert(key.clone(), Instant::now());
         
         self.sessions.remove(&key);
         
@@ -355,7 +356,7 @@ impl OmemoManager {
         
         for target_device_id in target_device_ids {
             let device_key = (bare_jid.clone(), target_device_id);
-            self.pending_prekey_sends.insert(device_key.clone());
+            self.pending_prekey_sends.insert(device_key.clone(), Instant::now());
             info!("Marked device {}:{} for PreKey message sending after session reset", bare_jid, target_device_id);
         }
         

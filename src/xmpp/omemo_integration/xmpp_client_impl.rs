@@ -13,50 +13,6 @@ use crate::omemo::device_id::DeviceId;
 impl crate::xmpp::XMPPClient {
 
     /// Send an OMEMO encrypted message
-    pub async fn send_omemo_encrypted_message(&self, recipient: &str, plaintext: &str) -> Result<()> {
-        let _stanza_tx = self.stanza_tx.as_ref().ok_or_else(|| {
-            error!("XMPP client not initialized when trying to send encrypted message");
-            anyhow!("XMPP client not initialized")
-        })?;
-        let _recipient_jid = match recipient.parse::<JidBare>() {
-            Ok(jid) => jid,
-            Err(e) => {
-                error!("Invalid recipient JID '{}': {}", recipient, e);
-                return Err(anyhow!("Invalid recipient JID: {}", e));
-            }
-        };
-        
-        // Generate a message ID
-        let msg_id = Uuid::new_v4().to_string();
-        info!("Preparing to send encrypted message to {} with ID: {}", recipient, msg_id);
-        
-        // Use the send_encrypted_message method which has proper implementation
-        let mut temp_client = Self {
-            jid: self.jid.clone(),
-            stanza_tx: self.stanza_tx.clone(),
-            msg_tx: self.msg_tx.clone(),
-            pending_receipts: self.pending_receipts.clone(),
-            connected: self.connected,
-            omemo_manager: self.omemo_manager.clone(),
-            carbons_enabled: self.carbons_enabled.clone(),
-            iq_registry: self.iq_registry.clone(),
-            pubsub_responses: self.pubsub_responses.clone(),
-            late_state_tx: None,
-            typing_tx: self.typing_tx.clone(),
-            omemo_dir: self.omemo_dir.clone(),
-        };
-        
-        match temp_client.send_encrypted_message(recipient, plaintext).await {
-            Ok(_) => {
-                Ok(())
-            },
-            Err(e) => {
-                error!("Failed to send OMEMO encrypted message: {}", e);
-                Err(anyhow!("Failed to send OMEMO encrypted message: {}", e))
-            }
-        }
-    }
-
     /// Check if an OMEMO element is related to PubSub
     pub fn is_omemo_pubsub(pubsub: &xmpp_parsers::Element) -> bool {
         // Check items element for OMEMO namespace

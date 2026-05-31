@@ -35,7 +35,6 @@ pub use pubsub::{
 };
 pub use message::{
     handle_omemo_message,
-    encrypt_message,
     publish_device_list,
     publish_key_bundle,
     XmppClient,

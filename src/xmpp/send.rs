@@ -20,19 +20,7 @@ impl XMPPClient {
         
         if omemo_enabled {
             info!("OMEMO is enabled, sending encrypted message to: {}", recipient);
-            
-            match self.send_encrypted_message(recipient, content).await {
-                Ok(_) => Ok(()),
-                Err(e) => {
-                    if e.to_string().contains("SECURITY VIOLATION") || 
-                       e.to_string().contains("verification failed") {
-                        warn!("Initial encryption failed, trying with debug version: {}", e);
-                        self.debug_send_encrypted_message(recipient, content).await
-                    } else {
-                        Err(e)
-                    }
-                }
-            }
+            self.send_encrypted_message(recipient, content).await
         } else {
             info!("OMEMO is disabled, sending plaintext message to: {}", recipient);
             warn!("⚠️ WARNING: Message is being sent in plaintext without encryption!");
@@ -59,7 +47,11 @@ impl XMPPClient {
             }
         };
         
-        // Encrypt the message
+        // Encrypt the message.
+        // NOTE: The lock is held across the entire encrypt_message() call because the
+        // Double Ratchet algorithm mutates session state (ratchet key advances) during
+        // encryption. Releasing the lock mid-encrypt would allow concurrent sends to
+        // produce identical ciphertext or corrupt the ratchet chain.
         let mut omemo_manager_guard = omemo_manager.lock().await;
         let encrypted_message = match omemo_manager_guard.encrypt_message(to, content).await {
             Ok(message) => message,
@@ -198,170 +190,4 @@ impl XMPPClient {
         Ok(())
     }
 
-    // Helper function for debugging OMEMO encryption verification issues
-    pub async fn debug_send_encrypted_message(&mut self, to: &str, content: &str) -> Result<()> {
-        // Get our OMEMO manager
-        let omemo_manager = match &self.omemo_manager {
-            Some(manager) => manager.clone(),
-            None => {
-                self.initialize_client().await?;
-                match &self.omemo_manager {
-                    Some(manager) => manager.clone(),
-                    None => {
-                        error!("Failed to initialize OMEMO manager");
-                        return Err(anyhow!("Failed to initialize OMEMO manager"));
-                    }
-                }
-            }
-        };
-        
-        // Encrypt the message
-        let mut omemo_manager_guard = omemo_manager.lock().await;
-        let encrypted_message = match omemo_manager_guard.encrypt_message(to, content).await {
-            Ok(message) => message,
-            Err(e) => {
-                error!("Failed to encrypt message: {}", e);
-                return Err(anyhow!("Failed to encrypt message: {}", e));
-            }
-        };
-        
-        // Verification (temporarily disabled)
-        let omemo_verified: Result<(), crate::omemo::EncryptionVerificationError> = Ok(());
-        match &omemo_verified {
-            Ok(_) => debug!("DEBUG: OMEMO encryption verification passed - no plaintext leaked"),
-            Err(e) => {
-                error!("DEBUG: OMEMO encryption verification failed: {}", e);
-                return Err(anyhow!("OMEMO encryption verification failed: {}", e));
-            }
-        }
-
-        drop(omemo_manager_guard);
-        
-        // Generate a message ID
-        let id = uuid::Uuid::new_v4().to_string();
-        
-        // Create the OMEMO message stanza
-        let mut message_element = Element::builder("message", "jabber:client").build();
-        message_element.set_attr("id", &id);
-        message_element.set_attr("to", to);
-        message_element.set_attr("type", "chat");
-        
-        // Add receipt request
-        let request_element = Element::builder("request", custom_ns::RECEIPTS).build();
-        message_element.append_child(request_element);
-        
-        // Add chat state
-        let active_element = Element::builder("active", custom_ns::CHATSTATES).build();
-        message_element.append_child(active_element);
-        
-        // Create encrypted element
-        let mut encrypted_element = Element::builder("encrypted", custom_ns::OMEMO_V1).build();
-        
-        // Create header element
-        let mut header_element = Element::builder("header", custom_ns::OMEMO_V1).build();
-        header_element.set_attr("sid", &encrypted_message.sender_device_id.to_string());
-        
-        // Add key elements
-        for (device_id, encrypted_key) in &encrypted_message.encrypted_keys {
-            let mut key_element = Element::builder("key", custom_ns::OMEMO_V1).build();
-            key_element.set_attr("rid", &device_id.to_string());
-            key_element.append_text_node(&base64::engine::general_purpose::STANDARD.encode(encrypted_key));
-            header_element.append_child(key_element);
-        }
-        
-        // Add IV element
-        let mut iv_element = Element::builder("iv", custom_ns::OMEMO_V1).build();
-        iv_element.append_text_node(&base64::engine::general_purpose::STANDARD.encode(&encrypted_message.iv));
-        header_element.append_child(iv_element);
-        
-        // Add payload element
-        let mut payload_element = Element::builder("payload", custom_ns::OMEMO_V1).build();
-        payload_element.append_text_node(&base64::engine::general_purpose::STANDARD.encode(&encrypted_message.ciphertext));
-        
-        // Assemble the elements
-        encrypted_element.append_child(header_element);
-        encrypted_element.append_child(payload_element);
-        message_element.append_child(encrypted_element);
-        
-        // Add store hint (XEP-0334)
-        let store_hint = Element::builder("store", "urn:xmpp:hints").build();
-        message_element.append_child(store_hint);
-        
-        // Use the message element
-        let stanza = message_element;
-
-        // Convert the stanza to string for inspection
-        let stanza_str = introspection::stanza_to_string(&stanza);
-        
-        // Verify the stanza structure
-        match verify_omemo_stanza(&stanza, content) {
-            Ok(_) => debug!("DEBUG: OMEMO stanza structure verification passed - all required elements present"),
-            Err(e) => {
-                error!("DEBUG: {}", e);
-                
-                // DETAILED ERROR DIAGNOSIS
-                if let Some(encrypted) = stanza.get_child("encrypted", custom_ns::OMEMO)
-                    .or_else(|| stanza.get_child("encrypted", custom_ns::OMEMO_V1))
-                    .or_else(|| stanza.get_child("encrypted", "")) {
-                    
-                    if let Some(header) = encrypted.get_child("header", custom_ns::OMEMO)
-                        .or_else(|| encrypted.get_child("header", custom_ns::OMEMO_V1))
-                        .or_else(|| encrypted.get_child("header", "")) {
-                        
-                        if header.get_child("iv", custom_ns::OMEMO).is_none() && header.get_child("iv", "").is_none() {
-                            error!("DEBUG: IV element missing");
-                        }
-                    } else {
-                        error!("DEBUG: Header element missing");
-                    }
-                    
-                    if encrypted.get_child("payload", custom_ns::OMEMO).is_none() && encrypted.get_child("payload", "").is_none() {
-                        error!("DEBUG: Payload element missing");
-                    }
-                } else {
-                    error!("DEBUG: Encrypted element missing");
-                    for _child in stanza.children() {
-                        // debug logging omitted
-                    }
-                }
-                
-                return Err(anyhow!("Failed to create valid OMEMO stanza: {}", e));
-            }
-        }
-        
-        // Send to XML inspectors for the test to verify
-        introspection::inspect_outbound_xml(&stanza_str);
-        
-        // Send the message
-        self.send_stanza(stanza)
-            .map_err(|e| anyhow!("Failed to send stanza: {}", e))?;
-        debug!("DEBUG: Successfully sent stanza to XMPP server");
-        
-        // Store message ID in pending receipts
-        let mut pending_receipts_guard = self.pending_receipts.lock().await;
-        let pending_message = PendingMessage {
-            id: id.clone(),
-            to: to.to_string(),
-            content: content.to_string(),
-            timestamp: chrono::Utc::now().timestamp() as u64,
-            status: DeliveryStatus::Sent,
-        };
-        pending_receipts_guard.insert(id.clone(), pending_message);
-        
-        // Create a "sent" message for the UI
-        let message = Message {
-            id: id.clone(),
-            sender_id: "me".to_string(),
-            recipient_id: to.to_string(),
-            content: content.to_string(),
-            timestamp: chrono::Utc::now().timestamp() as u64,
-            delivery_status: DeliveryStatus::Sent,
-        };
-        
-        if let Err(e) = self.msg_tx.send(message).await {
-            error!("DEBUG: Failed to send message to UI: {}", e);
-        }
-        
-        Ok(())
-    }
 }

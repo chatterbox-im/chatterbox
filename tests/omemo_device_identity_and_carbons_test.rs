@@ -55,7 +55,7 @@ async fn test_omemo_device_identity_and_carbons() -> Result<()> {
     
     // 2. Publish device identity and bundle
     info!("Publishing device identity and bundle...");
-    match ca_client.publish_our_device_list().await {
+    match ca_client.publish_device_list().await {
         Ok(_) => info!("Successfully published device list"),
         Err(e) => {
             error!("Failed to publish device list: {}", e);
@@ -149,7 +149,7 @@ async fn test_omemo_device_identity_and_carbons() -> Result<()> {
     info!("Retrieving device list for our own account...");
     // Use the full JID (username@domain) instead of just the username
     let full_jid = format!("{}@{}", ca_credentials.username, ca_credentials.server);
-    let device_list = match ca_client.force_refresh_device_list(&full_jid).await {
+    let device_list: Vec<u32> = match ca_client.get_contact_devices(&full_jid).await {
         Ok(list) => {
             info!("Retrieved device list: {:?}", list);
             list

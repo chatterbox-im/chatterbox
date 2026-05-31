@@ -1144,20 +1144,14 @@ pub mod utils {
         xml.push_str(&BASE64.encode(&message.iv));
         xml.push_str("</iv>");
         
-        // Ephemeral key (only for PreKey messages)
-        if let Some(ephemeral_key) = &message.ephemeral_key {
-            log::debug!("XML_DEBUG: Adding ephemeral key to XML");
-            xml.push_str("<ephemeral>");
-            xml.push_str(&BASE64.encode(ephemeral_key));
-            xml.push_str("</ephemeral>");
-        } else {
-            log::debug!("XML_DEBUG: No ephemeral key to add to XML");
-        }
-        
-        // Keys
+        // Keys — prekey="true" is required on keys containing PreKeySignalMessages
         for (device_id, key) in &message.encrypted_keys {
             log::debug!("XML_DEBUG: Adding key for device {} to XML", device_id);
-            xml.push_str(&format!("<key rid='{}'>{}</key>", device_id, BASE64.encode(key)));
+            if message.prekey_devices.contains(device_id) {
+                xml.push_str(&format!("<key rid='{}' prekey='true'>{}</key>", device_id, BASE64.encode(key)));
+            } else {
+                xml.push_str(&format!("<key rid='{}'>{}</key>", device_id, BASE64.encode(key)));
+            }
         }
         
         xml.push_str("</header>");
@@ -1184,5 +1178,158 @@ fn normalize_jid_to_bare(jid: &str) -> String {
         clean_jid[..slash_pos].to_string()
     } else {
         clean_jid
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::utils::*;
+    use std::collections::HashSet;
+
+    fn sample_omemo_message(prekey_devices: HashSet<DeviceId>) -> OmemoMessage {
+        let mut encrypted_keys = HashMap::new();
+        encrypted_keys.insert(1001u32, vec![0xAA; 32]);
+        encrypted_keys.insert(2002u32, vec![0xBB; 32]);
+
+        OmemoMessage {
+            sender_device_id: 12345u32,
+            ratchet_key: vec![0; 32],
+            previous_counter: 0,
+            counter: 0,
+            ciphertext: vec![0xCC; 48],
+            mac: vec![],
+            iv: vec![0xDD; 12],
+            encrypted_keys,
+            is_prekey: !prekey_devices.is_empty(),
+            ephemeral_key: None,
+            prekey_devices,
+        }
+    }
+
+    #[test]
+    fn test_xml_output_structure_for_conversations() {
+        // Verify the XML output matches what Conversations expects to receive
+        let msg = sample_omemo_message(HashSet::new());
+        let xml = utils::omemo_message_to_xml(&msg);
+
+        // Parse with roxmltree to validate structural correctness
+        // Wrap in a parent so xmlns is exposed properly
+        let wrapped = format!("<msg>{}</msg>", xml);
+        let doc = roxmltree::Document::parse(&wrapped).unwrap();
+
+        let encrypted = doc.descendants()
+            .find(|n| n.tag_name().name() == "encrypted")
+            .expect("Must have <encrypted> element");
+        assert_eq!(encrypted.tag_name().namespace(), 
+            Some("eu.siacs.conversations.axolotl"));
+
+        let header = encrypted.children()
+            .find(|n| n.tag_name().name() == "header")
+            .expect("Must have <header> element");
+        assert_eq!(header.attribute("sid").unwrap(), "12345");
+
+        let iv = header.children()
+            .find(|n| n.tag_name().name() == "iv")
+            .expect("Must have <iv> element");
+        assert!(!iv.text().unwrap_or("").is_empty());
+
+        let keys: Vec<_> = header.children()
+            .filter(|n| n.tag_name().name() == "key")
+            .collect();
+        assert_eq!(keys.len(), 2);
+
+        let payload = encrypted.children()
+            .find(|n| n.tag_name().name() == "payload")
+            .expect("Must have <payload> element");
+        assert!(!payload.text().unwrap_or("").is_empty());
+    }
+
+    #[test]
+    fn test_prekey_true_attribute_present_in_xml() {
+        let mut prekey_set = HashSet::new();
+        prekey_set.insert(1001u32);
+        let msg = sample_omemo_message(prekey_set);
+        let xml = utils::omemo_message_to_xml(&msg);
+
+        // Device 1001 should have prekey='true'
+        assert!(xml.contains("rid='1001' prekey='true'"),
+            "Expected prekey='true' on device 1001, got: {}", xml);
+        // Device 2002 should NOT have prekey attribute
+        assert!(xml.contains("rid='2002'>"),
+            "Device 2002 should not have prekey attribute, got: {}", xml);
+    }
+
+    #[test]
+    fn test_xml_uses_conversations_namespace() {
+        let msg = sample_omemo_message(HashSet::new());
+        let xml = utils::omemo_message_to_xml(&msg);
+        assert!(xml.contains("xmlns='eu.siacs.conversations.axolotl'"),
+            "Must use legacy Conversations namespace");
+    }
+
+    #[test]
+    fn test_xml_no_ephemeral_element_when_none() {
+        let msg = sample_omemo_message(HashSet::new());
+        let xml = utils::omemo_message_to_xml(&msg);
+        assert!(!xml.contains("<ephemeral"),
+            "Should not emit <ephemeral> element when ephemeral_key is None");
+    }
+
+    #[test]
+    fn test_device_list_to_xml_format() {
+        let xml = utils::device_list_to_xml(&[111, 222, 333]).unwrap();
+        assert!(xml.contains("<device id='111'"));
+        assert!(xml.contains("<device id='222'"));
+        assert!(xml.contains("<device id='333'"));
+        assert!(xml.contains("xmlns='eu.siacs.conversations.axolotl'"));
+    }
+
+    #[test]
+    fn test_xml_output_parseable_by_conversations_logic() {
+        // The real receive path (omemo_handler.rs) uses tokio_xmpp::Element parsing.
+        // This test validates that our XML output can be parsed by an XML parser
+        // and contains all required attributes Conversations looks for.
+        use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+
+        let mut prekey_set = HashSet::new();
+        prekey_set.insert(1001u32);
+        let msg = sample_omemo_message(prekey_set);
+        let xml = utils::omemo_message_to_xml(&msg);
+
+        // Parse as a tokio_xmpp Element (same library as production code)
+        let element: tokio_xmpp::Element = xml.parse().unwrap();
+
+        // Conversations checks: element name is "encrypted", ns is OMEMO
+        assert_eq!(element.name(), "encrypted");
+        assert_eq!(element.ns(), "eu.siacs.conversations.axolotl");
+
+        // Header with sid
+        let header = element.get_child("header", "eu.siacs.conversations.axolotl").unwrap();
+        assert_eq!(header.attr("sid").unwrap(), "12345");
+
+        // IV element
+        let iv_elem = header.children().find(|e| e.name() == "iv").unwrap();
+        let iv_bytes = B64.decode(iv_elem.text()).unwrap();
+        assert_eq!(iv_bytes, vec![0xDD; 12]);
+
+        // Key elements
+        let keys: Vec<_> = header.children().filter(|e| e.name() == "key").collect();
+        assert_eq!(keys.len(), 2);
+
+        // Find the prekey device (1001) — must have prekey="true"
+        let prekey_elem = keys.iter().find(|k| k.attr("rid") == Some("1001")).unwrap();
+        assert_eq!(prekey_elem.attr("prekey"), Some("true"),
+            "Device 1001 must have prekey='true' for Conversations compatibility");
+
+        // Non-prekey device (2002) — must NOT have prekey attribute
+        let regular_elem = keys.iter().find(|k| k.attr("rid") == Some("2002")).unwrap();
+        assert_eq!(regular_elem.attr("prekey"), None,
+            "Device 2002 must not have prekey attribute");
+
+        // Payload
+        let payload = element.get_child("payload", "eu.siacs.conversations.axolotl").unwrap();
+        let payload_bytes = B64.decode(payload.text()).unwrap();
+        assert_eq!(payload_bytes, vec![0xCC; 48]);
     }
 }

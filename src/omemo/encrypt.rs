@@ -3,6 +3,7 @@
 
 use log::{debug, error, info, warn};
 use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 use tokio::time::{timeout, Duration};
 
 use crate::omemo::crypto;
@@ -94,7 +95,7 @@ impl OmemoManager {
         
         // Store the ephemeral public key for this device to include in PreKey messages
         let device_key = (bare_jid.clone(), remote_device_id);
-        self.prekey_ephemeral_keys.insert(device_key.clone(), ephemeral_key_pair.public_key.clone());
+        self.prekey_ephemeral_keys.insert(device_key.clone(), (ephemeral_key_pair.public_key.clone(), Instant::now()));
         
         // Store the remote device's PreKey IDs so the PreKeySignalMessage can reference them
         let remote_spk_id = remote_identity.signed_pre_key.id;
@@ -103,7 +104,7 @@ impl OmemoManager {
         } else {
             Some(remote_identity.pre_keys[0].id)
         };
-        self.remote_prekey_ids.insert(device_key, (remote_spk_id, remote_opk_id));
+        self.remote_prekey_ids.insert(device_key, (remote_spk_id, remote_opk_id, Instant::now()));
         
         let session = OmemoSession::new_initiator_with_ephemeral(
             bare_jid.clone(),
@@ -183,6 +184,9 @@ impl OmemoManager {
     pub async fn encrypt_message(&mut self, recipient: &str, plaintext: &str) -> Result<OmemoMessage, OmemoError> {
         debug!("encrypt_message called for recipient '{}'", recipient);
         info!("Encrypting message for {}", recipient);
+        
+        // Evict stale pending entries to prevent unbounded growth
+        self.evict_stale_entries();
         
         // Get the device list for the recipient with timeout protection
         let device_discovery_timeout = Duration::from_secs(15);
@@ -330,7 +334,7 @@ impl OmemoManager {
                 info!("ENCRYPT_DEBUG: Processing device {}:{}", jid, device_id);
                 let device_key = (jid.clone(), device_id);
                 
-                let needs_prekey = self.pending_prekey_sends.contains(&device_key);
+                let needs_prekey = self.pending_prekey_sends.contains_key(&device_key);
                 info!("ENCRYPT_DEBUG: Device {}:{} needs_prekey: {}", jid, device_id, needs_prekey);
                 
                 // Skip ignored devices UNLESS they need a PreKey message
@@ -371,12 +375,12 @@ impl OmemoManager {
                 
                 let prekey_params = if use_prekey_format {
                     let identity_key = self.key_bundle.as_ref().unwrap().identity_key_pair.public_key.clone();
-                    let base_key = self.prekey_ephemeral_keys.get(&device_key).cloned();
+                    let base_key = self.prekey_ephemeral_keys.get(&device_key).map(|(k, _)| k.clone());
                     let registration_id = self.device_id;
                     // Get the REMOTE device's PreKey IDs (stored during session creation)
                     let (remote_spk_id, remote_opk_id) = self.remote_prekey_ids
                         .get(&device_key)
-                        .copied()
+                        .map(|(spk, opk, _)| (*spk, *opk))
                         .unwrap_or_else(|| {
                             warn!("ENCRYPT_DEBUG: No stored remote prekey IDs for {}:{}, using defaults", jid, device_id);
                             (0, None)
@@ -439,7 +443,7 @@ impl OmemoManager {
             device_list_copy.iter()
                 .find_map(|(jid, device_id)| {
                     let device_key = (jid.clone(), *device_id);
-                    self.prekey_ephemeral_keys.get(&device_key).cloned()
+                    self.prekey_ephemeral_keys.get(&device_key).map(|(k, _)| k.clone())
                 })
         } else {
             None

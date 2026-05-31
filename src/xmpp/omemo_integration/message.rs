@@ -55,29 +55,6 @@ pub async fn handle_omemo_message(
     Ok(plaintext)
 }
 
-/// Encrypt a message for a recipient
-pub async fn encrypt_message(
-    manager: Arc<TokioMutex<OmemoManager>>,
-    recipient: &str,
-    content: &str,
-) -> Result<String> {
-    // Encrypt the message using the OMEMO manager
-    let omemo_message = {
-        let mut manager_guard = manager.lock().await;
-        manager_guard.encrypt_message(recipient, content).await?
-    };
-    
-    // Convert the OMEMO message to an XML stanza
-    let xml = {
-        let manager_guard = manager.lock().await;
-        manager_guard.message_to_xml(&omemo_message)
-    };
-    
-    info!("Message encrypted successfully for {}", recipient);
-    
-    Ok(xml)
-}
-
 /// Publish device list to the XMPP server
 pub async fn publish_device_list(
     manager: Arc<TokioMutex<OmemoManager>>,

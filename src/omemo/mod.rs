@@ -9,6 +9,7 @@ use thiserror::Error;
 use log::{debug, info, warn};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::Mutex;
 use async_trait::async_trait;
 
@@ -178,15 +179,17 @@ pub struct OmemoManager {
     /// Set of devices that need fresh session establishment after reset
     pub pending_session_rebuilds: HashSet<(String, DeviceId)>,
     
-    /// Set of devices that we've reset sessions with and need to send PreKey messages to
-    pub pending_prekey_sends: HashSet<(String, DeviceId)>,
+    /// Devices that we've reset sessions with and need to send PreKey messages to.
+    /// Value is the time when the entry was added (for TTL eviction).
+    pub pending_prekey_sends: HashMap<(String, DeviceId), Instant>,
     
-    /// Ephemeral keys for pending PreKey messages to specific devices
-    pub(crate) prekey_ephemeral_keys: HashMap<(String, DeviceId), Vec<u8>>,
+    /// Ephemeral keys for pending PreKey messages to specific devices.
+    /// Value is (key_bytes, insertion_time) for TTL eviction.
+    pub(crate) prekey_ephemeral_keys: HashMap<(String, DeviceId), (Vec<u8>, Instant)>,
 
     /// Remote device PreKey IDs captured during session creation:
-    /// (jid, device_id) → (signed_pre_key_id, Option<one_time_pre_key_id>)
-    pub(crate) remote_prekey_ids: HashMap<(String, DeviceId), (u32, Option<u32>)>,
+    /// (jid, device_id) → (signed_pre_key_id, Option<one_time_pre_key_id>, insertion_time)
+    pub(crate) remote_prekey_ids: HashMap<(String, DeviceId), (u32, Option<u32>, Instant)>,
 
     /// PubSub operations — injected dependency instead of global access
     pub(crate) pubsub: Arc<dyn OmemoPubSub>,
@@ -252,7 +255,7 @@ impl OmemoManager {
             sessions: HashMap::new(),
             prekey_rotation_config: PreKeyRotationConfig::default(),
             pending_session_rebuilds: HashSet::new(),
-            pending_prekey_sends: HashSet::new(),
+            pending_prekey_sends: HashMap::new(),
             prekey_ephemeral_keys: HashMap::new(),
             remote_prekey_ids: HashMap::new(),
             pubsub,
@@ -303,6 +306,31 @@ impl OmemoManager {
     /// Get a reference to the storage Arc
     pub fn get_storage(&self) -> Arc<Mutex<OmemoStorage>> {
         self.storage.clone()
+    }
+
+    /// Maximum age for pending prekey entries before eviction (1 hour).
+    const PENDING_TTL_SECS: u64 = 3600;
+    /// Maximum entries in pending collections before forced eviction.
+    const PENDING_CAP: usize = 1000;
+
+    /// Evict stale entries from bounded collections.
+    /// Call periodically (e.g., before each encrypt) to prevent unbounded growth.
+    pub fn evict_stale_entries(&mut self) {
+        use std::time::Duration;
+        let ttl = Duration::from_secs(Self::PENDING_TTL_SECS);
+        let now = Instant::now();
+
+        self.pending_prekey_sends.retain(|_, inserted| now.duration_since(*inserted) < ttl);
+        self.prekey_ephemeral_keys.retain(|_, (_, inserted)| now.duration_since(*inserted) < ttl);
+        self.remote_prekey_ids.retain(|_, (_, _, inserted)| now.duration_since(*inserted) < ttl);
+
+        // Hard cap: if still over limit, drop oldest entries
+        if self.pending_prekey_sends.len() > Self::PENDING_CAP {
+            let mut entries: Vec<_> = self.pending_prekey_sends.drain().collect();
+            entries.sort_by_key(|(_, t)| *t);
+            entries.truncate(Self::PENDING_CAP);
+            self.pending_prekey_sends = entries.into_iter().collect();
+        }
     }
 
     /// Normalize a JID to bare JID (without resource) for OMEMO session storage
@@ -428,6 +456,55 @@ mod tests {
         let device_id = manager.get_device_id();
         assert_eq!(device_id, explicit_id, "Manager should use the explicitly provided device ID");
         
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_evict_stale_entries_removes_expired() -> Result<(), anyhow::Error> {
+        let storage = create_test_storage().await?;
+        let mut manager = OmemoManager::new(storage, "evict@test.com".to_string(), Some(99), test_pubsub()).await?;
+
+        // Insert an entry with a fake old timestamp (simulate expired)
+        let old_time = Instant::now() - std::time::Duration::from_secs(7200); // 2 hours ago
+        let fresh_time = Instant::now();
+
+        manager.pending_prekey_sends.insert(
+            ("old@peer.com".to_string(), 1u32), old_time);
+        manager.pending_prekey_sends.insert(
+            ("fresh@peer.com".to_string(), 2u32), fresh_time);
+        manager.prekey_ephemeral_keys.insert(
+            ("old@peer.com".to_string(), 1u32), (vec![0xAA; 32], old_time));
+        manager.remote_prekey_ids.insert(
+            ("old@peer.com".to_string(), 1u32), (1, Some(2), old_time));
+
+        assert_eq!(manager.pending_prekey_sends.len(), 2);
+        manager.evict_stale_entries();
+
+        assert_eq!(manager.pending_prekey_sends.len(), 1);
+        assert!(manager.pending_prekey_sends.contains_key(
+            &("fresh@peer.com".to_string(), 2u32)));
+        assert!(manager.prekey_ephemeral_keys.is_empty());
+        assert!(manager.remote_prekey_ids.is_empty());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_evict_stale_entries_cap() -> Result<(), anyhow::Error> {
+        let storage = create_test_storage().await?;
+        let mut manager = OmemoManager::new(storage, "cap@test.com".to_string(), Some(99), test_pubsub()).await?;
+
+        // Insert more than PENDING_CAP entries, all fresh
+        let now = Instant::now();
+        for i in 0..1050u32 {
+            manager.pending_prekey_sends.insert(
+                (format!("peer{}@test.com", i), DeviceId::from(i)), now);
+        }
+        assert_eq!(manager.pending_prekey_sends.len(), 1050);
+
+        manager.evict_stale_entries();
+
+        assert_eq!(manager.pending_prekey_sends.len(), OmemoManager::PENDING_CAP);
         Ok(())
     }
 }

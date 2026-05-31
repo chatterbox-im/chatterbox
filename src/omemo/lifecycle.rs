@@ -441,7 +441,7 @@ impl OmemoManager {
     pub async fn force_reset_broken_sessions(&mut self) -> Result<Vec<String>, OmemoError> {
         let mut reset_sessions = Vec::new();
         
-        let stuck_sessions: Vec<_> = self.pending_prekey_sends.iter().cloned().collect();
+        let stuck_sessions: Vec<_> = self.pending_prekey_sends.keys().cloned().collect();
         
         for (bare_jid, device_id) in stuck_sessions {
             warn!("Force resetting stuck session with {}:{}", bare_jid, device_id);
