@@ -234,6 +234,7 @@ impl super::XMPPClient {
                                         content: body,
                                         timestamp: chrono::Utc::now().timestamp() as u64,
                                         delivery_status: DeliveryStatus::Delivered, // Carbon copies are always delivered
+            encrypted: false,
                                     };
                                     
                                     // Send the message to the UI
@@ -281,6 +282,7 @@ impl super::XMPPClient {
             content: body_text,
             timestamp: chrono::Utc::now().timestamp() as u64,
             delivery_status: DeliveryStatus::Delivered, // Carbon copies are always delivered
+            encrypted: false,
         };
         
         // Send the message to the UI
@@ -387,6 +389,7 @@ impl super::XMPPClient {
                 content: "[Sent encrypted message]".to_string(),
                 timestamp: chrono::Utc::now().timestamp() as u64,
                 delivery_status: DeliveryStatus::Delivered,
+            encrypted: false,
             };
             if let Err(e) = self.msg_tx.send(ui_message).await {
                 error!("Failed to send own-carbon placeholder to UI: {}", e);
@@ -415,6 +418,7 @@ impl super::XMPPClient {
                 content: "[Message from another device - not encrypted for this device]".to_string(),
                 timestamp: chrono::Utc::now().timestamp() as u64,
                 delivery_status: DeliveryStatus::Delivered,
+            encrypted: false,
             };
             
             // Send the message to the UI
@@ -531,6 +535,7 @@ impl super::XMPPClient {
             content: decrypted_content,
             timestamp: chrono::Utc::now().timestamp() as u64,
             delivery_status: DeliveryStatus::Delivered, // Carbon copies are always delivered
+            encrypted: true,
         };
         
         // Send the message to the UI

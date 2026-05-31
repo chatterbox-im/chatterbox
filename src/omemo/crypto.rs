@@ -441,6 +441,31 @@ pub fn generate_x25519_keypair() -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
     Ok((private_key_bytes, public_key_bytes))
 }
 
+/// Encode a Curve25519 public key to 33 bytes with 0x05 type prefix.
+/// This is the format expected by libsignal (Conversations, Dino, etc.)
+/// for bundle XML, PreKeySignalMessage, and SignalMessage wire formats.
+pub fn encode_public_key_with_prefix(key: &[u8]) -> Vec<u8> {
+    match key.len() {
+        32 => {
+            let mut prefixed = Vec::with_capacity(33);
+            prefixed.push(0x05);
+            prefixed.extend_from_slice(key);
+            prefixed
+        }
+        33 if key[0] == 0x05 => {
+            // Already has 0x05 prefix
+            key.to_vec()
+        }
+        _ => {
+            // Best effort: prepend 0x05 regardless
+            let mut prefixed = Vec::with_capacity(key.len() + 1);
+            prefixed.push(0x05);
+            prefixed.extend_from_slice(key);
+            prefixed
+        }
+    }
+}
+
 /// Normalize a Curve25519 public key to 32 bytes
 /// OMEMO/Signal protocol sometimes encodes public keys with a 0x05 prefix byte
 fn normalize_curve25519_public_key(key: &[u8]) -> Result<Vec<u8>, CryptoError> {

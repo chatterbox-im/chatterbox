@@ -58,40 +58,78 @@ pub async fn publish_pubsub_item_with_client(
                     .collect();
                 
                 // Create the device list stanza correctly
-                let iq = xmpp_parsers::Element::builder("iq", "jabber:client")
-                    .attr("type", "set")
-                    .attr("id", &iq_id)
-                    .attr("to", to.unwrap_or(""))
+                let mut pubsub_elem = xmpp_parsers::Element::builder("pubsub", "http://jabber.org/protocol/pubsub")
                     .append(
-                        xmpp_parsers::Element::builder("pubsub", "http://jabber.org/protocol/pubsub")
+                        xmpp_parsers::Element::builder("publish", "http://jabber.org/protocol/pubsub")
+                            .attr("node", node)
                             .append(
-                                xmpp_parsers::Element::builder("publish", "http://jabber.org/protocol/pubsub")
-                                    .attr("node", node)
+                                xmpp_parsers::Element::builder("item", "http://jabber.org/protocol/pubsub")
+                                    .attr("id", id)
                                     .append(
-                                        xmpp_parsers::Element::builder("item", "http://jabber.org/protocol/pubsub")
-                                            .attr("id", id)
-                                            .append(
-                                                {
-                                                    let mut list_elem = xmpp_parsers::Element::builder("list", "eu.siacs.conversations.axolotl").build();
-                                                    
-                                                    // Add each device with the proper namespace handling
-                                                    for device_id in device_ids {
-                                                        let device_elem = xmpp_parsers::Element::builder("device", "")
-                                                            .attr("id", &device_id)
-                                                            .build();
-                                                        list_elem.append_child(device_elem);
-                                                    }
-                                                    
-                                                    list_elem
-                                                }
-                                            )
-                                            .build()
+                                        {
+                                            let mut list_elem = xmpp_parsers::Element::builder("list", "eu.siacs.conversations.axolotl").build();
+                                            
+                                            // Add each device with the proper namespace handling
+                                            for device_id in &device_ids {
+                                                let device_elem = xmpp_parsers::Element::builder("device", "")
+                                                    .attr("id", device_id)
+                                                    .build();
+                                                list_elem.append_child(device_elem);
+                                            }
+                                            
+                                            list_elem
+                                        }
                                     )
                                     .build()
                             )
                             .build()
                     )
                     .build();
+                
+                // Add publish-options for open access (required for OMEMO interop)
+                let publish_options = xmpp_parsers::Element::builder("publish-options", "http://jabber.org/protocol/pubsub")
+                    .append(
+                        xmpp_parsers::Element::builder("x", "jabber:x:data")
+                            .attr("type", "submit")
+                            .append(
+                                xmpp_parsers::Element::builder("field", "jabber:x:data")
+                                    .attr("var", "FORM_TYPE")
+                                    .attr("type", "hidden")
+                                    .append({
+                                        let mut v = xmpp_parsers::Element::builder("value", "jabber:x:data").build();
+                                        v.append_text_node("http://jabber.org/protocol/pubsub#publish-options");
+                                        v
+                                    })
+                                    .build()
+                            )
+                            .append(
+                                xmpp_parsers::Element::builder("field", "jabber:x:data")
+                                    .attr("var", "pubsub#access_model")
+                                    .append({
+                                        let mut v = xmpp_parsers::Element::builder("value", "jabber:x:data").build();
+                                        v.append_text_node("open");
+                                        v
+                                    })
+                                    .build()
+                            )
+                            .build()
+                    )
+                    .build();
+                pubsub_elem.append_child(publish_options);
+                
+                let mut iq = xmpp_parsers::Element::builder("iq", "jabber:client")
+                    .attr("type", "set")
+                    .attr("id", &iq_id)
+                    .build();
+                
+                // Only set 'to' if provided (PEP publishes to self don't need it)
+                if let Some(to_addr) = to {
+                    if !to_addr.is_empty() {
+                        iq.set_attr("to", to_addr);
+                    }
+                }
+                
+                iq.append_child(pubsub_elem);
                 
                 // Send the stanza
                 match transport::send_stanza(stanza_tx, iq) {
@@ -123,9 +161,11 @@ pub async fn publish_pubsub_item_with_client(
                     .attr("id", &iq_id)
                     .build();
                 
-                // Add 'to' attribute if provided
+                // Add 'to' attribute if provided and non-empty
                 if let Some(to_addr) = to {
-                    iq.set_attr("to", to_addr);
+                    if !to_addr.is_empty() {
+                        iq.set_attr("to", to_addr);
+                    }
                 }
                 
                 // Create the pubsub element
@@ -180,6 +220,38 @@ pub async fn publish_pubsub_item_with_client(
                 item_elem.append_child(bundle_elem);
                 publish_elem.append_child(item_elem);
                 pubsub_elem.append_child(publish_elem);
+                
+                // Add publish-options for open access (required for OMEMO interop)
+                let publish_options = xmpp_parsers::Element::builder("publish-options", "http://jabber.org/protocol/pubsub")
+                    .append(
+                        xmpp_parsers::Element::builder("x", "jabber:x:data")
+                            .attr("type", "submit")
+                            .append(
+                                xmpp_parsers::Element::builder("field", "jabber:x:data")
+                                    .attr("var", "FORM_TYPE")
+                                    .attr("type", "hidden")
+                                    .append({
+                                        let mut v = xmpp_parsers::Element::builder("value", "jabber:x:data").build();
+                                        v.append_text_node("http://jabber.org/protocol/pubsub#publish-options");
+                                        v
+                                    })
+                                    .build()
+                            )
+                            .append(
+                                xmpp_parsers::Element::builder("field", "jabber:x:data")
+                                    .attr("var", "pubsub#access_model")
+                                    .append({
+                                        let mut v = xmpp_parsers::Element::builder("value", "jabber:x:data").build();
+                                        v.append_text_node("open");
+                                        v
+                                    })
+                                    .build()
+                            )
+                            .build()
+                    )
+                    .build();
+                pubsub_elem.append_child(publish_options);
+                
                 iq.append_child(pubsub_elem);
                 
                 // Send the stanza
@@ -598,8 +670,39 @@ pub async fn publish_pubsub_item_device_list_with_client(
                 .append(item_element)
                 .build();
             
+            // Add publish-options for open access (required for OMEMO interop)
+            let publish_options = xmpp_parsers::Element::builder("publish-options", "http://jabber.org/protocol/pubsub")
+                .append(
+                    xmpp_parsers::Element::builder("x", "jabber:x:data")
+                        .attr("type", "submit")
+                        .append(
+                            xmpp_parsers::Element::builder("field", "jabber:x:data")
+                                .attr("var", "FORM_TYPE")
+                                .attr("type", "hidden")
+                                .append({
+                                    let mut v = xmpp_parsers::Element::builder("value", "jabber:x:data").build();
+                                    v.append_text_node("http://jabber.org/protocol/pubsub#publish-options");
+                                    v
+                                })
+                                .build()
+                        )
+                        .append(
+                            xmpp_parsers::Element::builder("field", "jabber:x:data")
+                                .attr("var", "pubsub#access_model")
+                                .append({
+                                    let mut v = xmpp_parsers::Element::builder("value", "jabber:x:data").build();
+                                    v.append_text_node("open");
+                                    v
+                                })
+                                .build()
+                        )
+                        .build()
+                )
+                .build();
+            
             let pubsub_element = xmpp_parsers::Element::builder("pubsub", "http://jabber.org/protocol/pubsub")
                 .append(publish_element)
+                .append(publish_options)
                 .build();
             
             let iq = xmpp_parsers::Element::builder("iq", "jabber:client")

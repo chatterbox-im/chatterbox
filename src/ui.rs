@@ -42,6 +42,7 @@ pub struct ChatUI {
     friend_request_notification: Option<FriendRequestNotification>, // Add this field for friend request notifications
     resources: HashMap<String, Vec<String>>, // Map of base JID -> resource JIDs
     connection_status: bool, // Track XMPP server connection status
+    message_scroll_offset: Option<usize>, // None = auto-scroll to bottom, Some(n) = n lines scrolled up from bottom
 }
 
 // Add this new struct to represent key confirmation data
@@ -106,6 +107,7 @@ impl ChatUI {
             friend_request_notification: None, // Initialize to None
             resources: HashMap::new(), // Initialize resources map
             connection_status: false, // Initialize connection status to disconnected
+            message_scroll_offset: None, // Auto-scroll to bottom by default
         }
     }
 
@@ -154,8 +156,9 @@ impl ChatUI {
                     existing.timestamp = message.timestamp;
                 }
             } else {
-                // It's a new message, add it
-                self.messages.push(message);
+                // Insert in chronological order by timestamp
+                let insert_pos = self.messages.partition_point(|m| m.timestamp <= message.timestamp);
+                self.messages.insert(insert_pos, message);
             }
         }
     }
@@ -276,6 +279,7 @@ impl ChatUI {
             recipient_id: "me".to_string(),
             timestamp: chrono::Utc::now().timestamp() as u64,
             delivery_status: DeliveryStatus::Unknown,
+            encrypted: false,
         });
     }
 
@@ -321,6 +325,7 @@ impl ChatUI {
                                     recipient_id: "me".to_string(),
                                     timestamp: chrono::Utc::now().timestamp() as u64,
                                     delivery_status: DeliveryStatus::Unknown,
+            encrypted: false,
                                 });
                                 
                                 return Ok(Some((contact, String::from("__KEY_ACCEPTED__"))));
@@ -338,6 +343,7 @@ impl ChatUI {
                                     recipient_id: "me".to_string(),
                                     timestamp: chrono::Utc::now().timestamp() as u64,
                                     delivery_status: DeliveryStatus::Unknown,
+            encrypted: false,
                                 });
                                 
                                 return Ok(Some((contact, String::from("__KEY_REJECTED__"))));
@@ -369,6 +375,7 @@ impl ChatUI {
                                     recipient_id: "me".to_string(),
                                     timestamp: chrono::Utc::now().timestamp() as u64,
                                     delivery_status: DeliveryStatus::Unknown,
+            encrypted: false,
                                 });
                                 
                                 return Ok(Some((contact, String::from("__REMOVE_CONTACT_CONFIRMED__"))));
@@ -385,6 +392,7 @@ impl ChatUI {
                                     recipient_id: "me".to_string(),
                                     timestamp: chrono::Utc::now().timestamp() as u64,
                                     delivery_status: DeliveryStatus::Unknown,
+            encrypted: false,
                                 });
                                 
                                 return Ok(None);
@@ -491,6 +499,7 @@ impl ChatUI {
                                     recipient_id: recipient_jid.clone(),
                                     timestamp: chrono::Utc::now().timestamp() as u64,
                                     delivery_status: DeliveryStatus::Sending,
+                                    encrypted: self.omemo_enabled,
                                 };
                                 
                                 // Add the message to UI immediately
@@ -532,6 +541,7 @@ impl ChatUI {
                                 recipient_id: "me".to_string(), // Add the missing field
                                 timestamp: chrono::Utc::now().timestamp() as u64,
                                 delivery_status: DeliveryStatus::Unknown,
+            encrypted: false,
                             });
                         },
                         KeyCode::Char('t') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
@@ -607,9 +617,75 @@ impl ChatUI {
                                 }
                             }
                         }
+                        KeyCode::PageUp => {
+                            // Scroll messages up (Fn+Up on Mac)
+                            let current = self.message_scroll_offset.unwrap_or(0);
+                            self.message_scroll_offset = Some(current + 10);
+                        }
+                        KeyCode::PageDown => {
+                            // Scroll messages down (Fn+Down on Mac)
+                            if let Some(offset) = self.message_scroll_offset {
+                                if offset <= 10 {
+                                    // Back to auto-scroll mode
+                                    self.message_scroll_offset = None;
+                                } else {
+                                    self.message_scroll_offset = Some(offset - 10);
+                                }
+                            }
+                            // If already None (auto-scroll), do nothing
+                        }
+                        KeyCode::End => {
+                            // Jump back to latest messages
+                            self.message_scroll_offset = None;
+                        }
                         _ => {
                             if let Tab::Messages = self.active_tab {
-                                self.input.handle_event(&Event::Key(key));
+                                // Option+Left/Right for word navigation (macOS style)
+                                if key.modifiers.contains(event::KeyModifiers::ALT) {
+                                    match key.code {
+                                        KeyCode::Left => {
+                                            let val = self.input.value();
+                                            let cursor = self.input.cursor();
+                                            // Move left past whitespace, then past word chars
+                                            let bytes = val.as_bytes();
+                                            let mut pos = cursor;
+                                            while pos > 0 && bytes[pos - 1] == b' ' {
+                                                pos -= 1;
+                                            }
+                                            while pos > 0 && bytes[pos - 1] != b' ' {
+                                                pos -= 1;
+                                            }
+                                            // Move cursor to new position
+                                            let steps = cursor - pos;
+                                            for _ in 0..steps {
+                                                self.input.handle_event(&Event::Key(crossterm::event::KeyEvent::new(KeyCode::Left, event::KeyModifiers::NONE)));
+                                            }
+                                        }
+                                        KeyCode::Right => {
+                                            let val = self.input.value();
+                                            let cursor = self.input.cursor();
+                                            let len = val.len();
+                                            let bytes = val.as_bytes();
+                                            // Move right past word chars, then past whitespace
+                                            let mut pos = cursor;
+                                            while pos < len && bytes[pos] != b' ' {
+                                                pos += 1;
+                                            }
+                                            while pos < len && bytes[pos] == b' ' {
+                                                pos += 1;
+                                            }
+                                            let steps = pos - cursor;
+                                            for _ in 0..steps {
+                                                self.input.handle_event(&Event::Key(crossterm::event::KeyEvent::new(KeyCode::Right, event::KeyModifiers::NONE)));
+                                            }
+                                        }
+                                        _ => {
+                                            self.input.handle_event(&Event::Key(key));
+                                        }
+                                    }
+                                } else {
+                                    self.input.handle_event(&Event::Key(key));
+                                }
                             }
                         }
                     }
@@ -707,7 +783,7 @@ impl ChatUI {
         };
 
         let help_spans = vec![
-            Span::styled("ESC quit | TAB switch | Ctrl+A add | Ctrl+D del | Ctrl+O toggle OMEMO [", Style::default().fg(Color::Gray)),
+            Span::styled("ESC quit | TAB switch | Fn+↑/↓ scroll | Ctrl+A add | Ctrl+O toggle OMEMO [", Style::default().fg(Color::Gray)),
             Span::styled(omemo_status_text, omemo_status_style),
             Span::styled("] | Ctrl+T trust | Ctrl+H help", Style::default().fg(Color::Gray)),
         ];
@@ -766,6 +842,7 @@ impl ChatUI {
     
     pub fn clear_messages(&mut self) {
         self.messages.clear();
+        self.message_scroll_offset = None;
     }
 
     pub fn update_contact_status(&mut self, contact_id: &str, status: ContactStatus) {
@@ -881,6 +958,7 @@ impl ChatUI {
             recipient_id: "me".to_string(),
             timestamp: chrono::Utc::now().timestamp() as u64,
             delivery_status: DeliveryStatus::Unknown,
+            encrypted: false,
         });
     }
 }
@@ -907,15 +985,14 @@ fn draw_messages<B: Backend>(f: &mut Frame<B>, messages: &[Message], area: Rect,
 
             let timestamp = datetime.format("%Y-%m-%d %H:%M").to_string();
 
-            // Add the padlock symbol to outgoing messages when OMEMO is enabled
+            // Add encryption indicator based on whether this specific message was encrypted
+            let encryption_indicator = if m.encrypted { " 🔒" } else { " ❌" };
             let prefix = if m.sender_id == "me" || m.sender_id.contains("@") && m.recipient_id != "me" {
-                // Add padlock 🔒 for encrypted messages
-                let encryption_indicator = if ui.is_omemo_enabled() { " 🔒" } else { "" };
                 format!("[{}] You{}: ", timestamp, encryption_indicator)
             } else if m.sender_id == "system" {
                 format!("[{}] System: ", timestamp)
             } else {
-                format!("[{}] {}: ", timestamp, m.sender_id)
+                format!("[{}] {}{}: ", timestamp, m.sender_id, encryption_indicator)
             };
 
             // Simplified status indicator using ticks clearly
@@ -963,15 +1040,20 @@ fn draw_messages<B: Backend>(f: &mut Frame<B>, messages: &[Message], area: Rect,
 
     // Add connection status icon to the title
     let connection_icon = if ui.is_connected() { "🔌 " } else { "❌ " }; 
-    let title = format!("{}Messages", connection_icon);
+    let scroll_indicator = if ui.message_scroll_offset.is_some() { " [scrolled - Fn+End to jump to latest]" } else { "" };
+    let title = format!("{}Messages{}", connection_icon, scroll_indicator);
     
     // Create a ListState to control the scroll position
     let mut list_state = ListState::default();
     
-    // Set the selected item to the last message to ensure auto-scrolling
-    // This doesn't highlight the item (we disable highlighting below)
+    // Set the selected item based on scroll offset
     if !messages_with_status.is_empty() {
-        list_state.select(Some(messages_with_status.len() - 1));
+        let last = messages_with_status.len() - 1;
+        let selected = match ui.message_scroll_offset {
+            None => last, // Auto-scroll to bottom
+            Some(lines_from_bottom) => last.saturating_sub(lines_from_bottom),
+        };
+        list_state.select(Some(selected));
     }
     
     let messages_list = List::new(messages_with_status)

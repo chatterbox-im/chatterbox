@@ -178,6 +178,7 @@ impl super::XMPPClient {
             content: content.to_string(),
             timestamp: chrono::Utc::now().timestamp() as u64,
             delivery_status: DeliveryStatus::Sending,
+            encrypted: false,
         };
         
         // Send to UI first
@@ -319,6 +320,7 @@ impl super::XMPPClient {
                 content: pending.content.clone(),
                 timestamp: pending.timestamp,
                 delivery_status: new_status,
+                encrypted: false,
             };
             
             // Send to UI

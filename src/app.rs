@@ -26,6 +26,7 @@ pub fn create_system_message(to: &str, content: &str) -> Message {
         content: content.to_string(),
         timestamp: chrono::Utc::now().timestamp() as u64,
         delivery_status: DeliveryStatus::Delivered,
+        encrypted: false,
     }
 }
 
@@ -88,7 +89,7 @@ pub async fn run_app(
     terminal.draw(|f| chat_ui.draw(f))?;
 
     // Start message history loading in background if we have an active contact
-    start_initial_history_load(&mut chat_ui, &xmpp_client, disable_mam).await;
+    start_initial_history_load(&mut chat_ui, &xmpp_client, disable_mam, store.as_ref()).await;
 
     // Check for pending OMEMO key verifications
     check_pending_key_verifications(&mut chat_ui, &xmpp_client).await?;
@@ -182,13 +183,15 @@ async fn show_omemo_fingerprints(chat_ui: &mut ChatUI, xmpp_client: &XMPPClient)
     }
 }
 
-/// Start loading message history in background for the initial active contact
+/// Start loading message history in background for the initial active contact.
+/// Loads from local store first (instant), then does a MAM catch-up for newer messages.
 async fn start_initial_history_load(
     chat_ui: &mut ChatUI,
     xmpp_client: &XMPPClient,
     disable_mam: bool,
+    store: Option<&MessageStore>,
 ) {
-    if !chat_ui.has_active_contact() || disable_mam {
+    if !chat_ui.has_active_contact() {
         return;
     }
     if chat_ui.contacts.is_empty() {
@@ -205,72 +208,32 @@ async fn start_initial_history_load(
         return;
     }
 
-    chat_ui.add_message(create_system_message(
-        &active_contact,
-        "Loading message history in background...",
-    ));
-
-    let xmpp_client_clone = xmpp_client.clone();
-    let msg_tx_clone = xmpp_client.get_message_sender();
-    let active_contact_clone = active_contact.clone();
-    let (history_tx, mut history_rx) = tokio::sync::mpsc::channel(100);
-
-    tokio::spawn(async move {
-        match xmpp_client_clone
-            .get_message_history(MAMQueryOptions::new().with_jid(&active_contact).with_limit(50))
-            .await
-        {
-            Ok(messages) => {
-                info!(
-                    "Loaded {} historical messages for {}",
-                    messages.len(),
-                    active_contact
-                );
-
-                let completion_message = if messages.is_empty() {
-                    create_system_message(&active_contact_clone, "No message history found")
-                } else {
-                    create_system_message(
-                        &active_contact_clone,
-                        &format!("Loaded {} historical messages", messages.len()),
-                    )
-                };
-
-                if let Err(e) = msg_tx_clone.send(completion_message).await {
-                    error!("Failed to send history completion message: {}", e);
+    // Load from local store first (instant)
+    let newest_ts = if let Some(s) = store {
+        match s.load_messages(&active_contact, 100) {
+            Ok(msgs) if !msgs.is_empty() => {
+                let count = msgs.len();
+                for msg in &msgs {
+                    chat_ui.add_message(msg.clone());
                 }
-
-                for message in messages {
-                    if let Err(e) = history_tx.send(message).await {
-                        error!("Failed to send history message to channel: {}", e);
-                        break;
-                    }
-                }
+                chat_ui.add_message(create_system_message(
+                    &active_contact,
+                    &format!("Loaded {} messages from local history", count),
+                ));
+                s.newest_timestamp(&active_contact).ok().flatten()
             }
+            Ok(_) => None,
             Err(e) => {
-                error!(
-                    "Failed to retrieve message history for {}: {}",
-                    active_contact, e
-                );
-                let error_message = create_system_message(
-                    &active_contact_clone,
-                    &format!("Failed to load message history: {}", e),
-                );
-                if let Err(send_err) = msg_tx_clone.send(error_message).await {
-                    error!("Failed to send history error message: {}", send_err);
-                }
+                error!("Failed to load local messages for {}: {}", active_contact, e);
+                None
             }
         }
-    });
+    } else {
+        None
+    };
 
-    let msg_tx = xmpp_client.get_message_sender();
-    tokio::spawn(async move {
-        while let Some(message) = history_rx.recv().await {
-            if let Err(e) = msg_tx.send(message).await {
-                error!("Failed to forward history message to main channel: {}", e);
-            }
-        }
-    });
+    // MAM catch-up for messages newer than what we have locally
+    load_message_history_with_catchup(chat_ui, xmpp_client, &active_contact, disable_mam, newest_ts);
 }
 
 /// Set up the contacts list from the XMPP server
@@ -799,6 +762,7 @@ async fn handle_user_command(
                     content: plain_content.to_string(),
                     timestamp: chrono::Utc::now().timestamp() as u64,
                     delivery_status: DeliveryStatus::Sent,
+                    encrypted: false,
                 });
             }
             Err(e) => {
@@ -1523,6 +1487,7 @@ async fn handle_send_message(
                 content: content.to_string(),
                 timestamp: chrono::Utc::now().timestamp() as u64,
                 delivery_status: DeliveryStatus::Sent,
+                encrypted: true,
             };
             chat_ui.add_message(message.clone());
             // Persist outgoing message locally

@@ -71,6 +71,7 @@ mod tests {
             content: "Hello, world!".to_string(),
             timestamp: 1650000000,
             delivery_status: DeliveryStatus::Sending,
+            encrypted: false,
         };
         
         // Verify message properties
@@ -89,6 +90,7 @@ mod tests {
             content: msg.content.clone(),
             timestamp: msg.timestamp,
             delivery_status: DeliveryStatus::Sent,
+            encrypted: false,
         };
         
         let delivered_msg = Message {
@@ -98,6 +100,7 @@ mod tests {
             content: msg.content.clone(),
             timestamp: msg.timestamp,
             delivery_status: DeliveryStatus::Delivered,
+            encrypted: false,
         };
         
         let read_msg = Message {
@@ -107,6 +110,7 @@ mod tests {
             content: msg.content.clone(),
             timestamp: msg.timestamp,
             delivery_status: DeliveryStatus::Read,
+            encrypted: false,
         };
         
         let failed_msg = Message {
@@ -116,6 +120,7 @@ mod tests {
             content: msg.content.clone(),
             timestamp: msg.timestamp,
             delivery_status: DeliveryStatus::Failed,
+            encrypted: false,
         };
         
         assert_eq!(sent_msg.delivery_status, DeliveryStatus::Sent);
@@ -134,6 +139,7 @@ mod tests {
             content: "Hello, this is a valid message".to_string(),
             timestamp: 1650000000,
             delivery_status: DeliveryStatus::Sending,
+            encrypted: false,
         };
         
         // Test with empty content (should still be valid structurally)
@@ -144,6 +150,7 @@ mod tests {
             content: "".to_string(),
             timestamp: 1650000000,
             delivery_status: DeliveryStatus::Sending,
+            encrypted: false,
         };
         
         // Test with very long content
@@ -155,6 +162,7 @@ mod tests {
             content: long_content,
             timestamp: 1650000000,
             delivery_status: DeliveryStatus::Sending,
+            encrypted: false,
         };
         
         // Verify all messages are structurally valid
@@ -180,6 +188,7 @@ mod tests {
             content: "Current timestamp message".to_string(),
             timestamp: current_timestamp,
             delivery_status: DeliveryStatus::Sending,
+            encrypted: false,
         };
         
         // Test with past timestamp
@@ -191,6 +200,7 @@ mod tests {
             content: "Past timestamp message".to_string(),
             timestamp: past_timestamp,
             delivery_status: DeliveryStatus::Sent,
+            encrypted: false,
         };
         
         // Verify timestamps are stored correctly

@@ -91,19 +91,20 @@ impl super::OmemoManager {
     /// It ensures proper namespace handling to avoid "invalid item" errors.
     pub fn bundle_to_xml(&self, bundle: &OmemoBundle) -> Result<String> {
         use xmpp_parsers::Element;
+        use crate::omemo::crypto::encode_public_key_with_prefix;
         
         // Create the bundle element with the proper namespace
         let mut bundle_elem = Element::builder("bundle", OMEMO_NAMESPACE).build();
         
-        // Add the identity key (inherits namespace from parent)
-        let identity_key_b64 = base64::engine::general_purpose::STANDARD.encode(&bundle.identity_key);
+        // Add the identity key with 0x05 prefix (libsignal interop)
+        let identity_key_b64 = base64::engine::general_purpose::STANDARD.encode(encode_public_key_with_prefix(&bundle.identity_key));
         let identity_key_elem = Element::builder("identityKey", OMEMO_NAMESPACE)
             .append(identity_key_b64)
             .build();
         bundle_elem.append_child(identity_key_elem);
         
-        // Add the signed pre-key with its ID as an attribute
-        let signed_prekey_b64 = base64::engine::general_purpose::STANDARD.encode(&bundle.signed_pre_key);
+        // Add the signed pre-key with 0x05 prefix and its ID as an attribute
+        let signed_prekey_b64 = base64::engine::general_purpose::STANDARD.encode(encode_public_key_with_prefix(&bundle.signed_pre_key));
         let signed_prekey_elem = Element::builder("signedPreKeyPublic", OMEMO_NAMESPACE)
             .attr("signedPreKeyId", bundle.signed_pre_key_id.to_string())
             .append(signed_prekey_b64)
@@ -120,9 +121,9 @@ impl super::OmemoManager {
         // Add the pre-keys container
         let mut prekeys_elem = Element::builder("prekeys", OMEMO_NAMESPACE).build();
         
-        // Add each pre-key with its ID as an attribute
+        // Add each pre-key with 0x05 prefix and its ID as an attribute
         for (id, key) in &bundle.pre_keys {
-            let prekey_b64 = base64::engine::general_purpose::STANDARD.encode(key);
+            let prekey_b64 = base64::engine::general_purpose::STANDARD.encode(encode_public_key_with_prefix(key));
             let prekey_elem = Element::builder("preKeyPublic", OMEMO_NAMESPACE)
                 .attr("preKeyId", id.to_string())
                 .append(prekey_b64)
@@ -315,19 +316,20 @@ impl super::OmemoManager {
     /// It ensures proper namespace handling to avoid "invalid item" errors.
     pub fn convert_x3dh_bundle_to_xml(&self, bundle: &protocol::X3DHKeyBundle) -> Result<String> {
         use xmpp_parsers::Element;
+        use crate::omemo::crypto::encode_public_key_with_prefix;
         
         // Create the bundle element with the proper namespace
         let mut bundle_elem = Element::builder("bundle", OMEMO_NAMESPACE).build();
         
-        // Add the identity key
-        let identity_key_b64 = base64::engine::general_purpose::STANDARD.encode(&bundle.identity_key_pair.public_key);
+        // Add the identity key with 0x05 prefix (libsignal interop)
+        let identity_key_b64 = base64::engine::general_purpose::STANDARD.encode(encode_public_key_with_prefix(&bundle.identity_key_pair.public_key));
         let identity_key_elem = Element::builder("identityKey", OMEMO_NAMESPACE)
             .append(identity_key_b64)
             .build();
         bundle_elem.append_child(identity_key_elem);
         
-        // Add the signed pre-key with its ID as an attribute
-        let signed_prekey_b64 = base64::engine::general_purpose::STANDARD.encode(&bundle.signed_pre_key_pair.public_key);
+        // Add the signed pre-key with 0x05 prefix and its ID as an attribute
+        let signed_prekey_b64 = base64::engine::general_purpose::STANDARD.encode(encode_public_key_with_prefix(&bundle.signed_pre_key_pair.public_key));
         let signed_prekey_elem = Element::builder("signedPreKeyPublic", OMEMO_NAMESPACE)
             .attr("signedPreKeyId", bundle.signed_pre_key_id.to_string())
             .append(signed_prekey_b64)
@@ -344,9 +346,9 @@ impl super::OmemoManager {
         // Add the pre-keys container
         let mut prekeys_elem = Element::builder("prekeys", OMEMO_NAMESPACE).build();
         
-        // Add each pre-key with its ID as an attribute
+        // Add each pre-key with 0x05 prefix and its ID as an attribute
         for (id, key_pair) in &bundle.one_time_pre_key_pairs {
-            let prekey_b64 = base64::engine::general_purpose::STANDARD.encode(&key_pair.public_key);
+            let prekey_b64 = base64::engine::general_purpose::STANDARD.encode(encode_public_key_with_prefix(&key_pair.public_key));
             let prekey_elem = Element::builder("preKeyPublic", OMEMO_NAMESPACE)
                 .attr("preKeyId", id.to_string())
                 .append(prekey_b64)

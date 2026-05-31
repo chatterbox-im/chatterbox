@@ -96,6 +96,7 @@ async fn test_omemo_message_exchange() -> Result<()> {
                 recipient_id: cb_jid.to_string(),
                 timestamp: chrono::Utc::now().timestamp() as u64,
                 delivery_status: DeliveryStatus::Unknown,
+                encrypted: false,
             }
         }
     };

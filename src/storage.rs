@@ -119,6 +119,7 @@ impl MessageStore {
                 content: row.get(3)?,
                 timestamp: row.get::<_, i64>(4)? as u64,
                 delivery_status: Self::status_from_i32(row.get(5)?),
+                encrypted: false, // Legacy messages from DB don't have this info
             })
         })?;
 
@@ -187,6 +188,7 @@ mod tests {
             content: content.to_string(),
             timestamp: ts,
             delivery_status: DeliveryStatus::Delivered,
+            encrypted: false,
         }
     }
 

@@ -18,6 +18,15 @@ use log::{debug, warn};
 /// Current Signal protocol version byte: current=3, max=3 → 0x33
 const VERSION_BYTE: u8 = 0x33;
 
+/// Strip 0x05 prefix from a public key if present (for internal 32-byte representation)
+fn strip_key_prefix(key: Vec<u8>) -> Vec<u8> {
+    if key.len() == 33 && key[0] == 0x05 {
+        key[1..].to_vec()
+    } else {
+        key
+    }
+}
+
 /// MAC length appended to SignalMessage (8 bytes)
 const MAC_LENGTH: usize = 8;
 
@@ -146,16 +155,19 @@ impl SignalMessage {
 
     /// Serialize with MAC including identity keys per Signal spec.
     /// MAC = HMAC-SHA256(mac_key, sender_identity || receiver_identity || version || protobuf)[..8]
+    /// Identity keys are encoded with 0x05 prefix (33 bytes) per libsignal convention.
     pub fn serialize_with_identity(&self, mac_key: &[u8], sender_identity: &[u8], receiver_identity: &[u8]) -> Vec<u8> {
         let proto = self.encode_proto();
         let mut buf = Vec::with_capacity(1 + proto.len() + MAC_LENGTH);
         buf.push(VERSION_BYTE);
         buf.extend_from_slice(&proto);
 
-        // MAC input: sender_identity || receiver_identity || version || protobuf
-        let mut mac_input = Vec::with_capacity(sender_identity.len() + receiver_identity.len() + buf.len());
-        mac_input.extend_from_slice(sender_identity);
-        mac_input.extend_from_slice(receiver_identity);
+        // MAC input: sender_identity(33) || receiver_identity(33) || version || protobuf
+        let sender_prefixed = crate::omemo::crypto::encode_public_key_with_prefix(sender_identity);
+        let receiver_prefixed = crate::omemo::crypto::encode_public_key_with_prefix(receiver_identity);
+        let mut mac_input = Vec::with_capacity(sender_prefixed.len() + receiver_prefixed.len() + buf.len());
+        mac_input.extend_from_slice(&sender_prefixed);
+        mac_input.extend_from_slice(&receiver_prefixed);
         mac_input.extend_from_slice(&buf);
 
         let mac = compute_mac(mac_key, &mac_input);
@@ -177,7 +189,9 @@ impl SignalMessage {
     fn encode_proto(&self) -> Vec<u8> {
         let mut proto = Vec::new();
         if !self.ratchet_key.is_empty() {
-            proto.extend(encode_field_bytes(signal_message_tags::RATCHET_KEY, &self.ratchet_key));
+            // Encode ratchet_key with 0x05 prefix for libsignal interop
+            let prefixed_key = crate::omemo::crypto::encode_public_key_with_prefix(&self.ratchet_key);
+            proto.extend(encode_field_bytes(signal_message_tags::RATCHET_KEY, &prefixed_key));
         }
         proto.extend(encode_field_varint(signal_message_tags::COUNTER, self.counter));
         if self.previous_counter > 0 {
@@ -253,7 +267,7 @@ impl SignalMessage {
         }
 
         Some(SignalMessage {
-            ratchet_key,
+            ratchet_key: strip_key_prefix(ratchet_key),
             counter,
             previous_counter,
             ciphertext,
@@ -275,8 +289,11 @@ impl PreKeySignalMessage {
             proto.extend(encode_field_varint(prekey_message_tags::PRE_KEY_ID, pre_key_id));
         }
         proto.extend(encode_field_varint(prekey_message_tags::SIGNED_PRE_KEY_ID, self.signed_pre_key_id));
-        proto.extend(encode_field_bytes(prekey_message_tags::BASE_KEY, &self.base_key));
-        proto.extend(encode_field_bytes(prekey_message_tags::IDENTITY_KEY, &self.identity_key));
+        // Encode base_key and identity_key with 0x05 prefix for libsignal interop
+        let prefixed_base_key = crate::omemo::crypto::encode_public_key_with_prefix(&self.base_key);
+        proto.extend(encode_field_bytes(prekey_message_tags::BASE_KEY, &prefixed_base_key));
+        let prefixed_identity_key = crate::omemo::crypto::encode_public_key_with_prefix(&self.identity_key);
+        proto.extend(encode_field_bytes(prekey_message_tags::IDENTITY_KEY, &prefixed_identity_key));
         proto.extend(encode_field_bytes(prekey_message_tags::MESSAGE, inner_signal_msg_bytes));
 
         let mut buf = Vec::with_capacity(1 + proto.len());
@@ -364,8 +381,8 @@ impl PreKeySignalMessage {
             registration_id,
             pre_key_id,
             signed_pre_key_id,
-            base_key,
-            identity_key,
+            base_key: strip_key_prefix(base_key),
+            identity_key: strip_key_prefix(identity_key),
             message,
             raw_message_bytes: message_bytes,
         })

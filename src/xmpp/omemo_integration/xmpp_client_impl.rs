@@ -146,22 +146,53 @@ impl crate::xmpp::XMPPClient {
         }
         
         // Build the IQ stanza for publishing
+        let publish_elem = xmpp_parsers::Element::builder("publish", custom_ns::PUBSUB)
+            .attr("node", &format!("{}.devicelist", custom_ns::OMEMO))
+            .append(
+                xmpp_parsers::Element::builder("item", custom_ns::PUBSUB)
+                    .attr("id", "current")
+                    .append(list_element)
+                    .build()
+            )
+            .build();
+        
+        // Publish-options for open access
+        let publish_options = xmpp_parsers::Element::builder("publish-options", custom_ns::PUBSUB)
+            .append(
+                xmpp_parsers::Element::builder("x", "jabber:x:data")
+                    .attr("type", "submit")
+                    .append(
+                        xmpp_parsers::Element::builder("field", "jabber:x:data")
+                            .attr("var", "FORM_TYPE")
+                            .attr("type", "hidden")
+                            .append({
+                                let mut v = xmpp_parsers::Element::builder("value", "jabber:x:data").build();
+                                v.append_text_node("http://jabber.org/protocol/pubsub#publish-options");
+                                v
+                            })
+                            .build()
+                    )
+                    .append(
+                        xmpp_parsers::Element::builder("field", "jabber:x:data")
+                            .attr("var", "pubsub#access_model")
+                            .append({
+                                let mut v = xmpp_parsers::Element::builder("value", "jabber:x:data").build();
+                                v.append_text_node("open");
+                                v
+                            })
+                            .build()
+                    )
+                    .build()
+            )
+            .build();
+        
         let iq = xmpp_parsers::Element::builder("iq", "jabber:client")
             .attr("type", "set")
             .attr("id", &publish_id)
             .append(
                 xmpp_parsers::Element::builder("pubsub", custom_ns::PUBSUB)
-                    .append(
-                        xmpp_parsers::Element::builder("publish", custom_ns::PUBSUB)
-                            .attr("node", &format!("{}.devicelist", custom_ns::OMEMO))
-                            .append(
-                                xmpp_parsers::Element::builder("item", custom_ns::PUBSUB)
-                                    .attr("id", "current")
-                                    .append(list_element)
-                                    .build()
-                            )
-                            .build()
-                    )
+                    .append(publish_elem)
+                    .append(publish_options)
                     .build()
             )
             .build();
@@ -257,17 +288,48 @@ impl crate::xmpp::XMPPClient {
             .build();
         
         // Build the IQ stanza for publishing
+        let publish_elem = xmpp_parsers::Element::builder("publish", custom_ns::PUBSUB)
+            .attr("node", &format!("{}.bundles:{}", custom_ns::OMEMO_V1, device_id))
+            .append(item_element)
+            .build();
+        
+        // Publish-options for open access
+        let publish_options = xmpp_parsers::Element::builder("publish-options", custom_ns::PUBSUB)
+            .append(
+                xmpp_parsers::Element::builder("x", "jabber:x:data")
+                    .attr("type", "submit")
+                    .append(
+                        xmpp_parsers::Element::builder("field", "jabber:x:data")
+                            .attr("var", "FORM_TYPE")
+                            .attr("type", "hidden")
+                            .append({
+                                let mut v = xmpp_parsers::Element::builder("value", "jabber:x:data").build();
+                                v.append_text_node("http://jabber.org/protocol/pubsub#publish-options");
+                                v
+                            })
+                            .build()
+                    )
+                    .append(
+                        xmpp_parsers::Element::builder("field", "jabber:x:data")
+                            .attr("var", "pubsub#access_model")
+                            .append({
+                                let mut v = xmpp_parsers::Element::builder("value", "jabber:x:data").build();
+                                v.append_text_node("open");
+                                v
+                            })
+                            .build()
+                    )
+                    .build()
+            )
+            .build();
+        
         let iq = xmpp_parsers::Element::builder("iq", "jabber:client")
             .attr("type", "set")
             .attr("id", &publish_id)
             .append(
                 xmpp_parsers::Element::builder("pubsub", custom_ns::PUBSUB)
-                    .append(
-                        xmpp_parsers::Element::builder("publish", custom_ns::PUBSUB)
-                            .attr("node", &format!("{}.bundles:{}", custom_ns::OMEMO_V1, device_id))
-                            .append(item_element)
-                            .build()
-                    )
+                    .append(publish_elem)
+                    .append(publish_options)
                     .build()
             )
             .build();
@@ -301,6 +363,7 @@ impl crate::xmpp::XMPPClient {
                             device_id_str.as_deref().unwrap_or("")),
             timestamp: chrono::Utc::now().timestamp() as u64,
             delivery_status: DeliveryStatus::Delivered,
+            encrypted: false,
         };
         
         // Send the special message to the UI

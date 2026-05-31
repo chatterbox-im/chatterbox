@@ -157,6 +157,7 @@ async fn test_omemo_encryption() -> Result<()> {
                 recipient_id: test_contact.to_string(),
                 timestamp: chrono::Utc::now().timestamp() as u64,
                 delivery_status: DeliveryStatus::Unknown,
+                encrypted: false,
             }
         }
     };

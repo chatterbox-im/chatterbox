@@ -253,8 +253,10 @@ impl X3DHProtocol {
     
     /// Sign a pre-key with the identity key using XEdDSA.
     /// This allows signing with an X25519 identity key (as OMEMO/Signal requires).
+    /// Per libsignal convention, the message signed is the 33-byte key (0x05 prefix + 32 bytes).
     pub fn sign_pre_key(identity_private_key: &[u8], pre_key_public: &[u8]) -> Result<Vec<u8>, DoubleRatchetError> {
-        crypto::xeddsa_sign(identity_private_key, pre_key_public)
+        let prefixed_key = crypto::encode_public_key_with_prefix(pre_key_public);
+        crypto::xeddsa_sign(identity_private_key, &prefixed_key)
             .map_err(|e| DoubleRatchetError::InvalidSignatureError(
                 format!("XEdDSA signing failed: {}", e)
             ))
@@ -263,7 +265,15 @@ impl X3DHProtocol {
     /// Verify a pre-key signature using XEdDSA.
     /// Verifies that the signed prekey was signed by the holder of the X25519 identity key.
     pub fn verify_pre_key(identity_public_key: &[u8], pre_key_public: &[u8], signature: &[u8]) -> Result<bool, DoubleRatchetError> {
-        crypto::xeddsa_verify(identity_public_key, pre_key_public, signature)
+        // Normalize identity key to 32 bytes (strip 0x05 prefix if present)
+        let identity_key_32 = if identity_public_key.len() == 33 && identity_public_key[0] == 0x05 {
+            &identity_public_key[1..]
+        } else {
+            identity_public_key
+        };
+        // Verify against 33-byte form of SPK (per libsignal convention)
+        let prefixed_spk = crypto::encode_public_key_with_prefix(pre_key_public);
+        crypto::xeddsa_verify(identity_key_32, &prefixed_spk, signature)
             .map_err(|e| DoubleRatchetError::InvalidSignatureError(
                 format!("XEdDSA verification failed: {}", e)
             ))
@@ -881,19 +891,21 @@ impl DoubleRatchet {
         let iv = &expanded[64..80];         // CBC IV (16 bytes)
 
         // Verify MAC before decryption
-        // MAC covers: sender_identity || receiver_identity || version || protobuf
+        // MAC covers: sender_identity(33) || receiver_identity(33) || version || protobuf
         // The raw_msg_bytes contain version || proto || mac[8]
         if raw_msg_bytes.len() > 8 {
             let msg_without_mac = &raw_msg_bytes[..raw_msg_bytes.len() - 8];
             let received_mac = &raw_msg_bytes[raw_msg_bytes.len() - 8..];
 
+            let sender_prefixed = crypto::encode_public_key_with_prefix(&state.remote_identity_key);
+            let receiver_prefixed = crypto::encode_public_key_with_prefix(&state.local_identity_key_pair.public_key);
             let mut mac_input = Vec::with_capacity(
-                state.remote_identity_key.len() +
-                state.local_identity_key_pair.public_key.len() +
+                sender_prefixed.len() +
+                receiver_prefixed.len() +
                 msg_without_mac.len()
             );
-            mac_input.extend_from_slice(&state.remote_identity_key);
-            mac_input.extend_from_slice(&state.local_identity_key_pair.public_key);
+            mac_input.extend_from_slice(&sender_prefixed);
+            mac_input.extend_from_slice(&receiver_prefixed);
             mac_input.extend_from_slice(msg_without_mac);
 
             if !crate::omemo::wire::verify_mac(mac_key, &mac_input, received_mac) {
@@ -942,20 +954,21 @@ pub mod utils {
     
     /// Convert a device bundle to XML for publishing
     pub fn device_bundle_to_xml(bundle: &DeviceIdentity) -> Result<String, XmlError> {
+        use crate::omemo::crypto::encode_public_key_with_prefix;
         let mut xml = String::new();
         
         xml.push_str(&format!("<bundle xmlns='{}'>", OMEMO_NAMESPACE));
         
-        // Identity key
+        // Identity key (with 0x05 prefix for libsignal interop)
         xml.push_str("<identityKey>");
-        xml.push_str(&BASE64.encode(&bundle.identity_key));
+        xml.push_str(&BASE64.encode(encode_public_key_with_prefix(&bundle.identity_key)));
         xml.push_str("</identityKey>");
         
-        // Signed pre-key
+        // Signed pre-key (with 0x05 prefix)
         xml.push_str(&format!(
             "<signedPreKeyPublic signedPreKeyId='{}'>{}</signedPreKeyPublic>",
             bundle.signed_pre_key.id,
-            BASE64.encode(&bundle.signed_pre_key.public_key)
+            BASE64.encode(encode_public_key_with_prefix(&bundle.signed_pre_key.public_key))
         ));
         
         // Signature
@@ -963,13 +976,13 @@ pub mod utils {
         xml.push_str(&BASE64.encode(&bundle.signed_pre_key.signature));
         xml.push_str("</signedPreKeySignature>");
         
-        // Pre-keys
+        // Pre-keys (with 0x05 prefix)
         xml.push_str("<prekeys>");
         for prekey in &bundle.pre_keys {
             xml.push_str(&format!(
                 "<preKeyPublic preKeyId='{}'>{}</preKeyPublic>",
                 prekey.id,
-                BASE64.encode(&prekey.public_key)
+                BASE64.encode(encode_public_key_with_prefix(&prekey.public_key))
             ));
         }
         xml.push_str("</prekeys>");

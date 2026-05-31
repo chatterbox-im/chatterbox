@@ -93,6 +93,7 @@ pub struct Message {
     pub content: String,
     pub timestamp: u64,
     pub delivery_status: DeliveryStatus,
+    pub encrypted: bool,
 }
 
 #[derive(Debug, Clone)]

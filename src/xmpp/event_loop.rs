@@ -250,6 +250,7 @@ impl XMPPClient {
                                         content: content.clone(),
                                         timestamp: chrono::Utc::now().timestamp() as u64,
                                         delivery_status: DeliveryStatus::Delivered,
+            encrypted: false,
                                     };
                                     
                                     info!("Sending message to UI: from='{}' (bare: '{}'), content='{}'", from, sender_bare_jid, content);

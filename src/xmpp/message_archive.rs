@@ -343,6 +343,7 @@ impl super::XMPPClient {
                                                 content: decrypted_content,
                                                 timestamp,
                                                 delivery_status: DeliveryStatus::Delivered,
+            encrypted: true,
                                             });
                                             return;
                                         },
@@ -356,6 +357,7 @@ impl super::XMPPClient {
                                                 content: format!("[Encrypted message - couldn't decrypt: {}]", e),
                                                 timestamp,
                                                 delivery_status: DeliveryStatus::Delivered,
+            encrypted: true,
                                             });
                                             return;
                                         }
@@ -368,6 +370,7 @@ impl super::XMPPClient {
                                         content: "[Encrypted message - OMEMO not initialized]".to_string(),
                                         timestamp,
                                         delivery_status: DeliveryStatus::Delivered,
+            encrypted: true,
                                     });
                                     return;
                                 }
@@ -383,6 +386,7 @@ impl super::XMPPClient {
                                         content: body,
                                         timestamp,
                                         delivery_status: DeliveryStatus::Delivered,
+            encrypted: false,
                                     });
                                 }
                             }
@@ -746,6 +750,7 @@ impl super::XMPPClient {
                         current_result.messages.len(), count),
                     timestamp: chrono::Utc::now().timestamp() as u64,
                     delivery_status: DeliveryStatus::Delivered,
+            encrypted: false,
                 };
                 
                 // Send this notification to the UI
@@ -792,6 +797,7 @@ impl super::XMPPClient {
                                     loaded_so_far, count),
                                 timestamp: chrono::Utc::now().timestamp() as u64,
                                 delivery_status: DeliveryStatus::Delivered,
+            encrypted: false,
                             };
                             
                             // Send this notification to the UI
@@ -823,6 +829,7 @@ impl super::XMPPClient {
                             content: format!("Failed to retrieve full message history: {}", e),
                             timestamp: chrono::Utc::now().timestamp() as u64,
                             delivery_status: DeliveryStatus::Delivered,
+            encrypted: false,
                         };
                         
                         if let Err(send_e) = message_tx.send(error_notification).await {
@@ -855,6 +862,7 @@ impl super::XMPPClient {
             },
             timestamp: chrono::Utc::now().timestamp() as u64,
             delivery_status: DeliveryStatus::Delivered,
+            encrypted: false,
         };
         
         if let Err(e) = message_tx.send(completion_notification).await {

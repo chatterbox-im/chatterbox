@@ -147,6 +147,7 @@ impl XMPPClient {
                 content: pending.content.clone(),
                 timestamp: pending.timestamp,
                 delivery_status: new_status,
+                encrypted: false,
             };
             
             match self.msg_tx.send(ui_message).await {
