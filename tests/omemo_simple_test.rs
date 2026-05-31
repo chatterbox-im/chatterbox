@@ -28,7 +28,7 @@ async fn test_omemo_simple() -> Result<()> {
     info!("Using credentials for {} on server {}", ca_credentials.username, ca_credentials.server);
     
     // 2. Connect and send encrypted message
-    let (mut ca_client, mut ca_msg_rx) = XMPPClient::new();
+    let (mut ca_client, _ca_msg_rx) = XMPPClient::new();
     info!("Connecting to XMPP server as ca...");
     
     match ca_client.connect(
@@ -89,7 +89,7 @@ async fn test_omemo_simple() -> Result<()> {
         "+ng0APPS2TCL1rTeWZjXA1ULFz5ns35"
     );
     
-    let (mut cb_client, mut cb_msg_rx) = XMPPClient::new();
+    let (mut cb_client, _cb_msg_rx) = XMPPClient::new();
     match cb_client.connect(
         &cb_credentials.server,
         &cb_credentials.username,

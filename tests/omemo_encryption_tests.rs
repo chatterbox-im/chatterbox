@@ -442,7 +442,7 @@ async fn test_omemo_device_trust() -> Result<()> {
     };
 
     // 5. Get device fingerprint
-    let fingerprint = match client.get_own_fingerprint().await {
+    let _fingerprint = match client.get_own_fingerprint().await {
         Ok(fp) => {
             info!("Current device fingerprint: {}", fp);
             fp

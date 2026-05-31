@@ -7,7 +7,6 @@ mod common;
 use common::{setup_logging, get_test_credentials, wait_for_message};
 
 // Import the crate functionality
-use chatterbox::models::DeliveryStatus;
 use chatterbox::xmpp::XMPPClient;
 
 // Import credentials from our common module
@@ -24,7 +23,7 @@ async fn test_omemo_device_identity_and_carbons() -> Result<()> {
     let ca_credentials = get_test_credentials().await?;
     info!("Using credentials for {} on server {}", ca_credentials.username, ca_credentials.server);
     
-    let (mut ca_client, mut ca_msg_rx) = XMPPClient::new();
+    let (mut ca_client, _ca_msg_rx) = XMPPClient::new();
     info!("Connecting to XMPP server as ca (first device)...");
     
     match ca_client.connect(

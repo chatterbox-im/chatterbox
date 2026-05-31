@@ -3,9 +3,6 @@
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
-use std::fs::File;
-use std::io::Read;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Credentials {
@@ -30,6 +27,7 @@ impl Credentials {
 }
 
 /// Load credentials from a file
+#[allow(dead_code)]
 pub fn load_credentials() -> Result<Option<Credentials>> {
     // For tests, we'll just return None to indicate no saved credentials
     // In a real implementation, this would load from a file

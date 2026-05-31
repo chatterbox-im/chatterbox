@@ -8,7 +8,7 @@ use common::{setup_logging, get_test_credentials, get_test_recipient, wait_for_m
 // External crate imports
 use anyhow::Result;
 use log::{info, warn, error};
-use tokio::time::{timeout, Duration as TokioDuration};
+use tokio::time::Duration as TokioDuration;
 
 /// Test OMEMO multi-device encryption functionality
 #[tokio::test]

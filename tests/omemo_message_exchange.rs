@@ -114,7 +114,7 @@ async fn test_omemo_message_exchange() -> Result<()> {
         "+ng0APPS2TCL1rTeWZjXA1ULFz5ns35"
     );
     
-    let (mut cb_client, mut cb_msg_rx) = XMPPClient::new();
+    let (mut cb_client, _cb_msg_rx) = XMPPClient::new();
     match cb_client.connect(
         &cb_credentials.server,
         &cb_credentials.username,

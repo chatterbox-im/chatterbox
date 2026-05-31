@@ -3,28 +3,24 @@
 
 // Standard library imports
 use std::sync::Once;
-use std::time::Duration;
-use std::thread;
-use std::str;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
 // External crate imports
 use anyhow::Result;
-use log::{info, warn, error, LevelFilter};
+use log::{info, LevelFilter};
 use tokio::time::{timeout, Duration as TokioDuration};
-use serde::{Deserialize, Serialize};
 
 // Import the crate functionality
 use chatterbox::{
     models::{Message, DeliveryStatus, Contact, ContactStatus},
-    xmpp::{XMPPClient, TypingStatus},
+    xmpp::XMPPClient,
 };
 
 // Local import for credentials
 pub mod credentials;
-use credentials::{Credentials, load_credentials};
+use credentials::Credentials;
 
 // Initialize logging once
 static INIT_LOGGER: Once = Once::new();
@@ -41,12 +37,14 @@ pub fn setup_logging() {
 }
 
 /// Struct for synchronous test client
+#[allow(dead_code)]
 pub struct TestClient {
     xmpp_client: Option<XMPPClient>,
     msg_rx: Option<tokio::sync::mpsc::Receiver<Message>>,
     connected: bool,
 }
 
+#[allow(dead_code)]
 impl TestClient {
     pub fn new() -> Self {
         TestClient {
@@ -119,6 +117,7 @@ impl TestClient {
 }
 
 /// Setup a test client
+#[allow(dead_code)]
 pub fn setup_test_client() -> TestClient {
     TestClient::new()
 }
@@ -151,6 +150,7 @@ pub async fn get_test_credentials() -> Result<Credentials> {
 }
 
 /// Get test recipient JID for async tests
+#[allow(dead_code)]
 pub async fn get_test_recipient() -> Result<String> {
     // Try to load credentials from the JSON file
     let credentials_path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -186,6 +186,7 @@ pub async fn get_test_recipient() -> Result<String> {
 }
 
 /// Get test recipient credentials for async tests
+#[allow(dead_code)]
 pub async fn get_test_recipient_credentials() -> Result<Credentials> {
     // Try to load credentials from the JSON file
     let credentials_path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -213,6 +214,7 @@ pub async fn get_test_recipient_credentials() -> Result<Credentials> {
 }
 
 /// Load test credentials from a JSON file
+#[allow(dead_code)]
 pub fn load_test_credentials_from_file<P: AsRef<Path>>(path: P) -> Result<Credentials> {
     let mut file = File::open(path)?;
     let mut contents = String::new();
@@ -234,6 +236,7 @@ pub fn load_test_credentials_from_file<P: AsRef<Path>>(path: P) -> Result<Creden
 }
 
 /// Wait for a specific message matching the predicate with timeout
+#[allow(dead_code)]
 pub async fn wait_for_message(
     msg_rx: &mut tokio::sync::mpsc::Receiver<Message>,
     predicate: impl Fn(&Message) -> bool,

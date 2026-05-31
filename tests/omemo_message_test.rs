@@ -74,7 +74,7 @@ async fn test_omemo_message_exchange() -> Result<()> {
     
     // Wait for delivery confirmation
     info!("Waiting for message delivery confirmation...");
-    let sent_msg = match wait_for_message(
+    let _sent_msg = match wait_for_message(
         &mut ca_msg_rx, 
         |msg| msg.content == test_message && 
               (msg.delivery_status == DeliveryStatus::Sent || 
