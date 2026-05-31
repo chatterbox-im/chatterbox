@@ -2,8 +2,6 @@ use anyhow::{anyhow, Result};
 use log::{debug, error, info, warn};
 use uuid::Uuid;
 
-use xmpp_parsers::BareJid as JidBare;
-
 use crate::models::{Message, DeliveryStatus};
 use crate::xmpp::custom_ns;
 use crate::xmpp::transport;

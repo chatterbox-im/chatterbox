@@ -1184,7 +1184,6 @@ fn normalize_jid_to_bare(jid: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::utils::*;
     use std::collections::HashSet;
 
     fn sample_omemo_message(prekey_devices: HashSet<DeviceId>) -> OmemoMessage {

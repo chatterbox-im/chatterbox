@@ -7,7 +7,7 @@ use base64::Engine;
 use xmpp_parsers::Element;
 
 use crate::models::{Message, DeliveryStatus, PendingMessage};
-use super::{XMPPClient, custom_ns, introspection, verify_omemo_stanza};
+use super::{XMPPClient, custom_ns};
 
 impl XMPPClient {
     /// Send a message (encrypted if OMEMO is enabled, plaintext otherwise)

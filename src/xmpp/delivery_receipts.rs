@@ -361,7 +361,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_receipt_updates_pending() {
         let pending = Arc::new(TokioMutex::new(HashMap::new()));
-        let (msg_tx, mut msg_rx) = tokio::sync::mpsc::channel(10);
+        let (msg_tx, _msg_rx) = tokio::sync::mpsc::channel(10);
 
         // Insert a pending receipt
         {
