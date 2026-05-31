@@ -720,8 +720,21 @@ impl ChatUI {
                 }));
         frame.render_widget(contacts_list, chunks[0]);
 
-        // Draw messages
-        draw_messages(frame, &self.messages, chat_chunks[0], self);
+        // Draw messages (filtered to active contact only)
+        let active_contact = &self.contact;
+        let filtered_messages: Vec<&Message> = self.messages.iter()
+            .filter(|m| {
+                if active_contact.is_empty() {
+                    return true; // Show all if no contact selected
+                }
+                let sender_base = Self::get_base_jid(&m.sender_id);
+                let recipient_base = Self::get_base_jid(&m.recipient_id);
+                // Show messages from the active contact, or sent to the active contact, or system messages
+                sender_base == *active_contact || recipient_base == *active_contact || m.sender_id == "system"
+            })
+            .collect();
+        let filtered_owned: Vec<Message> = filtered_messages.into_iter().cloned().collect();
+        draw_messages(frame, &filtered_owned, chat_chunks[0], self);
 
         // Draw input box
         let input_block = Block::default()
