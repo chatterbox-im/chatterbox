@@ -18,7 +18,7 @@ use curve25519_dalek::{
     montgomery::MontgomeryPoint,
     scalar::Scalar,
 };
-use log::{trace, error};
+use log::{trace, debug, error};
 use hex;
 
 
@@ -466,6 +466,48 @@ pub fn encode_public_key_with_prefix(key: &[u8]) -> Vec<u8> {
     }
 }
 
+/// Ensure a public key is in Montgomery (X25519) form for DH operations.
+/// If the key is already a valid Montgomery point (i.e., to_edwards succeeds), return as-is.
+/// If it appears to be an Edwards (Ed25519) key, convert to Montgomery.
+/// Handles the 0x05 prefix convention.
+pub fn ensure_montgomery_form(key: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    // Strip 0x05 prefix if present
+    let raw = if key.len() == 33 && key[0] == 0x05 {
+        &key[1..]
+    } else if key.len() == 32 {
+        key
+    } else {
+        return Err(CryptoError::InvalidInputError(format!(
+            "Invalid key length for Montgomery conversion: {}", key.len()
+        )));
+    };
+
+    let key_array: [u8; 32] = raw.try_into().unwrap();
+
+    // Try Montgomery→Edwards to verify it's a valid Montgomery point
+    let montgomery = MontgomeryPoint(key_array);
+    if montgomery.to_edwards(0).is_some() || montgomery.to_edwards(1).is_some() {
+        // Already a valid Montgomery point
+        return Ok(raw.to_vec());
+    }
+
+    // Not a valid Montgomery point — try interpreting as Edwards and converting
+    let compressed = CompressedEdwardsY(key_array);
+    match compressed.decompress() {
+        Some(edwards_point) => {
+            let montgomery_point = edwards_point.to_montgomery();
+            debug!("Converted Ed25519 identity key to X25519: {} -> {}",
+                hex::encode(raw), hex::encode(montgomery_point.as_bytes()));
+            Ok(montgomery_point.as_bytes().to_vec())
+        }
+        None => {
+            Err(CryptoError::InvalidInputError(
+                "Key is neither a valid Montgomery nor Edwards point".to_string()
+            ))
+        }
+    }
+}
+
 /// Normalize a Curve25519 public key to 32 bytes
 /// OMEMO/Signal protocol sometimes encodes public keys with a 0x05 prefix byte
 fn normalize_curve25519_public_key(key: &[u8]) -> Result<Vec<u8>, CryptoError> {
@@ -639,23 +681,23 @@ pub fn xeddsa_sign(x25519_private_key: &[u8], message: &[u8]) -> Result<Vec<u8>,
     clamped[31] |= 64;
 
     // Step 2: Convert to a Scalar
-    let mut scalar = Scalar::from_bytes_mod_order(clamped);
+    let scalar = Scalar::from_bytes_mod_order(clamped);
 
-    // Step 3: Compute the Edwards public key
+    // Step 3: Compute the Edwards public key (with its natural sign)
     let edwards_point = curve25519_dalek::constants::ED25519_BASEPOINT_TABLE * &scalar;
     let compressed = edwards_point.compress();
     let edwards_bytes = compressed.to_bytes();
 
-    // Step 4: If the sign bit (high bit of last byte) is set, negate the scalar
-    if edwards_bytes[31] & 0x80 != 0 {
-        scalar = -scalar;
-    }
+    // Step 4: Record the sign bit (but do NOT negate the scalar)
+    // libsignal-protocol-c's curve25519_verify reconstructs the Edwards point
+    // from the Montgomery u-coordinate + this sign bit. The signer must use
+    // the SAME Edwards point (with its natural sign) in the challenge hash.
+    let sign_bit = edwards_bytes[31] & 0x80;
 
-    // Step 5: Compute the public key with positive sign
-    let public_point = curve25519_dalek::constants::ED25519_BASEPOINT_TABLE * &scalar;
-    let public_bytes = public_point.compress().to_bytes();
+    // Step 5: Use the original public key (with its natural sign) for signing
+    let public_bytes = edwards_bytes;
 
-    // Step 6: Generate a random nonce (64 bytes) for deterministic signing
+    // Step 6: Generate a random nonce (64 bytes)
     let mut random = [0u8; 64];
     OsRng.fill_bytes(&mut random);
 
@@ -678,20 +720,27 @@ pub fn xeddsa_sign(x25519_private_key: &[u8], message: &[u8]) -> Result<Vec<u8>,
     let challenge_digest = challenge_hash.finalize();
     let challenge = Scalar::from_bytes_mod_order_wide(&challenge_digest.into());
 
-    // Step 10: s = nonce_scalar + challenge * scalar
+    // Step 10: s = nonce_scalar + challenge * scalar (using original, unnegated scalar)
     let s = nonce_scalar + challenge * scalar;
 
-    // Step 11: Signature = R || s
+    // Step 11: Signature = R || s, with sign bit encoded in s[31] high bit
+    // The verifier extracts this sign bit to reconstruct the correct Edwards point
     let mut signature = [0u8; 64];
     signature[..32].copy_from_slice(&r_bytes);
     signature[32..].copy_from_slice(&s.to_bytes());
+    signature[63] &= 0x7F; // Clear high bit of s (reserved for sign bit)
+    signature[63] |= sign_bit; // Encode sign bit so verifier can reconstruct A
 
     Ok(signature.to_vec())
 }
 
 /// XEdDSA: Verify a signature using an X25519 public key (Montgomery point).
 ///
-/// Converts the Montgomery public key to Edwards form and verifies using Ed25519.
+/// Supports two protocol variants:
+/// 1. Standard XEdDSA (convert_mont with sign=0)
+/// 2. libsignal-protocol-c variant (sign bit encoded in signature[63] high bit)
+///
+/// Also handles identity keys published in Edwards form by converting to Montgomery first.
 pub fn xeddsa_verify(x25519_public_key: &[u8], message: &[u8], signature: &[u8]) -> Result<bool, CryptoError> {
     if x25519_public_key.len() != 32 {
         return Err(CryptoError::InvalidInputError(
@@ -704,24 +753,34 @@ pub fn xeddsa_verify(x25519_public_key: &[u8], message: &[u8], signature: &[u8])
         ));
     }
 
-    // Step 1: Convert Montgomery public key to Edwards form
-    let montgomery = MontgomeryPoint(*<&[u8; 32]>::try_from(x25519_public_key).unwrap());
+    let key_array = <&[u8; 32]>::try_from(x25519_public_key).unwrap();
 
-    // to_edwards returns the Edwards point with positive sign (sign=0)
-    let edwards_point = match montgomery.to_edwards(0) {
-        Some(point) => point,
-        None => {
-            return Err(CryptoError::InvalidInputError(
-                "Failed to convert Montgomery point to Edwards".to_string()
-            ));
+    // Determine the Montgomery u-coordinate for XEdDSA verification
+    let montgomery = MontgomeryPoint(*key_array);
+    let montgomery_key = if montgomery.to_edwards(0).is_some() || montgomery.to_edwards(1).is_some() {
+        // Key is already in Montgomery form
+        debug!("xeddsa_verify: key is Montgomery form: {}", hex::encode(key_array));
+        montgomery
+    } else {
+        // Key might be in Edwards form — convert to Montgomery
+        let compressed = CompressedEdwardsY(*key_array);
+        match compressed.decompress() {
+            Some(edwards_point) => {
+                let mont = edwards_point.to_montgomery();
+                debug!("xeddsa_verify: key is Edwards form: {} -> Montgomery: {}", 
+                    hex::encode(key_array), hex::encode(mont.as_bytes()));
+                mont
+            }
+            None => {
+                return Err(CryptoError::InvalidInputError(
+                    "Key is neither a valid Montgomery nor Edwards point".to_string()
+                ));
+            }
         }
     };
 
-    let public_bytes = edwards_point.compress().to_bytes();
-
-    // Step 2: Extract R and s from signature
+    // Extract R from signature (first 32 bytes, unchanged in both protocols)
     let r_bytes: [u8; 32] = signature[..32].try_into().unwrap();
-    let s_bytes: [u8; 32] = signature[32..].try_into().unwrap();
 
     // Decompress R
     let r_compressed = CompressedEdwardsY(r_bytes);
@@ -730,32 +789,167 @@ pub fn xeddsa_verify(x25519_public_key: &[u8], message: &[u8], signature: &[u8])
         None => return Ok(false),
     };
 
+    // libsignal protocol: sign bit is encoded in signature[63] high bit
+    // Extract sign bit and clean s
+    let sign_bit = (signature[63] & 0x80) >> 7;
+    let mut s_bytes: [u8; 32] = signature[32..].try_into().unwrap();
+    s_bytes[31] &= 0x7F; // Clear sign bit from s
+
+    debug!("xeddsa_verify: sign_bit={}, R={}, s(cleaned)={}, msg_len={}", 
+        sign_bit, hex::encode(&r_bytes), hex::encode(&s_bytes), message.len());
+
     // Convert s to scalar
     let s = match Scalar::from_canonical_bytes(s_bytes).into() {
         Some(s) => s,
-        None => return Ok(false),
+        None => {
+            debug!("xeddsa_verify: s is not canonical, returning false");
+            return Ok(false);
+        }
     };
 
-    // Step 3: Compute challenge: SHA-512(R || public_key || message)
-    let mut challenge_hash = Sha512::new();
-    challenge_hash.update(&r_bytes);
-    challenge_hash.update(&public_bytes);
-    challenge_hash.update(message);
-    let challenge_digest = challenge_hash.finalize();
-    let challenge = Scalar::from_bytes_mod_order_wide(&challenge_digest.into());
-
-    // Step 4: Verify: s*B == R + challenge*A
+    // s*B (common to all attempts)
     let sb = curve25519_dalek::constants::ED25519_BASEPOINT_TABLE * &s;
-    let ca = edwards_point * challenge;
-    let expected = r_point + ca;
 
-    Ok(sb == expected)
+    // Try verification with the sign from the signature (libsignal protocol)
+    if let Some(point) = montgomery_key.to_edwards(sign_bit) {
+        let public_bytes = point.compress().to_bytes();
+        debug!("xeddsa_verify: try sign={}, A={}", sign_bit, hex::encode(&public_bytes));
+        let mut challenge_hash = Sha512::new();
+        challenge_hash.update(&r_bytes);
+        challenge_hash.update(&public_bytes);
+        challenge_hash.update(message);
+        let challenge_digest = challenge_hash.finalize();
+        let challenge = Scalar::from_bytes_mod_order_wide(&challenge_digest.into());
+        let ca = point * challenge;
+        let expected = r_point + ca;
+        if sb == expected {
+            debug!("xeddsa_verify: SUCCESS with sign={}", sign_bit);
+            return Ok(true);
+        }
+    } else {
+        debug!("xeddsa_verify: to_edwards({}) returned None", sign_bit);
+    }
+
+    // Try with the opposite sign (in case sign bit wasn't set by signer)
+    let other_sign = 1 - sign_bit;
+    if let Some(point) = montgomery_key.to_edwards(other_sign) {
+        let public_bytes = point.compress().to_bytes();
+        let mut challenge_hash = Sha512::new();
+        challenge_hash.update(&r_bytes);
+        challenge_hash.update(&public_bytes);
+        challenge_hash.update(message);
+        let challenge_digest = challenge_hash.finalize();
+        let challenge = Scalar::from_bytes_mod_order_wide(&challenge_digest.into());
+        let ca = point * challenge;
+        let expected = r_point + ca;
+        if sb == expected {
+            return Ok(true);
+        }
+    }
+
+    // Also try with the original s (without clearing sign bit) in case the
+    // signer didn't use the libsignal sign-encoding convention
+    let s_orig = match Scalar::from_canonical_bytes(signature[32..].try_into().unwrap()).into() {
+        Some(s) => s,
+        None => return Ok(false),
+    };
+    if s_orig != s {
+        let sb_orig = curve25519_dalek::constants::ED25519_BASEPOINT_TABLE * &s_orig;
+        for sign in [0u8, 1u8] {
+            if let Some(point) = montgomery_key.to_edwards(sign) {
+                let public_bytes = point.compress().to_bytes();
+                let mut challenge_hash = Sha512::new();
+                challenge_hash.update(&r_bytes);
+                challenge_hash.update(&public_bytes);
+                challenge_hash.update(message);
+                let challenge_digest = challenge_hash.finalize();
+                let challenge = Scalar::from_bytes_mod_order_wide(&challenge_digest.into());
+                let ca = point * challenge;
+                let expected = r_point + ca;
+                if sb_orig == expected {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+
+    Ok(false)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     
+    #[test]
+    fn test_dino_key_montgomery_to_edwards() {
+        // This is device 1019198589's identity key from storage — it's an Ed25519 key,
+        // not an X25519 key. Montgomery conversion fails, but Edwards decompression works.
+        let key_bytes: [u8; 32] = [
+            0x25, 0x09, 0x39, 0xf2, 0x0f, 0xb4, 0xa2, 0x6c,
+            0x23, 0x1b, 0xc2, 0x8e, 0xf2, 0x8f, 0xdc, 0xdc,
+            0xe3, 0x0a, 0xed, 0x6e, 0xef, 0x16, 0x52, 0x42,
+            0x63, 0xd1, 0x1a, 0xfd, 0x36, 0xb8, 0x1c, 0x55,
+        ];
+        let montgomery = MontgomeryPoint(key_bytes);
+        // Montgomery conversion returns None for this key
+        assert!(montgomery.to_edwards(0).is_none());
+        assert!(montgomery.to_edwards(1).is_none());
+        
+        // But it IS a valid Edwards point
+        let compressed = CompressedEdwardsY(key_bytes);
+        assert!(compressed.decompress().is_some(), "Key should be valid as Edwards point");
+        
+        // And we can convert Edwards -> Montgomery -> Edwards(sign=0) for XEdDSA
+        let edwards_point = compressed.decompress().unwrap();
+        let montgomery_point = edwards_point.to_montgomery();
+        // The Montgomery form should be convertible back to Edwards
+        assert!(montgomery_point.to_edwards(0).is_some() || montgomery_point.to_edwards(1).is_some());
+    }
+
+    #[test]
+    fn test_xeddsa_verify_with_montgomery_key() {
+        // Test verification with proper Montgomery key (the format used in OMEMO bundles)
+        let (private_key, _) = generate_x25519_keypair().unwrap();
+        let message = b"test signed prekey data";
+        
+        let signature = xeddsa_sign(&private_key, message).unwrap();
+        
+        // Derive the Montgomery public key (as it appears in OMEMO bundles)
+        let public_key = {
+            let secret = x25519_dalek::StaticSecret::from(
+                <[u8; 32]>::try_from(private_key.as_slice()).unwrap()
+            );
+            x25519_dalek::PublicKey::from(&secret).as_bytes().to_vec()
+        };
+        
+        // Verify using Montgomery form of the key
+        let result = xeddsa_verify(&public_key, message, &signature).unwrap();
+        assert!(result, "XEdDSA verify should succeed with Montgomery key");
+    }
+
+    #[test]
+    fn test_xeddsa_verify_prefixed_message() {
+        // Test with the 0x05-prefixed message format used by libsignal
+        let (private_key, _) = generate_x25519_keypair().unwrap();
+        let (_, spk_pub) = generate_x25519_keypair().unwrap();
+        
+        // Sign the prefixed SPK (as libsignal does)
+        let mut message = vec![0x05];
+        message.extend_from_slice(&spk_pub);
+        
+        let signature = xeddsa_sign(&private_key, &message).unwrap();
+        
+        // Verify with Montgomery key
+        let public_key = {
+            let secret = x25519_dalek::StaticSecret::from(
+                <[u8; 32]>::try_from(private_key.as_slice()).unwrap()
+            );
+            x25519_dalek::PublicKey::from(&secret).as_bytes().to_vec()
+        };
+        let result = xeddsa_verify(&public_key, &message, &signature).unwrap();
+        assert!(result, "XEdDSA verify with 0x05-prefixed SPK should succeed");
+    }
+
     #[test]
     fn test_encrypt_decrypt() {
         let key = generate_message_key();

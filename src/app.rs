@@ -230,26 +230,29 @@ async fn start_initial_history_load(
 
 /// Set up the contacts list from the XMPP server
 async fn setup_contacts(chat_ui: &mut ChatUI, xmpp_client: &mut XMPPClient, _disable_mam: bool) {
+    // Always add own JID as a contact (for messaging other devices on same account)
+    let our_bare_jid = xmpp_client.get_jid().split('/').next().unwrap_or("").to_string();
+    if !our_bare_jid.is_empty() {
+        chat_ui.add_contact(&our_bare_jid);
+    }
+
     match xmpp_client.get_roster().await {
         Ok(Some(contacts)) if !contacts.is_empty() => {
             for contact in contacts {
                 chat_ui.add_contact(&contact);
             }
-            if !chat_ui.contacts.is_empty() {
-                let first_contact = chat_ui.contacts[0].clone();
-                chat_ui.set_active_contact(&first_contact);
-            }
         }
         Ok(_) => {
-            chat_ui.add_contact("[No contacts found]");
-            chat_ui.add_message(create_system_message(
-                "me",
-                "No contacts found in your roster. You can still chat by entering a complete JID (e.g. user@domain.com)",
-            ));
+            if chat_ui.contacts.len() <= 1 {
+                // Only own JID present, no real contacts
+                chat_ui.add_message(create_system_message(
+                    "me",
+                    "No contacts found in your roster. Use Add Contact (Ctrl+A) to add someone.",
+                ));
+            }
         }
         Err(e) => {
             error!("Error fetching roster: {}", e);
-            chat_ui.add_contact("[Error loading contacts]");
             chat_ui.add_message(create_system_message(
                 "me",
                 &format!(
@@ -1228,12 +1231,26 @@ async fn handle_add_contact(
             ));
         }
         Err(e) => {
-            error!("Failed to add contact {}: {}", recipient, e);
-            chat_ui.remove_last_message();
-            chat_ui.add_message(create_system_message(
-                "me",
-                &format!("Failed to add contact {}: {}", recipient, e),
-            ));
+            // If it's our own JID, add locally anyway (server rejects self-roster adds)
+            let our_bare_jid = xmpp_client.get_jid().split('/').next().unwrap_or("");
+            if recipient == our_bare_jid || recipient.eq_ignore_ascii_case(our_bare_jid) {
+                info!("Adding own JID {} as local contact (server rejected roster add)", recipient);
+                chat_ui.remove_last_message();
+                chat_ui.add_contact(recipient);
+                chat_ui.set_active_contact(recipient);
+                chat_ui.clear_messages();
+                chat_ui.add_message(create_system_message(
+                    recipient,
+                    "Added as local contact (own JID). You can send messages to your other devices.",
+                ));
+            } else {
+                error!("Failed to add contact {}: {}", recipient, e);
+                chat_ui.remove_last_message();
+                chat_ui.add_message(create_system_message(
+                    "me",
+                    &format!("Failed to add contact {}: {}", recipient, e),
+                ));
+            }
         }
     }
 }

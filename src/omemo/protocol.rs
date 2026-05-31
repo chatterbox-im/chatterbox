@@ -271,9 +271,23 @@ impl X3DHProtocol {
         } else {
             identity_public_key
         };
-        // Verify against 33-byte form of SPK (per libsignal convention)
+        // Try verification with 33-byte form of SPK (per libsignal convention: 0x05 prefix)
         let prefixed_spk = crypto::encode_public_key_with_prefix(pre_key_public);
-        crypto::xeddsa_verify(identity_key_32, &prefixed_spk, signature)
+        match crypto::xeddsa_verify(identity_key_32, &prefixed_spk, signature) {
+            Ok(true) => return Ok(true),
+            Ok(false) => {},
+            Err(e) => return Err(DoubleRatchetError::InvalidSignatureError(
+                format!("XEdDSA verification failed: {}", e)
+            )),
+        }
+        
+        // Fallback: try verification with raw 32-byte SPK (Dino/other implementations)
+        let raw_spk = if pre_key_public.len() == 33 && pre_key_public[0] == 0x05 {
+            &pre_key_public[1..]
+        } else {
+            pre_key_public
+        };
+        crypto::xeddsa_verify(identity_key_32, raw_spk, signature)
             .map_err(|e| DoubleRatchetError::InvalidSignatureError(
                 format!("XEdDSA verification failed: {}", e)
             ))

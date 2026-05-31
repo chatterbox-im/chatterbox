@@ -64,7 +64,19 @@ impl OmemoManager {
             };
             
             if prekey_msg.pre_key_id.is_some() && one_time_prekey_pair.is_none() {
-                warn!("PreKeyMessage references OPK id {:?} but we don't have it - proceeding without", prekey_msg.pre_key_id);
+                warn!("PreKeyMessage references OPK id {:?} but we don't have it — cannot establish session (sender needs our fresh bundle)", prekey_msg.pre_key_id);
+                
+                // Republish our bundle so the sender can fetch fresh OPKs
+                if let Err(e) = self.publish_bundle_to_server().await {
+                    warn!("Failed to republish bundle after missing OPK: {}", e);
+                }
+                
+                return Err(OmemoError::SessionError(
+                    session::SessionError::InvalidStateError(format!(
+                        "Missing one-time prekey {} — sender must re-establish session with fresh bundle",
+                        prekey_msg.pre_key_id.unwrap()
+                    ))
+                ));
             }
             
             // Verify sender's identity key signature on their bundle

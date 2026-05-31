@@ -3,8 +3,6 @@
 
 use anyhow::{anyhow, Result};
 use log::{error, info, warn};
-use std::time::Duration;
-use uuid::Uuid;
 use xmpp_parsers::Element;
 use crate::xmpp::XMPPClient;
 
@@ -15,65 +13,26 @@ impl XMPPClient {
             return Err(anyhow!("XMPP client not initialized or unavailable"));
         }
 
-        let id = Uuid::new_v4().to_string();
-        
-        // Register for the response BEFORE sending
-        let rx = {
-            let mut registry = self.iq_registry.lock().await;
-            registry.register(id.clone())
-        };
-        
         let query = Element::builder("query", "jabber:iq:roster").build();
-        let iq = Element::builder("iq", "jabber:client")
-            .attr("type", "get")
-            .attr("id", &id)
-            .append(query)
-            .build();
-        info!("Sending roster request with ID: {}", id);
-        
-        // Send the roster request
-        self.send_stanza(iq)
-            .map_err(|e| anyhow!("Failed to send roster request: {}", e))?;
-        
-        info!("Roster request sent, waiting for response...");
-        
-        // Wait for the event loop to route the response to us
-        let response = tokio::time::timeout(Duration::from_secs(10), rx).await;
-        
-        match response {
-            Ok(Ok(stanza)) => {
-                match stanza.attr("type") {
-                    Some("result") => {
-                        let mut roster_contacts = Vec::new();
-                        if let Some(query) = stanza.get_child("query", "jabber:iq:roster") {
-                            for item in query.children() {
-                                if item.name() == "item" {
-                                    if let Some(jid) = item.attr("jid") {
-                                        info!("Found contact: {}", jid);
-                                        roster_contacts.push(jid.to_string());
-                                    }
-                                }
+
+        match self.send_iq_and_await("get", query, 10).await {
+            Ok(stanza) => {
+                let mut roster_contacts = Vec::new();
+                if let Some(query) = stanza.get_child("query", "jabber:iq:roster") {
+                    for item in query.children() {
+                        if item.name() == "item" {
+                            if let Some(jid) = item.attr("jid") {
+                                info!("Found contact: {}", jid);
+                                roster_contacts.push(jid.to_string());
                             }
                         }
-                        info!("Found {} contacts in roster", roster_contacts.len());
-                        Ok(Some(roster_contacts))
-                    },
-                    Some("error") => {
-                        error!("Server returned error for roster request");
-                        Ok(Some(Vec::new()))
-                    },
-                    _ => {
-                        warn!("Unexpected IQ type in roster response");
-                        Ok(Some(Vec::new()))
                     }
                 }
-            },
-            Ok(Err(_)) => {
-                warn!("IQ response channel closed while waiting for roster");
-                Ok(Some(Vec::new()))
-            },
-            Err(_) => {
-                warn!("Timed out waiting for roster response, returning empty roster");
+                info!("Found {} contacts in roster", roster_contacts.len());
+                Ok(Some(roster_contacts))
+            }
+            Err(e) => {
+                warn!("Failed to get roster: {}", e);
                 Ok(Some(Vec::new()))
             }
         }
@@ -85,13 +44,6 @@ impl XMPPClient {
             return Err(anyhow!("XMPP client not initialized or unavailable"));
         }
         let full_jid = self.ensure_full_jid(jid).await?;
-        let id = Uuid::new_v4().to_string();
-
-        // Register for the response BEFORE sending
-        let rx = {
-            let mut registry = self.iq_registry.lock().await;
-            registry.register(id.clone())
-        };
 
         let item = Element::builder("item", "jabber:iq:roster")
             .attr("jid", &full_jid)
@@ -99,41 +51,18 @@ impl XMPPClient {
         let query = Element::builder("query", "jabber:iq:roster")
             .append(item)
             .build();
-        let iq = Element::builder("iq", "jabber:client")
-            .attr("type", "set")
-            .attr("id", &id)
-            .append(query)
-            .build();
-        info!("Sending add contact request with ID: {}", id);
-        self.send_stanza(iq)
-            .map_err(|e| anyhow!("Failed to send add contact request: {}", e))?;
 
-        // Wait for server confirmation
-        let response = tokio::time::timeout(Duration::from_secs(10), rx).await;
-        match response {
-            Ok(Ok(stanza)) => {
-                match stanza.attr("type") {
-                    Some("result") => {
-                        info!("Server confirmed roster add for {}", full_jid);
-                    }
-                    Some("error") => {
-                        let reason = stanza
-                            .get_child("error", "jabber:client")
-                            .and_then(|e| e.children().next())
-                            .map(|c| c.name().to_string())
-                            .unwrap_or_else(|| "unknown".to_string());
-                        return Err(anyhow!("Server rejected roster add for {}: {}", full_jid, reason));
-                    }
-                    other => {
-                        warn!("Unexpected IQ type {:?} for roster add", other);
-                    }
+        match self.send_iq_and_await("set", query, 10).await {
+            Ok(_) => {
+                info!("Server confirmed roster add for {}", full_jid);
+            }
+            Err(e) => {
+                // If it's an actual IQ error (server rejection), propagate it
+                if e.to_string().contains("IQ error") {
+                    return Err(anyhow!("Server rejected roster add for {}: {}", full_jid, e));
                 }
-            }
-            Ok(Err(_)) => {
-                warn!("IQ response channel closed while waiting for roster add confirmation");
-            }
-            Err(_) => {
-                warn!("Timed out waiting for roster add confirmation for {}", full_jid);
+                // Timeout or channel errors are non-fatal — the server may have processed it
+                warn!("Roster add response issue for {}: {}", full_jid, e);
             }
         }
 
@@ -198,13 +127,6 @@ impl XMPPClient {
             jid.to_string()
         };
         info!("Removing contact from roster using exact JID: {}", exact_jid);
-        let id = Uuid::new_v4().to_string();
-
-        // Register for the response BEFORE sending
-        let rx = {
-            let mut registry = self.iq_registry.lock().await;
-            registry.register(id.clone())
-        };
 
         let item = Element::builder("item", "jabber:iq:roster")
             .attr("jid", &exact_jid)
@@ -213,41 +135,17 @@ impl XMPPClient {
         let query = Element::builder("query", "jabber:iq:roster")
             .append(item)
             .build();
-        let iq = Element::builder("iq", "jabber:client")
-            .attr("type", "set")
-            .attr("id", &id)
-            .append(query)
-            .build();
-        info!("Sending remove contact request with ID: {}", id);
-        self.send_stanza(iq)
-            .map_err(|e| anyhow!("Failed to send remove contact request: {}", e))?;
 
-        // Wait for server confirmation
-        let response = tokio::time::timeout(Duration::from_secs(10), rx).await;
-        match response {
-            Ok(Ok(stanza)) => {
-                match stanza.attr("type") {
-                    Some("result") => {
-                        info!("Server confirmed roster removal for {}", exact_jid);
-                    }
-                    Some("error") => {
-                        let reason = stanza
-                            .get_child("error", "jabber:client")
-                            .and_then(|e| e.children().next())
-                            .map(|c| c.name().to_string())
-                            .unwrap_or_else(|| "unknown".to_string());
-                        return Err(anyhow!("Server rejected roster removal for {}: {}", exact_jid, reason));
-                    }
-                    other => {
-                        warn!("Unexpected IQ type {:?} for roster removal", other);
-                    }
+        match self.send_iq_and_await("set", query, 10).await {
+            Ok(_) => {
+                info!("Server confirmed roster removal for {}", exact_jid);
+            }
+            Err(e) => {
+                // For removal, treat timeout/channel errors as non-fatal but propagate real errors
+                if e.to_string().contains("IQ error") {
+                    return Err(anyhow!("Server rejected roster removal for {}: {}", exact_jid, e));
                 }
-            }
-            Ok(Err(_)) => {
-                warn!("IQ response channel closed while waiting for roster removal confirmation");
-            }
-            Err(_) => {
-                warn!("Timed out waiting for roster removal confirmation for {}", exact_jid);
+                warn!("Roster removal response issue for {}: {}", exact_jid, e);
             }
         }
 

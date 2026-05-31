@@ -13,115 +13,72 @@ use base64::Engine;
 impl super::XMPPClient {
     /// Enable Message Carbons feature
     pub async fn enable_carbons_protocol(&self) -> Result<bool> {
-        // Generate a unique ID for the request
-        let id = uuid::Uuid::new_v4().to_string();
-        
-        // Register for the response BEFORE sending (so we can't miss it)
-        let rx = {
-            let mut registry = self.iq_registry.lock().await;
-            registry.register(id.clone())
-        };
-        
-        // Create the enable carbons IQ stanza
         let enable = Element::builder("enable", custom_ns::CARBONS).build();
-        let iq = Element::builder("iq", "jabber:client")
-            .attr("type", "set")
-            .attr("id", &id)
-            .append(enable)
-            .build();
-        
-        info!("Sending request to enable message carbons with ID: {}", id);
-        
-        // Send the stanza
-        self.send_stanza(iq)
-            .map_err(|e| anyhow!("Failed to send message carbons enable request: {}", e))?;
-        
-        // Wait for the event loop to route the response to us
-        let response = tokio::time::timeout(
-            tokio::time::Duration::from_secs(10),
-            rx
-        ).await
-            .map_err(|_| anyhow!("Timed out waiting for message carbons response"))?
-            .map_err(|_| anyhow!("IQ response channel closed"))?;
-        
-        // Process the response
-        match response.attr("type") {
-            Some("result") => {
+
+        match self.send_iq_and_await("set", enable, 10).await {
+            Ok(_) => {
                 info!("Message carbons successfully enabled");
                 self.set_carbons_enabled(true);
                 Ok(true)
-            },
-            Some("error") => {
-                error!("Server returned error for message carbons enable request");
-                if let Some(error) = response.get_child("error", "") {
-                    let error_type = error.attr("type").unwrap_or("unknown");
-                    error!("Error type: {}", error_type);
-                }
-                Err(anyhow!("Server rejected message carbons enable request"))
-            },
-            _ => {
-                warn!("Unexpected IQ type in message carbons response");
-                Err(anyhow!("Unexpected response type"))
+            }
+            Err(e) => {
+                error!("Failed to enable message carbons: {}", e);
+                Err(anyhow!("Server rejected message carbons enable request: {}", e))
             }
         }
     }
 
     /// Disable Message Carbons feature
     pub async fn disable_carbons(&self) -> Result<bool> {
-        // Generate a unique ID for the request
-        let id = uuid::Uuid::new_v4().to_string();
-        
-        // Register for the response BEFORE sending
-        let rx = {
-            let mut registry = self.iq_registry.lock().await;
-            registry.register(id.clone())
-        };
-        
-        // Create the disable carbons IQ stanza
         let disable = Element::builder("disable", custom_ns::CARBONS).build();
-        let iq = Element::builder("iq", "jabber:client")
-            .attr("type", "set")
-            .attr("id", &id)
-            .append(disable)
-            .build();
-        
-        info!("Sending request to disable message carbons with ID: {}", id);
-        
-        // Send the stanza
-        self.send_stanza(iq)
-            .map_err(|e| anyhow!("Failed to send message carbons disable request: {}", e))?;
-        
-        // Wait for the event loop to route the response to us
-        let response = tokio::time::timeout(
-            tokio::time::Duration::from_secs(10),
-            rx
-        ).await;
-        
-        match response {
-            Ok(Ok(stanza)) => {
-                match stanza.attr("type") {
-                    Some("result") => {
-                        info!("Message carbons successfully disabled");
-                        self.set_carbons_enabled(false);
-                        Ok(true)
-                    },
-                    Some("error") => {
-                        error!("Server returned error for message carbons disable request");
-                        Err(anyhow!("Server rejected message carbons disable request"))
-                    },
-                    _ => {
-                        warn!("Unexpected IQ type in message carbons disable response");
-                        Err(anyhow!("Unexpected response type"))
-                    }
-                }
-            },
-            _ => {
-                // Timed out or channel closed — soft failure
-                warn!("Timed out waiting for message carbons disable response, assuming success");
+
+        match self.send_iq_and_await("set", disable, 10).await {
+            Ok(_) => {
+                info!("Message carbons successfully disabled");
+                self.set_carbons_enabled(false);
+                Ok(true)
+            }
+            Err(e) => {
+                // Soft failure — assume success on timeout
+                warn!("Failed to disable message carbons ({}), assuming success", e);
                 self.set_carbons_enabled(false);
                 Ok(true)
             }
         }
+    }
+
+    /// Build a UI message from carbon metadata and send it to the UI channel.
+    async fn send_carbon_to_ui(
+        &self,
+        from: &str,
+        to: &str,
+        is_sent: bool,
+        msg_id: Option<&str>,
+        content: impl Into<String>,
+        encrypted: bool,
+    ) -> Result<()> {
+        let msg_id = msg_id
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+        let (sender_id, recipient_id) = if is_sent {
+            ("me".to_string(), to.to_string())
+        } else {
+            (from.to_string(), "me".to_string())
+        };
+
+        let ui_message = match (sender_id.as_str(), encrypted) {
+            ("me", false) => Message::outgoing_plaintext(msg_id, recipient_id, content),
+            ("me", true) => Message::outgoing_encrypted(msg_id, recipient_id, content),
+            (_, false) => Message::incoming_plaintext(msg_id, sender_id, content),
+            (_, true) => Message::incoming_encrypted(msg_id, sender_id, content),
+        };
+
+        debug!("Sending carbon message to UI: {}", ui_message.content);
+        if let Err(e) = self.msg_tx.send(ui_message).await {
+            error!("Failed to send carbon message to UI: {}", e);
+        }
+        Ok(())
     }
 
     /// Process a received carbon message
@@ -205,44 +162,15 @@ impl super::XMPPClient {
                     for child in message.children() {
                         if child.name() == "body" {
                             debug!("Found body element with custom namespace: {}", child.ns());
-                            return match child.text().is_empty() {
-                                true => {
-                                    debug!("Body element is empty, skipping carbon processing");
-                                    Ok(())
-                                },
-                                false => {
-                                    let body = child.text();
-                                    debug!("Carbon message {}-> {} ({}): {}", 
-                                        if is_sent { "sent " } else { "received " },
-                                        to, from, body);
-                                    
-                                    // Create message ID if not present in the original message
-                                    let msg_id = message.attr("id").map(|s| s.to_string()).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-                                    
-                                    // Determine sender and recipient for UI message
-                                    let (sender_id, recipient_id) = if is_sent {
-                                        ("me".to_string(), to.to_string())
-                                    } else {
-                                        (from.to_string(), "me".to_string())
-                                    };
-                                    
-                                    // Create a Message object for the UI
-                                    let ui_message = if sender_id == "me" {
-                                        Message::outgoing_plaintext(msg_id, recipient_id, body)
-                                    } else {
-                                        Message::incoming_plaintext(msg_id, sender_id, body)
-                                    };
-                                    
-                                    // Send the message to the UI
-                                    debug!("Sending carbon message to UI: {}", ui_message.content);
-                                    match self.msg_tx.send(ui_message).await {
-                                        Ok(_) => debug!("Successfully sent carbon message to UI"),
-                                        Err(e) => error!("Failed to send carbon message to UI: {}", e),
-                                    }
-                                    
-                                    Ok(())
-                                }
-                            };
+                            if child.text().is_empty() {
+                                debug!("Body element is empty, skipping carbon processing");
+                                return Ok(());
+                            }
+                            let body = child.text();
+                            debug!("Carbon message {}-> {} ({}): {}", 
+                                if is_sent { "sent " } else { "received " },
+                                to, from, body);
+                            return self.send_carbon_to_ui(from, to, is_sent, message.attr("id"), body, false).await;
                         }
                     }
                     
@@ -258,33 +186,7 @@ impl super::XMPPClient {
             if is_sent { "sent " } else { "received " },
             to, from, body_text);
         
-        // Create message ID if not present in the original message
-        let msg_id = message.attr("id").map(|s| s.to_string()).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        
-        // Determine sender and recipient for UI message
-        // For sent carbons, we (the local user) are the sender
-        // For received carbons, the other party is the sender
-        let (sender_id, recipient_id) = if is_sent {
-            ("me".to_string(), to.to_string())
-        } else {
-            (from.to_string(), "me".to_string())
-        };
-        
-        // Create a Message object for the UI
-        let ui_message = if sender_id == "me" {
-            Message::outgoing_plaintext(msg_id, recipient_id, body_text)
-        } else {
-            Message::incoming_plaintext(msg_id, sender_id, body_text)
-        };
-        
-        // Send the message to the UI
-        debug!("Sending carbon message to UI: {}", ui_message.content);
-        match self.msg_tx.send(ui_message).await {
-            Ok(_) => debug!("Successfully sent carbon message to UI"),
-            Err(e) => error!("Failed to send carbon message to UI: {}", e),
-        }
-        
-        Ok(())
+        self.send_carbon_to_ui(from, to, is_sent, message.attr("id"), body_text, false).await
     }
     
     /// Process an OMEMO encrypted carbon message
@@ -384,33 +286,10 @@ impl super::XMPPClient {
 
         if !encrypted_keys.contains_key(&own_device_id) {
             debug!("No key found for our device ID {} in carbon message", own_device_id);
-            
-            // Create a placeholder message for the UI
-            let msg_id = message.attr("id").map(|s| s.to_string()).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-            
-            // Determine sender and recipient for UI message
-            let (sender_id, recipient_id) = if is_sent {
-                ("me".to_string(), to.to_string())
-            } else {
-                (from.to_string(), "me".to_string())
-            };
-            
-            // Create a Message object for the UI with a user-friendly message
-            let ui_message = if sender_id == "me" {
-                Message::outgoing_encrypted(msg_id, recipient_id, "[Message from another device - not encrypted for this device]")
-            } else {
-                Message::incoming_encrypted(msg_id, sender_id, "[Message from another device - not encrypted for this device]")
-            };
-            
-            // Send the message to the UI
-            if let Err(e) = self.msg_tx.send(ui_message).await {
-                error!("Failed to send placeholder message to UI: {}", e);
-            } else {
-                debug!("Sent placeholder message for carbon without key for our device");
-            }
-            
-            // Return success instead of error since we handled this case properly for the user
-            return Ok(());
+            return self.send_carbon_to_ui(
+                from, to, is_sent, message.attr("id"),
+                "[Message from another device - not encrypted for this device]", true,
+            ).await;
         }
         
         // Get IV (initialization vector)
@@ -497,34 +376,7 @@ impl super::XMPPClient {
         
         debug!("Successfully decrypted OMEMO carbon message");
         
-        // Generate a message ID if not present
-        let msg_id = message.attr("id").map(|s| s.to_string()).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        
-        // Determine sender and recipient for UI message based on if this is a sent or received carbon
-        let (sender_id, recipient_id) = if is_sent {
-            // Sent carbon - we are the sender
-            ("me".to_string(), to.to_string())
-        } else {
-            // Received carbon - other party is the sender
-            (from.to_string(), "me".to_string())
-        };
-        
-        // Create a Message object for the UI
-        let ui_message = if sender_id == "me" {
-            Message::outgoing_encrypted(msg_id, recipient_id, decrypted_content)
-        } else {
-            Message::incoming_encrypted(msg_id, sender_id, decrypted_content)
-        };
-        
-        // Send the message to the UI
-        if let Err(e) = self.msg_tx.send(ui_message).await {
-            error!("Failed to send decrypted carbon message to UI: {}", e);
-            return Err(anyhow!("Failed to send message to UI: {}", e));
-        } else {
-            debug!("Successfully sent decrypted carbon message to UI");
-        }
-        
-        Ok(())
+        self.send_carbon_to_ui(from, to, is_sent, message.attr("id"), decrypted_content, true).await
     }
 }
 

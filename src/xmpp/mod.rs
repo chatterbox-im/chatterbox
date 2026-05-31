@@ -6,9 +6,11 @@ use anyhow::{anyhow, Result};
 use log::{debug, error, info};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{mpsc, watch, Mutex as TokioMutex};
 use base64::Engine;
 use std::sync::atomic::{AtomicBool, Ordering};
+use uuid::Uuid;
 
 // Import the core xmpp libraries
 #[allow(unused_imports)]
@@ -174,6 +176,51 @@ impl XMPPClient {
         let tx = self.stanza_tx.as_ref()
             .ok_or_else(|| anyhow!("XMPP client not initialized"))?;
         transport::send_stanza(tx, stanza)
+    }
+
+    /// Send an IQ stanza and await the response with a timeout.
+    ///
+    /// Handles the full lifecycle: ID generation, registry registration,
+    /// stanza construction, sending, timeout, and error checking.
+    /// Returns the response `Element` on success (type="result").
+    pub(crate) async fn send_iq_and_await(
+        &self,
+        iq_type: &str,
+        child: xmpp_parsers::Element,
+        timeout_secs: u64,
+    ) -> Result<xmpp_parsers::Element> {
+        let id = Uuid::new_v4().to_string();
+
+        let rx = {
+            let mut registry = self.iq_registry.lock().await;
+            registry.register(id.clone())
+        };
+
+        let iq = xmpp_parsers::Element::builder("iq", "jabber:client")
+            .attr("type", iq_type)
+            .attr("id", &id)
+            .append(child)
+            .build();
+
+        self.send_stanza(iq)?;
+
+        let response = tokio::time::timeout(Duration::from_secs(timeout_secs), rx)
+            .await
+            .map_err(|_| anyhow!("Timed out waiting for IQ response (id={})", id))?
+            .map_err(|_| anyhow!("IQ response channel closed (id={})", id))?;
+
+        match response.attr("type") {
+            Some("result") => Ok(response),
+            Some("error") => {
+                let reason = response
+                    .get_child("error", "jabber:client")
+                    .and_then(|e| e.children().next())
+                    .map(|c| c.name().to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                Err(anyhow!("IQ error: {}", reason))
+            }
+            other => Err(anyhow!("Unexpected IQ response type: {:?}", other)),
+        }
     }
 
     // Get a clone of the message sender channel

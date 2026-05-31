@@ -10,11 +10,12 @@ use tokio::sync::{mpsc, Mutex as TokioMutex};
 use std::sync::atomic::AtomicBool;
 
 use tokio_xmpp::Event as XMPPEvent;
+use xmpp_parsers::Element;
 
 use crate::models::{Message, PendingMessage};
 use super::{XMPPClient, custom_ns, LateStateRx};
 use super::{chat_states, delivery_receipts, discovery, presence};
-use super::transport::StanzaTx;
+use super::transport::{self, StanzaTx};
 
 impl XMPPClient {
     /// Primary event processing loop.
@@ -275,7 +276,22 @@ impl XMPPClient {
                             }
                         }
                         
-                        if let Some(_query) = stanza.get_child("query", "http://jabber.org/protocol/disco#info") {
+                        if let Some(_query) = stanza.get_child("query", "jabber:iq:roster") {
+                            // Roster push from server — acknowledge it per RFC 6121 Section 2.1.6
+                            if stanza.attr("type") == Some("set") {
+                                if let Some(stanza_id) = stanza.attr("id") {
+                                    let ack = Element::builder("iq", "jabber:client")
+                                        .attr("type", "result")
+                                        .attr("id", stanza_id)
+                                        .build();
+                                    if let Err(e) = transport::send_stanza(&stanza_tx, ack) {
+                                        warn!("Failed to acknowledge roster push: {}", e);
+                                    } else {
+                                        debug!("Acknowledged roster push (id={})", stanza_id);
+                                    }
+                                }
+                            }
+                        } else if let Some(_query) = stanza.get_child("query", "http://jabber.org/protocol/disco#info") {
                             if stanza.attr("type") == Some("get") {
                                 // Respond to incoming disco#info queries with our capabilities
                                 if let Err(e) = service_discovery.respond_to_disco_info_query(&stanza) {
