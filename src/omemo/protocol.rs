@@ -152,6 +152,10 @@ pub struct RatchetState {
     /// Previous receive message number
     pub prev_receive_message_number: u32,
     
+    /// Previous send message number (used as previous_counter in Signal wire format)
+    #[serde(default)]
+    pub prev_send_message_number: u32,
+    
     /// Skipped message keys
     pub skipped_message_keys: std::collections::HashMap<(Vec<u8>, u32), Vec<u8>>,
     
@@ -341,9 +345,10 @@ impl X3DHProtocol {
             ikm.extend_from_slice(dh4);
         }
         
-        // HKDF(salt=0x00*32, IKM, info="", L=32)
+        // HKDF(salt=0x00*32, IKM, info="WhisperText", L=32)
+        // info="WhisperText" matches libsignal's X3DH key derivation
         let salt = vec![0u8; 32];
-        let shared_secret = crypto::hkdf_derive(&salt, &ikm, b"", 32)
+        let shared_secret = crypto::hkdf_derive(&salt, &ikm, b"WhisperText", 32)
             .map_err(DoubleRatchetError::CryptoError)?;
         
         debug!("X3DH initiator key agreement complete");
@@ -418,9 +423,10 @@ impl X3DHProtocol {
             ikm.extend_from_slice(dh4);
         }
         
-        // HKDF(salt=0x00*32, IKM, info="", L=32)
+        // HKDF(salt=0x00*32, IKM, info="WhisperText", L=32)
+        // info="WhisperText" matches libsignal's X3DH key derivation
         let salt = vec![0u8; 32];
-        let shared_key = crypto::hkdf_derive(&salt, &ikm, b"", 32)
+        let shared_key = crypto::hkdf_derive(&salt, &ikm, b"WhisperText", 32)
             .map_err(DoubleRatchetError::CryptoError)?;
         
         debug!("X3DH recipient key agreement complete");
@@ -515,6 +521,7 @@ impl DoubleRatchet {
                 send_message_number: 0,
                 receive_message_number: 0,
                 prev_receive_message_number: 0,
+                prev_send_message_number: 0,
                 skipped_message_keys: std::collections::HashMap::new(),
                 local_device_id,
                 remote_device_id,
@@ -551,6 +558,7 @@ impl DoubleRatchet {
                 send_message_number: 0,
                 receive_message_number: 0,
                 prev_receive_message_number: 0,
+                prev_send_message_number: 0,
                 skipped_message_keys: std::collections::HashMap::new(),
                 local_device_id,
                 remote_device_id,
@@ -649,7 +657,7 @@ impl DoubleRatchet {
         let message = OmemoMessage {
             sender_device_id: state.local_device_id,
             ratchet_key: state.ratchet_key_pair.public_key.clone(),
-            previous_counter: state.prev_receive_message_number, // Messages in previous sending chain
+            previous_counter: state.prev_send_message_number, // Messages in previous sending chain
             counter: state.send_message_number,
             ciphertext,
             mac,
@@ -792,6 +800,7 @@ impl DoubleRatchet {
         
         // Generate a new ratchet key pair for sending
         state.ratchet_key_pair = X3DHProtocol::generate_key_pair()?;
+        state.prev_send_message_number = state.send_message_number;
         state.send_message_number = 0;
         
         // DH for sending chain: DH(new_ratchet_private, their_ratchet_public)
@@ -833,7 +842,7 @@ impl DoubleRatchet {
         let signal_msg = crate::omemo::wire::SignalMessage {
             ratchet_key: state.ratchet_key_pair.public_key.clone(),
             counter: state.send_message_number,
-            previous_counter: state.prev_receive_message_number,
+            previous_counter: state.prev_send_message_number,
             ciphertext,
             mac: Vec::new(), // computed during serialization
         };

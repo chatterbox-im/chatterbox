@@ -109,42 +109,15 @@ impl OmemoManager {
             self.sessions.insert(key.clone(), session);
             self.store_session_state(&bare_jid, device_id, &ratchet_state).await?;
             
-            // Consume the one-time prekey
-            if let Some(opk_id) = prekey_msg.pre_key_id {
-                if let Some(bundle) = self.key_bundle.as_mut() {
-                    if bundle.one_time_pre_key_pairs.remove(&opk_id).is_some() {
-                        info!("Consumed one-time prekey {} after session establishment with {}:{}", opk_id, bare_jid, device_id);
-                        
-                        // Replenish OPKs if supply is low
-                        let remaining = bundle.one_time_pre_key_pairs.len() as u32;
-                        if remaining < self.prekey_rotation_config.min_one_time_prekeys {
-                            let max_id = bundle.one_time_pre_key_pairs.keys().copied().max().unwrap_or(0);
-                            let to_generate = self.prekey_rotation_config.min_one_time_prekeys - remaining;
-                            for i in 1..=to_generate {
-                                if let Ok(key_pair) = protocol::X3DHProtocol::generate_key_pair() {
-                                    bundle.one_time_pre_key_pairs.insert(max_id + i, key_pair);
-                                }
-                            }
-                            info!("Replenished {} one-time prekeys (now have {})", to_generate, bundle.one_time_pre_key_pairs.len());
-                        }
-                        
-                        // Persist updated bundle and republish
-                        let bundle_clone = bundle.clone();
-                        let storage_guard = self.storage.lock().await;
-                        if let Err(e) = storage_guard.store_key_bundle(&bundle_clone) {
-                            warn!("Failed to persist bundle after OPK consumption: {}", e);
-                        }
-                        drop(storage_guard);
-                        
-                        if let Err(e) = self.publish_bundle_to_server().await {
-                            warn!("Failed to republish bundle after OPK consumption: {}", e);
-                        }
-                    }
-                }
-            }
-            
             info!("Created new recipient session for {}:{}", bare_jid, device_id);
         }
+        
+        // Track OPK to consume AFTER successful decryption (not before)
+        let pending_opk_consumption = if let Some(prekey_msg) = crate::omemo::wire::PreKeySignalMessage::deserialize(&encrypted_key) {
+            prekey_msg.pre_key_id
+        } else {
+            None
+        };
         
         let key = (bare_jid.clone(), device_id);
         
@@ -241,6 +214,41 @@ impl OmemoManager {
         
         // Strip OMEMO padding (trailing space characters per XEP-0384 §13.4)
         let content = content.trim_end().to_string();
+        
+        // Consume the one-time prekey ONLY after successful decryption
+        // This prevents stale/replayed PreKeyMessages from burning valid OPKs
+        if let Some(opk_id) = pending_opk_consumption {
+            if let Some(bundle) = self.key_bundle.as_mut() {
+                if bundle.one_time_pre_key_pairs.remove(&opk_id).is_some() {
+                    info!("Consumed one-time prekey {} after successful decryption from {}:{}", opk_id, bare_jid, device_id);
+                    
+                    // Replenish OPKs if supply is low
+                    let remaining = bundle.one_time_pre_key_pairs.len() as u32;
+                    if remaining < self.prekey_rotation_config.min_one_time_prekeys {
+                        let max_id = bundle.one_time_pre_key_pairs.keys().copied().max().unwrap_or(0);
+                        let to_generate = self.prekey_rotation_config.min_one_time_prekeys - remaining;
+                        for i in 1..=to_generate {
+                            if let Ok(key_pair) = protocol::X3DHProtocol::generate_key_pair() {
+                                bundle.one_time_pre_key_pairs.insert(max_id + i, key_pair);
+                            }
+                        }
+                        info!("Replenished {} one-time prekeys (now have {})", to_generate, bundle.one_time_pre_key_pairs.len());
+                    }
+                    
+                    // Persist updated bundle and republish
+                    let bundle_clone = bundle.clone();
+                    let storage_guard = self.storage.lock().await;
+                    if let Err(e) = storage_guard.store_key_bundle(&bundle_clone) {
+                        warn!("Failed to persist bundle after OPK consumption: {}", e);
+                    }
+                    drop(storage_guard);
+                    
+                    if let Err(e) = self.publish_bundle_to_server().await {
+                        warn!("Failed to republish bundle after OPK consumption: {}", e);
+                    }
+                }
+            }
+        }
         
         info!("Message decrypted successfully from {}:{}", sender, device_id);
         
