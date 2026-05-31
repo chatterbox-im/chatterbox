@@ -90,8 +90,6 @@ impl super::XMPPClient {
             info!("OMEMO not fully initialized yet when fetching message history - encrypted messages may not be decrypted");
         }
         
-        let client = self.client.as_ref().ok_or_else(|| anyhow!("XMPP client not initialized"))?;
-        
         // Generate a unique ID for this MAM query
         let query_id = Uuid::new_v4().to_string();
         
@@ -195,11 +193,8 @@ impl super::XMPPClient {
         info!("Sending MAM query with ID: {}", query_id);
         
         // Send the MAM query
-        {
-            let mut client_guard = client.lock().await;
-            client_guard.send_stanza(iq).await
-                .map_err(|e| anyhow!("Failed to send MAM query: {}", e))?;
-        }
+        self.send_stanza(iq)
+            .map_err(|e| anyhow!("Failed to send MAM query: {}", e))?;
         
         // Collect messages until the final IQ arrives or timeout
         let mut archived_messages = Vec::new();
@@ -417,8 +412,6 @@ impl super::XMPPClient {
     /// 
     /// A Result containing a boolean: true if history exists, false otherwise
     pub async fn has_message_history(&self, jid: &str, limit: usize) -> Result<bool> {
-        let client = self.client.as_ref().ok_or_else(|| anyhow!("XMPP client not initialized"))?;
-        
         // Generate a unique ID for this MAM query
         let query_id = Uuid::new_v4().to_string();
         
@@ -476,11 +469,8 @@ impl super::XMPPClient {
             .build();
         
         // Send the query
-        {
-            let mut client_guard = client.lock().await;
-            client_guard.send_stanza(iq).await
-                .map_err(|e| anyhow!("Failed to send MAM history check query: {}", e))?;
-        }
+        self.send_stanza(iq)
+            .map_err(|e| anyhow!("Failed to send MAM history check query: {}", e))?;
         
         // Wait for either a message (means history exists) or the final IQ
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);

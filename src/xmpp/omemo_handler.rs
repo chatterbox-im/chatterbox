@@ -5,18 +5,19 @@
 use anyhow::{anyhow, Result};
 use log::{debug, error, info, warn};
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::Mutex as TokioMutex;
+use tokio::time::Duration;
 use base64::Engine;
 
 use crate::models::{Message, DeliveryStatus};
 use crate::omemo::device_id::DeviceId;
 use super::{XMPPClient, custom_ns, NS_JABBER_CLIENT};
+use super::transport;
 
 impl XMPPClient {
     /// Initialize the client
     pub async fn initialize_client(&mut self) -> Result<()> {
-        let client_ref = self.client.as_ref().ok_or_else(|| anyhow!("Client not initialized"))?;
+        let stanza_tx = self.stanza_tx.as_ref().ok_or_else(|| anyhow!("Client not initialized"))?.clone();
         
         // Create the PubSub bridge with the XMPP client and shared response map.
         // The event loop writes responses into self.pubsub_responses via shared_client,
@@ -25,7 +26,7 @@ impl XMPPClient {
         self.pubsub_responses = Some(responses.clone());
         let pubsub_bridge: Arc<dyn crate::omemo::OmemoPubSub> = Arc::new(
             crate::xmpp::omemo_integration::XmppPubSubBridge::new(
-                client_ref.clone(),
+                stanza_tx,
                 responses,
             )
         );
@@ -285,7 +286,7 @@ impl XMPPClient {
                         
                         // Send a receipt if requested
                         if element.has_child("request", custom_ns::RECEIPTS) {
-                            if let Some(client) = &self.client {
+                            if let Some(stanza_tx) = &self.stanza_tx {
                                 let receipt = xmpp_parsers::Element::builder("message", NS_JABBER_CLIENT)
                                     .attr("to", from)
                                     .attr("id", &uuid::Uuid::new_v4().to_string())
@@ -296,8 +297,7 @@ impl XMPPClient {
                                     )
                                     .build();
                                 
-                                let mut client_guard = client.lock().await;
-                                if let Err(e) = client_guard.send_stanza(receipt).await {
+                                if let Err(e) = transport::send_stanza(stanza_tx, receipt) {
                                     error!("Failed to send receipt: {}", e);
                                 }
                             }

@@ -3,13 +3,10 @@
 
 use anyhow::{anyhow, Result};
 use log::{debug, error, info, warn};
-use std::sync::Arc;
 use std::time::Duration;
 use std::str::FromStr;
-use tokio::sync::Mutex as TokioMutex;
 use tokio_xmpp::{AsyncClient as XMPPAsyncClient, BareJid as TokioBareJid};
 use crate::xmpp::XMPPClient;
-use futures_util::SinkExt; // For close() on AsyncClient
 
 /// Enum for representing client state
 #[derive(Debug, Clone, PartialEq)]
@@ -29,10 +26,8 @@ impl XMPPClient {
             
             // Check if the username already contains a domain part (has '@' character)
             let full_jid = if username.contains('@') {
-                //debug!("Username already contains domain part: {}", username);
                 username.to_string()
             } else {
-                //debug!("Adding server domain to username: {}@{}", username, server);
                 format!("{}@{}", username, server)
             };
             
@@ -40,7 +35,6 @@ impl XMPPClient {
             self.jid = full_jid.clone();
             
             // Parse the JID using tokio-xmpp's BareJid type
-            //debug!("Parsing JID: {}", full_jid);
             let tokio_jid = match TokioBareJid::from_str(&full_jid) {
                 Ok(jid) => {
                     // Verify the JID has a node part
@@ -58,24 +52,30 @@ impl XMPPClient {
                 }
             };
             
-            // Create client and spawn the event handler
-            //debug!("Creating XMPP client with JID: {}", tokio_jid);
+            // Create the raw XMPP client
             let client = XMPPAsyncClient::new(tokio_jid, password);
-            let client_arc = Arc::new(TokioMutex::new(client));
+            
+            // Spawn the transport actor — it owns the AsyncClient exclusively.
+            // No mutex needed: the transport multiplexes reads/writes via channels.
+            let transport_handle = super::transport::spawn_transport(client);
+            self.stanza_tx = Some(transport_handle.stanza_tx.clone());
+            
+            // Spawn the event processing loop (receives events from transport)
             let msg_tx_clone = self.msg_tx.clone();
             let pending_receipts_clone = self.pending_receipts.clone();
             let iq_registry_clone = self.iq_registry.clone();
             let shared_client_clone = self.shared_self.clone();
+            let stanza_tx_clone = transport_handle.stanza_tx.clone();
             let (online_tx, online_rx) = tokio::sync::oneshot::channel();
             tokio::spawn(Self::handle_incoming_messages(
-                client_arc.clone(),
+                stanza_tx_clone,
+                transport_handle.event_rx,
                 msg_tx_clone,
                 pending_receipts_clone,
                 iq_registry_clone,
                 shared_client_clone,
                 Some(online_tx),
             ));
-            self.client = Some(client_arc);
             
             // Wait for connection
             match self.wait_for_connection(Duration::from_secs(10), online_rx).await {
@@ -83,35 +83,26 @@ impl XMPPClient {
                     info!("Connected to XMPP server successfully");
                     
                     // Perform XEP-0030 Service Discovery
-                    if let Some(client_ref) = &self.client {
-                        //debug!("Performing XEP-0030 Service Discovery");
-                        let service_discovery = crate::xmpp::discovery::ServiceDiscovery::new(client_ref.clone());
+                    if let Some(ref stanza_tx) = self.stanza_tx {
+                        let service_discovery = crate::xmpp::discovery::ServiceDiscovery::new(stanza_tx.clone());
                         
                         // First, advertise our supported features
                         if let Err(e) = service_discovery.advertise_features().await {
                             warn!("Failed to advertise service discovery features: {}", e);
-                        } else {
-                            //debug!("Successfully advertised client features via Service Discovery");
                         }
                         
                         // Query server domain for supported features
                         let server_domain = self.jid.split('@').nth(1).unwrap_or(server);
                         if let Err(e) = service_discovery.send_disco_info_request(server_domain).await {
                             warn!("Failed to query server features via Service Discovery: {}", e);
-                        } else {
-                            //debug!("Successfully sent Service Discovery info request to server");
                         }
                         
                         // Query server for available items/services
                         if let Err(e) = service_discovery.send_disco_items_request(server_domain).await {
                             warn!("Failed to query server items via Service Discovery: {}", e);
-                        } else {
-                            //debug!("Successfully sent Service Discovery items request to server");
                         }
                     }
                     
-                    // After successful authentication and resource binding
-
                     // Enable message carbons
                     match self.enable_carbons().await {
                         Ok(true) => info!("Message carbons enabled successfully during connect"),
@@ -136,8 +127,8 @@ impl XMPPClient {
                 }
             }
             
-            // Connection failed - clear the client
-            self.client = None;
+            // Connection failed - clear the transport
+            self.stanza_tx = None;
             
             // Implement backoff for retries
             if attempt < 3 {
@@ -169,49 +160,28 @@ impl XMPPClient {
 
     pub async fn disconnect(&mut self) -> Result<()> {
         info!("Disconnecting from XMPP server");
-        let client = match self.client.as_ref() {
-            Some(c) => c,
-            None => return Ok(()),
-        };
-        let mut _disconnect_result = Ok(());
-        {
-            let mut client_guard = match tokio::time::timeout(
-                Duration::from_secs(5),
-                client.lock()
-            ).await {
-                Ok(guard) => guard,
-                Err(_) => return Err(anyhow!("Timed out acquiring client lock for disconnect")),
-            };
+        
+        // Send unavailable presence before disconnecting
+        if self.stanza_tx.is_some() {
             let presence = xmpp_parsers::Element::builder("presence", "jabber:client")
                 .attr("type", "unavailable")
                 .build();
-            match client_guard.send_stanza(presence).await {
+            match self.send_stanza(presence) {
                 Ok(_) => debug!("Sent unavailable presence"),
                 Err(e) => warn!("Failed to send unavailable presence: {}", e),
             }
-            _disconnect_result = match client_guard.close().await {
-                Ok(_) => {
-                    //debug!("Successfully closed XMPP stream");
-                    Ok(())
-                },
-                Err(e) => {
-                    error!("Error closing XMPP stream: {}", e);
-                    Err(anyhow!("Error during disconnect: {}", e))
-                },
-            };
         }
-        self.client = None;
+        
+        // Drop the sender — this signals the transport task to shut down
+        self.stanza_tx = None;
         self.connected = false;
-        _disconnect_result
+        
+        Ok(())
     }
     
     /// Send initial presence to make the client available for receiving real-time messages
     pub async fn send_initial_presence(&self) -> Result<()> {
-        if let Some(client) = &self.client {
-            let mut client_guard = client.lock().await;
-            super::presence::send_initial_presence(&mut *client_guard).await
-        } else {
-            Err(anyhow!("Client not initialized"))
-        }
+        let presence = xmpp_parsers::Element::builder("presence", "jabber:client").build();
+        self.send_stanza(presence)
     }
 }

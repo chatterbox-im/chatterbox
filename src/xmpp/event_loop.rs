@@ -1,103 +1,56 @@
 // src/xmpp/event_loop.rs
-//! Main XMPP event loop for handling incoming stanzas
+//! Main XMPP event processing loop.
+//!
+//! Receives events from the transport actor via an unbounded channel.
+//! No mutex contention, no poll-sleep-retry — events arrive instantly.
 
 use log::{debug, error, info, warn};
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::Poll;
-use std::time::Duration;
 use tokio::sync::{mpsc, Mutex as TokioMutex};
 use std::sync::atomic::AtomicBool;
-use futures_util::Stream;
 
-use tokio_xmpp::{AsyncClient as XMPPAsyncClient, Event as XMPPEvent};
+use tokio_xmpp::Event as XMPPEvent;
 
 use crate::models::{Message, DeliveryStatus, PendingMessage};
 use super::{XMPPClient, custom_ns, SharedClientRef};
 use super::{chat_states, delivery_receipts, discovery, presence};
+use super::transport::StanzaTx;
 
 impl XMPPClient {
-    // Primary message handling loop
+    /// Primary event processing loop.
+    /// Receives events from the transport actor and dispatches them.
     pub(super) async fn handle_incoming_messages(
-        client: Arc<TokioMutex<XMPPAsyncClient>>,
+        stanza_tx: StanzaTx,
+        mut event_rx: mpsc::UnboundedReceiver<XMPPEvent>,
         msg_tx: mpsc::Sender<Message>,
         pending_receipts: Arc<TokioMutex<std::collections::HashMap<String, PendingMessage>>>,
         iq_registry: Arc<TokioMutex<crate::xmpp::iq_registry::IqResponseRegistry>>,
         shared_client: SharedClientRef,
         online_tx: Option<tokio::sync::oneshot::Sender<()>>,
     ) {
-        // Flag to track if we've seen the online event
         let mut seen_online_event = false;
         let mut online_tx = online_tx;
-        // Cached typing_tx sender — lazily populated from shared_client
         let mut typing_tx_cache: Option<mpsc::Sender<(String, chat_states::TypingStatus)>> = None;
-        // Cached bare JID for carbon validation (avoids locking shared_client on every message)
         let mut our_bare_jid: Option<String> = None;
         
-        // Create a ServiceDiscovery instance for handling disco responses
-        let service_discovery = discovery::ServiceDiscovery::new(client.clone());
+        let service_discovery = discovery::ServiceDiscovery::new(stanza_tx.clone());
         
-        // Main event loop
-        loop {
-            // Acquire lock with timeout, then do a non-blocking poll of the stream.
-            // IMPORTANT: We must not wrap client_guard.next() in tokio::time::timeout,
-            // because dropping that future mid-poll corrupts tokio_xmpp's internal state
-            // machine (leaves it in ClientState::Invalid, causing a panic on next poll).
-            let event = {
-                let lock_result = tokio::time::timeout(
-                    Duration::from_secs(2),
-                    client.lock()
-                ).await;
-                
-                match lock_result {
-                    Ok(mut client_guard) => {
-                        futures_util::future::poll_fn(|cx| {
-                            match Pin::new(&mut *client_guard).poll_next(cx) {
-                                Poll::Ready(event) => Poll::Ready(Some(event)),
-                                Poll::Pending => Poll::Ready(None),
-                            }
-                        }).await
-                    },
-                    Err(_) => {
-                        // Timed out acquiring lock
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                        continue;
-                    }
-                }
-            };
-            
-            // If no event was ready (Pending), sleep briefly and retry
-            let event = match event {
-                Some(event) => event,
-                None => {
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                    continue;
-                }
-            };
-
+        // Main event loop — blocks on channel recv, wakes instantly on new events
+        while let Some(event) = event_rx.recv().await {
             match event {
-                Some(XMPPEvent::Stanza(stanza)) => {
+                XMPPEvent::Stanza(stanza) => {
                     if stanza.name() == "presence" {
-                        // Handle presence stanzas
-                        let _from = stanza.attr("from").unwrap_or("");
-                        let _to = stanza.attr("to").unwrap_or("");
-                        
-                        // Process presence updates using our dedicated handler in presence.rs
                         if let Err(e) = presence::handle_presence_stanza(&stanza) {
                             error!("Error processing presence stanza: {}", e);
                         }
                         
-                        // Also process presence stanzas for entity capabilities
                         if let Err(e) = service_discovery.process_caps_in_presence(&stanza).await {
                             warn!("Error processing entity capabilities in presence: {}", e);
                         }
                         
-                        // Also handle subscription-related presence stanzas asynchronously
-                        let stanza_clone = stanza.clone();
-                        let client_clone = client.clone();
+                        let stanza_tx_clone = stanza_tx.clone();
                         tokio::spawn(async move {
-                            let mut client_guard = client_clone.lock().await;
-                            if let Err(e) = presence::process_subscription(&mut client_guard, &stanza_clone).await {
+                            if let Err(e) = presence::process_subscription(&stanza_tx_clone, &stanza).await {
                                 error!("Error processing presence subscription: {}", e);
                             }
                         });
@@ -113,13 +66,11 @@ impl XMPPClient {
                             }
                         }
                         
-                        // Process message here or call into message handler
                         let from = stanza.attr("from").unwrap_or("");
                         let to = stanza.attr("to").unwrap_or("");
                         info!("Received message stanza from='{}', to='{}'", from, to);
                         debug!("Message stanza content: {:?}", stanza);
                         
-                        // Helper function to check for OMEMO elements in a message stanza
                         fn has_omemo_encryption(msg_stanza: &xmpp_parsers::Element) -> (bool, bool, bool, bool) {
                             let has_omemo_v1 = msg_stanza.has_child("encrypted", custom_ns::OMEMO);
                             let has_omemo_axolotl = msg_stanza.has_child("encrypted", custom_ns::OMEMO_V1);
@@ -128,10 +79,8 @@ impl XMPPClient {
                             (has_omemo_v1, has_omemo_axolotl, has_omemo_empty, has_omemo_explicit)
                         }
                         
-                        // Check for OMEMO encrypted messages in the outer stanza
                         let (has_omemo_v1, has_omemo_axolotl, has_omemo_empty, has_omemo_explicit) = has_omemo_encryption(&stanza);
                         
-                        // Also check for MAM forwarded messages that might contain OMEMO
                         let mut mam_message_stanza = None;
                         if let Some(result) = stanza.get_child("result", custom_ns::MAM) {
                             if let Some(forwarded) = result.get_child("forwarded", custom_ns::FORWARD) {
@@ -141,7 +90,6 @@ impl XMPPClient {
                             }
                         }
                         
-                        // Check for OMEMO in MAM forwarded message if present
                         let (mam_has_omemo_v1, mam_has_omemo_axolotl, mam_has_omemo_empty, mam_has_omemo_explicit) = 
                             if let Some(mam_msg) = &mam_message_stanza {
                                 has_omemo_encryption(mam_msg)
@@ -152,26 +100,25 @@ impl XMPPClient {
                         let has_any_omemo = has_omemo_v1 || has_omemo_axolotl || has_omemo_empty || has_omemo_explicit;
                         let has_mam_omemo = mam_has_omemo_v1 || mam_has_omemo_axolotl || mam_has_omemo_empty || mam_has_omemo_explicit;
                         
-                        warn!("OMEMO detection: outer(v1={}, axolotl={}, empty={}, explicit={}), MAM(v1={}, axolotl={}, empty={}, explicit={})", 
+                        debug!("OMEMO detection: outer(v1={}, axolotl={}, empty={}, explicit={}), MAM(v1={}, axolotl={}, empty={}, explicit={})", 
                             has_omemo_v1, has_omemo_axolotl, has_omemo_empty, has_omemo_explicit,
                             mam_has_omemo_v1, mam_has_omemo_axolotl, mam_has_omemo_empty, mam_has_omemo_explicit);
                         
-                        // Debug logging for found encrypted elements
                         if has_any_omemo {
                             if let Some(encrypted) = stanza.get_child("encrypted", "") {
-                                warn!("Found encrypted element in outer stanza with empty namespace: {:?}", encrypted);
+                                debug!("Found encrypted element in outer stanza with empty namespace: {:?}", encrypted);
                             }
                             if let Some(encrypted) = stanza.get_child("encrypted", "eu.siacs.conversations.axolotl") {
-                                warn!("Found encrypted element in outer stanza with axolotl namespace: {:?}", encrypted);
+                                debug!("Found encrypted element in outer stanza with axolotl namespace: {:?}", encrypted);
                             }
                         }
                         if has_mam_omemo {
                             if let Some(mam_msg) = &mam_message_stanza {
                                 if let Some(encrypted) = mam_msg.get_child("encrypted", "") {
-                                    warn!("Found encrypted element in MAM message with empty namespace: {:?}", encrypted);
+                                    debug!("Found encrypted element in MAM message with empty namespace: {:?}", encrypted);
                                 }
                                 if let Some(encrypted) = mam_msg.get_child("encrypted", "eu.siacs.conversations.axolotl") {
-                                    warn!("Found encrypted element in MAM message with axolotl namespace: {:?}", encrypted);
+                                    debug!("Found encrypted element in MAM message with axolotl namespace: {:?}", encrypted);
                                 }
                             }
                         }
@@ -180,52 +127,46 @@ impl XMPPClient {
                             info!("Detected OMEMO encrypted message (outer: v1={}, axolotl={}, MAM: v1={}, axolotl={})", 
                                 has_omemo_v1, has_omemo_axolotl, mam_has_omemo_v1, mam_has_omemo_axolotl);
                             
-                            // Determine which stanza to process: MAM message takes priority if present
                             let target_stanza = if has_mam_omemo && mam_message_stanza.is_some() {
-                                warn!("Processing OMEMO from MAM forwarded message");
+                                debug!("Processing OMEMO from MAM forwarded message");
                                 mam_message_stanza.unwrap().clone()
                             } else {
-                                warn!("Processing OMEMO from outer message stanza");
+                                debug!("Processing OMEMO from outer message stanza");
                                 stanza.clone()
                             };
                             
-                            // Clone needed values for async task
-                            let target_stanza_clone = target_stanza.clone();
-                            let client_clone = client.clone();
+                            let stanza_tx_clone = stanza_tx.clone();
                             let msg_tx_clone = msg_tx.clone();
                             let pending_receipts_clone = pending_receipts.clone();
                             let shared_client_clone = shared_client.clone();
                             let iq_registry_clone = iq_registry.clone();
                             
-                            warn!("OMEMO message detected - spawning async task for processing");
+                            debug!("OMEMO message detected - spawning async task for processing");
                             
-                            // Process encrypted message in a separate task to avoid blocking
                             tokio::spawn(async move {
-                                warn!("Inside OMEMO async task - starting processing");
+                                debug!("Inside OMEMO async task - starting processing");
                                 
-                                // Get the OMEMO manager and JID from shared client ref
                                 let (omemo_manager, jid) = match shared_client_clone.lock().await.as_ref() {
                                     Some(global_client) => {
                                         let client_guard = global_client.lock().await;
                                         let manager = client_guard.omemo_manager.clone();
                                         let jid = client_guard.jid.clone();
-                                        warn!("Retrieved global OMEMO manager: {:?}", manager.is_some());
+                                        debug!("Retrieved global OMEMO manager: {:?}", manager.is_some());
                                         (manager, jid)
                                     },
                                     None => {
-                                        warn!("No global XMPP client available");
+                                        error!("No global XMPP client available");
                                         (None, String::new())
                                     },
                                 };
                                 
-                                // Need to get an instance of XMPPClient to call handle_message_encrypted
                                 let mut temp_client = XMPPClient {
                                     jid,
-                                    client: Some(client_clone),
+                                    stanza_tx: Some(stanza_tx_clone),
                                     msg_tx: msg_tx_clone,
                                     pending_receipts: pending_receipts_clone,
                                     connected: true,
-                                    omemo_manager: omemo_manager,
+                                    omemo_manager,
                                     carbons_enabled: Arc::new(AtomicBool::new(true)),
                                     iq_registry: iq_registry_clone,
                                     pubsub_responses: None,
@@ -233,35 +174,21 @@ impl XMPPClient {
                                     typing_tx: None,
                                 };
                                 
-                                warn!("Calling handle_message_encrypted method");
-                                if let Err(e) = temp_client.handle_message_encrypted(&target_stanza_clone).await {
+                                debug!("Calling handle_message_encrypted method");
+                                if let Err(e) = temp_client.handle_message_encrypted(&target_stanza).await {
                                     error!("Failed to process encrypted message: {}", e);
                                 } else {
-                                    warn!("Successfully processed encrypted message");
+                                    debug!("Successfully processed encrypted message");
                                 }
                             });
                         } else {
-                            // Handle other message types: delivery receipts, chat states, etc.
                             info!("Processing non-OMEMO message from {}", from);
                             debug!("Non-OMEMO message content: {:?}", stanza);
                             
-                            // Check if there's a body element with different namespace attempts
-                            debug!("Checking for body element...");
-                            if stanza.get_child("body", "jabber:client").is_some() {
-                                debug!("Found body with jabber:client namespace");
-                            } else if stanza.get_child("body", "").is_some() {
-                                debug!("Found body with empty namespace");
-                            } else {
-                                debug!("No body element found");
-                            }
-                            
-                            // Check for message delivery receipts
                             if let Err(e) = delivery_receipts::handle_receipt(&stanza, &pending_receipts, &msg_tx).await {
                                 error!("Error processing delivery receipt: {}", e);
                             }
                             
-                            // Check for chat state notifications (typing indicators)
-                            // typing_tx is cached at Online time; fallback to lock if not yet set
                             if typing_tx_cache.is_none() {
                                 if let Some(global) = shared_client.lock().await.as_ref() {
                                     let guard = global.lock().await;
@@ -272,32 +199,26 @@ impl XMPPClient {
                                 error!("Error processing chat state: {}", e);
                             }
                             
-                            // Process carbon copies of messages
-                            // XEP-0280 §6: Carbons MUST have from=user's bare JID (server-originated)
                             let carbon_from = stanza.attr("from").unwrap_or("");
                             let carbon_from_is_valid = if carbon_from.is_empty() {
-                                // No from attribute = implicitly from server (valid per RFC 6120)
                                 true
                             } else if let Some(ref our_jid) = our_bare_jid {
                                 let their_bare = carbon_from.split('/').next().unwrap_or("");
                                 our_jid == their_bare
                             } else {
-                                // Can't verify — reject to be safe
                                 false
                             };
                             
                             if carbon_from_is_valid && (stanza.has_child("received", custom_ns::CARBONS) || 
                                stanza.has_child("sent", custom_ns::CARBONS)) {
-                                // Clone needed values for async task
                                 let stanza_clone = stanza.clone();
-                                let client_clone = client.clone();
+                                let stanza_tx_clone = stanza_tx.clone();
                                 let msg_tx_clone = msg_tx.clone();
                                 let pending_receipts_clone = pending_receipts.clone();
                                 let shared_client_clone2 = shared_client.clone();
                                 let iq_registry_clone2 = iq_registry.clone();
                                 
                                 tokio::spawn(async move {
-                                    // Get the OMEMO manager if available
                                     let omemo_manager = match shared_client_clone2.lock().await.as_ref() {
                                         Some(global_client) => {
                                             let client_guard = global_client.lock().await;
@@ -306,14 +227,13 @@ impl XMPPClient {
                                         None => None,
                                     };
                                     
-                                    // Need an XMPPClient to process carbons
                                     let temp_client = XMPPClient {
                                         jid: String::new(),
-                                        client: Some(client_clone),
+                                        stanza_tx: Some(stanza_tx_clone),
                                         msg_tx: msg_tx_clone,
                                         pending_receipts: pending_receipts_clone,
                                         connected: true,
-                                        omemo_manager: omemo_manager,
+                                        omemo_manager,
                                         carbons_enabled: Arc::new(AtomicBool::new(true)),
                                         iq_registry: iq_registry_clone2,
                                         pubsub_responses: None,
@@ -336,10 +256,8 @@ impl XMPPClient {
                                 debug!("Found message body from {}: '{}'", from, content);
                                 
                                 if !content.is_empty() {
-                                    // Strip resource from JID to get bare JID (user@domain)
                                     let sender_bare_jid = from.split('/').next().unwrap_or(from).to_string();
                                     
-                                    // Create a message for the UI
                                     let message = Message {
                                         id: id.clone(),
                                         sender_id: sender_bare_jid.clone(),
@@ -351,7 +269,6 @@ impl XMPPClient {
                                     
                                     info!("Sending message to UI: from='{}' (bare: '{}'), content='{}'", from, sender_bare_jid, content);
                                     
-                                    // Send to UI
                                     if let Err(e) = msg_tx.send(message).await {
                                         error!("Failed to send message to UI: {}", e);
                                     } else {
@@ -360,8 +277,7 @@ impl XMPPClient {
                                     
                                     // Send a receipt if requested
                                     if stanza.has_child("request", custom_ns::RECEIPTS) {
-                                        let mut client_guard = client.lock().await;
-                                        if let Err(e) = delivery_receipts::send_receipt(&mut client_guard, from, &id).await {
+                                        if let Err(e) = delivery_receipts::send_receipt(&stanza_tx, from, &id) {
                                             error!("Failed to send receipt: {}", e);
                                         }
                                     }
@@ -376,13 +292,11 @@ impl XMPPClient {
                             let mut registry = iq_registry.lock().await;
                             if registry.try_route(stanza_id, stanza.clone()) {
                                 debug!("Routed IQ response {} to waiting caller", stanza_id);
-                                // Also evict stale entries periodically
                                 registry.evict_stale(std::time::Duration::from_secs(60));
                                 continue;
                             }
                         }
                         
-                        // Check if this is a service discovery response
                         if let Some(_query) = stanza.get_child("query", "http://jabber.org/protocol/disco#info") {
                             if let Err(e) = service_discovery.handle_disco_response(&stanza).await {
                                 warn!("Failed to process service discovery info response: {}", e);
@@ -392,14 +306,9 @@ impl XMPPClient {
                                 warn!("Failed to process service discovery items response: {}", e);
                             }
                         } else if let Some(_pubsub) = stanza.get_child("pubsub", "http://jabber.org/protocol/pubsub") {
-                            // Handle pubsub requests and responses
                             if stanza.attr("type") == Some("get") {
-                                let _stanza_clone = stanza.clone();
-                                let _client_clone = client.clone();
                                 let shared_client_clone3 = shared_client.clone();
-                                
                                 tokio::spawn(async move {
-                                    // Get the OMEMO manager if available
                                     let omemo_manager = match shared_client_clone3.lock().await.as_ref() {
                                         Some(global_client) => {
                                             let _client_guard = global_client.lock().await;
@@ -407,7 +316,6 @@ impl XMPPClient {
                                         },
                                         None => None,
                                     };
-                                    
                                     if let Some(_manager) = omemo_manager {
                                         debug!("Received pubsub request, but handling not implemented yet");
                                     } else {
@@ -415,12 +323,9 @@ impl XMPPClient {
                                     }
                                 });
                             } else if stanza.attr("type") == Some("result") {
-                                // Handle pubsub responses
                                 if let Some(stanza_id) = stanza.attr("id") {
                                     debug!("Received pubsub response with ID: {}", stanza_id);
-                                    
                                     let xml_string = crate::xmpp::omemo_integration::element_to_xml_string(&stanza);
-                                    // Write to the client's pubsub_responses map via shared_client
                                     if let Some(global) = shared_client.lock().await.as_ref() {
                                         let guard = global.lock().await;
                                         if let Some(ref responses) = guard.pubsub_responses {
@@ -430,9 +335,6 @@ impl XMPPClient {
                                 }
                             }
                         } else if stanza.attr("type") == Some("error") {
-                            // Store error IQ responses so pubsub callers receive them
-                            // instead of waiting for a timeout. Without this, error responses
-                            // for pubsub requests (e.g. item-not-found) get dropped.
                             if let Some(stanza_id) = stanza.attr("id") {
                                 let xml_string = crate::xmpp::omemo_integration::element_to_xml_string(&stanza);
                                 if let Some(global) = shared_client.lock().await.as_ref() {
@@ -445,15 +347,12 @@ impl XMPPClient {
                         }
                     }
                 },
-                Some(XMPPEvent::Online { bound_jid, resumed: _ }) => {
+                XMPPEvent::Online { bound_jid, resumed: _ } => {
                     if !seen_online_event {
                         info!("Connected to XMPP server as {}", bound_jid);
                         seen_online_event = true;
-
-                        // Cache our bare JID for carbon validation
                         our_bare_jid = Some(bound_jid.to_string().split('/').next().unwrap_or("").to_string());
 
-                        // Cache typing_tx from shared client
                         if typing_tx_cache.is_none() {
                             if let Some(global) = shared_client.lock().await.as_ref() {
                                 let guard = global.lock().await;
@@ -461,31 +360,24 @@ impl XMPPClient {
                             }
                         }
 
-                        // Signal wait_for_connection that we're online
                         if let Some(tx) = online_tx.take() {
                             let _ = tx.send(());
                         }
                     }
                 },
-                Some(XMPPEvent::Disconnected(reason)) => {
+                XMPPEvent::Disconnected(reason) => {
                     error!("XMPP client is disconnected: {:?}", reason);
                     break;
                 },
-                None => {
-                    info!("XMPP connection closed");
-                    break;
-                }
             }
             
             // Check for scheduled entity capabilities discoveries
             if let Ok(mut discoveries) = presence::PENDING_CAPS_DISCOVERIES.try_lock() {
                 if !discoveries.is_empty() {
                     let discovery_batch = std::mem::take(&mut *discoveries);
-                    
                     for cap_info in discovery_batch {
                         let service_disco = service_discovery.clone();
                         let jid = cap_info.jid.clone();
-                        
                         tokio::spawn(async move {
                             if let Err(e) = service_disco.send_disco_info_request(&jid).await {
                                 warn!("Failed to send disco request to {}: {}", jid, e);
@@ -494,9 +386,9 @@ impl XMPPClient {
                     }
                 }
             }
-            
-            // Brief pause to avoid tight loop
-            tokio::time::sleep(Duration::from_millis(10)).await;
         }
+        
+        info!("Event loop exiting (transport channel closed)");
     }
 }
+

@@ -3,13 +3,13 @@
 
 use anyhow::{anyhow, Result};
 use log::{debug, error};
-use tokio::time::Duration;
 use uuid::Uuid;
 
 use xmpp_parsers::message::{Message as XMPPMessage, MessageType};
 use xmpp_parsers::Element;
 
 use super::custom_ns;
+use super::transport::{self};
 
 // Definition of TypingStatus enum (copied from ui.rs to avoid import issues)
 #[derive(Clone, Debug, PartialEq)]
@@ -67,74 +67,40 @@ pub fn handle_chat_state(stanza: &Element, typing_tx: Option<&tokio::sync::mpsc:
 /// Implementation of XEP-0085 Chat State Notifications
 impl super::XMPPClient {
     /// Send a chat state notification (XEP-0085)
-    pub async fn send_chat_state(&self, recipient: &str, state: &TypingStatus) -> Result<()> {
-        // Create a clone of what we need for the background task
-        let client_clone = self.client.as_ref().ok_or_else(|| {
+    pub fn send_chat_state(&self, recipient: &str, state: &TypingStatus) -> Result<()> {
+        let stanza_tx = self.stanza_tx.as_ref().ok_or_else(|| {
             error!("XMPP client not initialized when trying to send chat state");
             anyhow!("XMPP client not initialized")
-        })?.clone();
-        let recipient = recipient.to_string();
-        let state = state.clone();
+        })?;
         
-        // Use "fire and forget" approach - spawn a background task that won't block the UI
-        tokio::spawn(async move {
-            // Parse recipient 
-            let recipient_jid = match recipient.parse() {
-                Ok(jid) => jid,
-                Err(e) => {
-                    error!("Invalid recipient JID '{}': {}", recipient, e);
-                    return;
-                }
-            };
-            
-            // Create chat state message
-            let mut message = XMPPMessage::new(None);
-            message.id = Some(Uuid::new_v4().to_string());
-            message.to = Some(recipient_jid);
-            message.type_ = MessageType::Chat;
-            
-            // Add appropriate chat state element based on the state
-            let state_name = match state {
-                TypingStatus::Active => "active",
-                TypingStatus::Composing => "composing",
-                TypingStatus::Paused => "paused",
-                TypingStatus::Inactive => "inactive",
-                TypingStatus::Gone => "gone",
-            };
-            
-            // Add the chat state element to the message
-            let state_element = xmpp_parsers::Element::builder(state_name, custom_ns::CHATSTATES).build();
-            message.payloads.push(state_element);
-            
-            // Send the message
-            match tokio::time::timeout(
-                Duration::from_millis(500), // Very short timeout to avoid blocking
-                async {
-                    if let Ok(mut client_guard) = client_clone.try_lock() {
-                        match client_guard.send_stanza(message.into()).await {
-                            Ok(_) => Ok(()),
-                            Err(e) => Err(anyhow!("Failed to send stanza: {}", e))
-                        }
-                    } else {
-                        // Skip sending if we can't get lock immediately
-                        debug!("Skipping chat state notification - client busy");
-                        Ok(()) // Return success anyway to avoid blocking UI
-                    }
-                }
-            ).await {
-                Ok(Ok(_)) => {
-                    debug!("Sent {} chat state to {}", state_name, recipient);
-                },
-                Ok(Err(e)) => {
-                    debug!("Failed to send chat state: {}", e);
-                },
-                Err(_) => {
-                    debug!("Timed out sending chat state");
-                }
-            }
-        });
+        // Parse recipient 
+        let recipient_jid: xmpp_parsers::Jid = recipient.parse()
+            .map_err(|e| anyhow!("Invalid recipient JID '{}': {}", recipient, e))?;
         
-        // Return success immediately to avoid blocking the UI
+        // Create chat state message
+        let mut message = XMPPMessage::new(None);
+        message.id = Some(Uuid::new_v4().to_string());
+        message.to = Some(recipient_jid);
+        message.type_ = MessageType::Chat;
+        
+        // Add appropriate chat state element based on the state
+        let state_name = match state {
+            TypingStatus::Active => "active",
+            TypingStatus::Composing => "composing",
+            TypingStatus::Paused => "paused",
+            TypingStatus::Inactive => "inactive",
+            TypingStatus::Gone => "gone",
+        };
+        
+        // Add the chat state element to the message
+        let state_element = xmpp_parsers::Element::builder(state_name, custom_ns::CHATSTATES).build();
+        message.payloads.push(state_element);
+        
+        // Send via transport channel
+        transport::send_stanza(stanza_tx, message.into())
+            .map_err(|e| anyhow!("Failed to send chat state: {}", e))?;
+        
+        debug!("Sent {} chat state to {}", state_name, recipient);
         Ok(())
     }
 

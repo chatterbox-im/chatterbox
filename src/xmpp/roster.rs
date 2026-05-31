@@ -32,12 +32,8 @@ impl XMPPClient {
         info!("Sending roster request with ID: {}", id);
         
         // Send the roster request
-        {
-            let client = self.client.as_ref().ok_or_else(|| anyhow!("XMPP client not initialized"))?;
-            let mut client_guard = client.lock().await;
-            client_guard.send_stanza(iq).await
-                .map_err(|e| anyhow!("Failed to send roster request: {}", e))?;
-        }
+        self.send_stanza(iq)
+            .map_err(|e| anyhow!("Failed to send roster request: {}", e))?;
         
         info!("Roster request sent, waiting for response...");
         
@@ -89,8 +85,14 @@ impl XMPPClient {
             return Err(anyhow!("XMPP client not initialized or unavailable"));
         }
         let full_jid = self.ensure_full_jid(jid).await?;
-        //debug!("Adding contact to roster: {} (full JID: {})", jid, full_jid);
         let id = Uuid::new_v4().to_string();
+
+        // Register for the response BEFORE sending
+        let rx = {
+            let mut registry = self.iq_registry.lock().await;
+            registry.register(id.clone())
+        };
+
         let item = Element::builder("item", "jabber:iq:roster")
             .attr("jid", &full_jid)
             .build();
@@ -103,42 +105,45 @@ impl XMPPClient {
             .append(query)
             .build();
         info!("Sending add contact request with ID: {}", id);
-        let client = self.client.as_ref().ok_or_else(|| anyhow!("XMPP client not initialized"))?;
-        let send_result = tokio::time::timeout(
-            Duration::from_secs(5),
-            async {
-                let mut client_guard = client.lock().await;
-                client_guard.send_stanza(iq).await
+        self.send_stanza(iq)
+            .map_err(|e| anyhow!("Failed to send add contact request: {}", e))?;
+
+        // Wait for server confirmation
+        let response = tokio::time::timeout(Duration::from_secs(10), rx).await;
+        match response {
+            Ok(Ok(stanza)) => {
+                match stanza.attr("type") {
+                    Some("result") => {
+                        info!("Server confirmed roster add for {}", full_jid);
+                    }
+                    Some("error") => {
+                        let reason = stanza
+                            .get_child("error", "jabber:client")
+                            .and_then(|e| e.children().next())
+                            .map(|c| c.name().to_string())
+                            .unwrap_or_else(|| "unknown".to_string());
+                        return Err(anyhow!("Server rejected roster add for {}: {}", full_jid, reason));
+                    }
+                    other => {
+                        warn!("Unexpected IQ type {:?} for roster add", other);
+                    }
+                }
             }
-        ).await;
-        if let Err(e) = send_result {
-            error!("Timed out sending add contact request: {}", e);
-            return Err(anyhow!("Timed out sending add contact request"));
+            Ok(Err(_)) => {
+                warn!("IQ response channel closed while waiting for roster add confirmation");
+            }
+            Err(_) => {
+                warn!("Timed out waiting for roster add confirmation for {}", full_jid);
+            }
         }
-        if let Err(e) = send_result.unwrap() {
-            error!("Failed to send add contact request: {}", e);
-            return Err(anyhow!("Failed to send add contact request: {}", e));
-        }
-        info!("Add contact request sent successfully for {}", full_jid);
+
+        // Send presence subscription request
         let subscribe = Element::builder("presence", "jabber:client")
             .attr("type", "subscribe")
             .attr("to", &full_jid)
             .build();
-        let subscribe_result = tokio::time::timeout(
-            Duration::from_secs(5),
-            async {
-                let mut client_guard = client.lock().await;
-                client_guard.send_stanza(subscribe).await
-            }
-        ).await;
-        if let Err(e) = subscribe_result {
-            error!("Timed out sending subscription request: {}", e);
-            return Err(anyhow!("Timed out sending subscription request"));
-        }
-        if let Err(e) = subscribe_result.unwrap() {
-            error!("Failed to send subscription request: {}", e);
-            return Err(anyhow!("Failed to send subscription request: {}", e));
-        }
+        self.send_stanza(subscribe)
+            .map_err(|e| anyhow!("Failed to send subscription request: {}", e))?;
         info!("Subscription request sent successfully for {}", full_jid);
         Ok(())
     }
@@ -194,6 +199,13 @@ impl XMPPClient {
         };
         info!("Removing contact from roster using exact JID: {}", exact_jid);
         let id = Uuid::new_v4().to_string();
+
+        // Register for the response BEFORE sending
+        let rx = {
+            let mut registry = self.iq_registry.lock().await;
+            registry.register(id.clone())
+        };
+
         let item = Element::builder("item", "jabber:iq:roster")
             .attr("jid", &exact_jid)
             .attr("subscription", "remove")
@@ -207,62 +219,53 @@ impl XMPPClient {
             .append(query)
             .build();
         info!("Sending remove contact request with ID: {}", id);
-        let client = self.client.as_ref().ok_or_else(|| anyhow!("XMPP client not initialized"))?;
-        let send_result = tokio::time::timeout(
-            Duration::from_secs(5),
-            async {
-                let mut client_guard = client.lock().await;
-                client_guard.send_stanza(iq).await
+        self.send_stanza(iq)
+            .map_err(|e| anyhow!("Failed to send remove contact request: {}", e))?;
+
+        // Wait for server confirmation
+        let response = tokio::time::timeout(Duration::from_secs(10), rx).await;
+        match response {
+            Ok(Ok(stanza)) => {
+                match stanza.attr("type") {
+                    Some("result") => {
+                        info!("Server confirmed roster removal for {}", exact_jid);
+                    }
+                    Some("error") => {
+                        let reason = stanza
+                            .get_child("error", "jabber:client")
+                            .and_then(|e| e.children().next())
+                            .map(|c| c.name().to_string())
+                            .unwrap_or_else(|| "unknown".to_string());
+                        return Err(anyhow!("Server rejected roster removal for {}: {}", exact_jid, reason));
+                    }
+                    other => {
+                        warn!("Unexpected IQ type {:?} for roster removal", other);
+                    }
+                }
             }
-        ).await;
-        if let Err(e) = send_result {
-            error!("Timed out sending remove contact request: {}", e);
-            return Err(anyhow!("Timed out sending remove contact request"));
+            Ok(Err(_)) => {
+                warn!("IQ response channel closed while waiting for roster removal confirmation");
+            }
+            Err(_) => {
+                warn!("Timed out waiting for roster removal confirmation for {}", exact_jid);
+            }
         }
-        if let Err(e) = send_result.unwrap() {
-            error!("Failed to send remove contact request: {}", e);
-            return Err(anyhow!("Failed to send remove contact request: {}", e));
-        }
-        info!("Remove contact request sent successfully for {}", exact_jid);
-        tokio::time::sleep(Duration::from_millis(200)).await;
+
         let unsubscribe = Element::builder("presence", "jabber:client")
             .attr("type", "unsubscribe")
             .attr("to", &exact_jid)
             .attr("id", &format!("{}", rand::random::<u64>()))
             .build();
-        let unsubscribe_result = tokio::time::timeout(
-            Duration::from_secs(5),
-            async {
-                let mut client_guard = client.lock().await;
-                client_guard.send_stanza(unsubscribe).await
-            }
-        ).await;
-        if let Err(e) = unsubscribe_result {
-            warn!("Timed out sending unsubscription request: {}", e);
-        } else if let Err(e) = unsubscribe_result.unwrap() {
+        if let Err(e) = self.send_stanza(unsubscribe) {
             warn!("Failed to send unsubscription request: {}", e);
-        } else {
-            //debug!("Unsubscription request sent successfully for {}", exact_jid);
         }
-        tokio::time::sleep(Duration::from_millis(200)).await;
         let unsubscribed = Element::builder("presence", "jabber:client")
             .attr("type", "unsubscribed")
             .attr("to", &exact_jid)
             .attr("id", &format!("{}", rand::random::<u64>()))
             .build();
-        let unsubscribed_result = tokio::time::timeout(
-            Duration::from_secs(5),
-            async {
-                let mut client_guard = client.lock().await;
-                client_guard.send_stanza(unsubscribed).await
-            }
-        ).await;
-        if let Err(e) = unsubscribed_result {
-            warn!("Timed out sending unsubscribed stanza: {}", e);
-        } else if let Err(e) = unsubscribed_result.unwrap() {
+        if let Err(e) = self.send_stanza(unsubscribed) {
             warn!("Failed to send unsubscribed stanza: {}", e);
-        } else {
-            //debug!("Unsubscribed stanza sent successfully for {}", exact_jid);
         }
         if let Ok(Some(_)) = self.get_roster().await {
             //debug!("Roster refreshed after removal");

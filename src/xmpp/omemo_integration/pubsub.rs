@@ -2,12 +2,9 @@ use anyhow::{anyhow, Result};
 use log::{error, info, warn};
 use tokio::time::Duration;
 use uuid::Uuid;
-use std::sync::Arc;
-use tokio::sync::Mutex as TokioMutex;
-
-use tokio_xmpp::AsyncClient as XMPPAsyncClient;
 
 use crate::omemo::device_id::DeviceId;
+use crate::xmpp::transport::{self, StanzaTx};
 
 use super::PubSubResponses;
 
@@ -27,7 +24,7 @@ pub async fn publish_pubsub_item(
 
 /// Publish an item to a PubSub node using an explicit client reference
 pub async fn publish_pubsub_item_with_client(
-    client_arc: &Arc<TokioMutex<XMPPAsyncClient>>,
+    stanza_tx: &StanzaTx,
     to: Option<&str>,
     node: &str,
     id: &str,
@@ -36,8 +33,6 @@ pub async fn publish_pubsub_item_with_client(
     info!("PubSub payload: {}", payload);
     
     {
-        let mut client_guard = client_arc.lock().await;
-            
             // Generate a unique IQ ID different from the item ID
             let iq_id = Uuid::new_v4().to_string();
             
@@ -99,7 +94,7 @@ pub async fn publish_pubsub_item_with_client(
                     .build();
                 
                 // Send the stanza
-                match client_guard.send_stanza(iq).await {
+                match transport::send_stanza(stanza_tx, iq) {
                     Ok(_) => {
                         return Ok(());
                     },
@@ -188,7 +183,7 @@ pub async fn publish_pubsub_item_with_client(
                 iq.append_child(pubsub_elem);
                 
                 // Send the stanza
-                match client_guard.send_stanza(iq).await {
+                match transport::send_stanza(stanza_tx, iq) {
                     Ok(_) => {
                         return Ok(());
                     },
@@ -198,7 +193,7 @@ pub async fn publish_pubsub_item_with_client(
                         // If the error contains "invalid-item" or "bad-request", try the alternative format
                         if e.to_string().contains("invalid-item") || e.to_string().contains("bad-request") {
                             warn!("Received bad-request error, trying alternative bundle format");
-                            return publish_bundle_alternative_format_with_client(client_arc, to, node, id, payload).await;
+                            return publish_bundle_alternative_format_with_client(stanza_tx, to, node, id, payload).await;
                         }
                         
                         return Err(anyhow!("Failed to send bundle stanza: {}", e));
@@ -290,7 +285,7 @@ pub async fn publish_pubsub_item_with_client(
             };
             
             // Send the stanza
-            match client_guard.send_stanza(iq).await {
+            match transport::send_stanza(stanza_tx, iq) {
                 Ok(_) => {
                     Ok(())
                 },
@@ -316,15 +311,13 @@ pub async fn publish_bundle_alternative_format(
 
 /// Alternative format for publishing bundles — uses explicit client reference
 pub async fn publish_bundle_alternative_format_with_client(
-    client_arc: &Arc<TokioMutex<XMPPAsyncClient>>,
+    stanza_tx: &StanzaTx,
     to: Option<&str>,
     node: &str,
     id: &str,
     payload: &str,
 ) -> Result<()> {
     {
-        let mut client_guard = client_arc.lock().await;
-            
             // Generate a unique IQ ID
             let iq_id = Uuid::new_v4().to_string();
             
@@ -449,7 +442,7 @@ pub async fn publish_bundle_alternative_format_with_client(
             };
             
             // Send the stanza
-            match client_guard.send_stanza(iq).await {
+            match transport::send_stanza(stanza_tx, iq) {
                 Ok(_) => {
                     info!("Alternative bundle format published successfully");
                     Ok(())
@@ -463,8 +456,8 @@ pub async fn publish_bundle_alternative_format_with_client(
 }
 
 /// Alternative format for publishing items when the standard format fails
-async fn publish_item_alternative_format(
-    mut client_guard: tokio::sync::MutexGuard<'_, XMPPAsyncClient>,
+fn publish_item_alternative_format(
+    stanza_tx: &StanzaTx,
     to: Option<&str>,
     node: &str,
     id: &str,
@@ -548,7 +541,7 @@ async fn publish_item_alternative_format(
     };
     
     // Send the stanza
-    match client_guard.send_stanza(iq).await {
+    match transport::send_stanza(stanza_tx, iq) {
         Ok(_) => {
             info!("Alternative format published successfully");
             Ok(())
@@ -570,12 +563,10 @@ pub async fn publish_pubsub_item_device_list(
 
 /// Publish a PubSub item in the correct format for OMEMO device lists — uses explicit client
 pub async fn publish_pubsub_item_device_list_with_client(
-    client_arc: &Arc<TokioMutex<XMPPAsyncClient>>,
+    stanza_tx: &StanzaTx,
     device_ids: &[DeviceId]
 ) -> Result<()> {
     {
-        let mut client_guard = client_arc.lock().await;
-            
             // Generate a unique IQ ID
             let iq_id = Uuid::new_v4().to_string();
             
@@ -620,7 +611,7 @@ pub async fn publish_pubsub_item_device_list_with_client(
             info!("Sending device list publish stanza: {:?}", iq);
             
             // Send the stanza
-            match client_guard.send_stanza(iq).await {
+            match transport::send_stanza(stanza_tx, iq) {
                 Ok(_) => {
                     info!("Device list publish request sent successfully");
                     Ok(())
@@ -638,7 +629,7 @@ pub async fn publish_pubsub_item_device_list_with_client(
                             devices_xml
                         );
                         
-                        return publish_item_alternative_format(client_guard, None, "eu.siacs.conversations.axolotl.devicelist", "current", &list_xml).await;
+                        return publish_item_alternative_format(stanza_tx, None, "eu.siacs.conversations.axolotl.devicelist", "current", &list_xml).map_err(|e| anyhow!("Alternative format failed: {}", e));
                     }
                     
                     Err(anyhow!("Failed to send device list publish stanza: {}", e))
@@ -659,14 +650,11 @@ pub async fn request_pubsub_items(
 
 /// Request items from a PubSub node — uses explicit client and response map
 pub async fn request_pubsub_items_with_client(
-    client_arc: &Arc<TokioMutex<XMPPAsyncClient>>,
+    stanza_tx: &StanzaTx,
     responses_map: &PubSubResponses,
     from: &str,
     node: &str,
 ) -> Result<String> {
-    // Lock the client and send the request
-    let mut client_guard = client_arc.lock().await;
-    
     // Generate a unique ID for this request
     let request_id = uuid::Uuid::new_v4().to_string();
     
@@ -687,13 +675,10 @@ pub async fn request_pubsub_items_with_client(
         .build();
     
     // Send the stanza
-    if let Err(e) = client_guard.send_stanza(iq).await {
+    if let Err(e) = transport::send_stanza(stanza_tx, iq) {
         error!("Failed to send PubSub request: {}", e);
         return Err(anyhow!("Failed to send PubSub request: {}", e));
     }
-    
-    // Drop the guard to release the lock before waiting
-    drop(client_guard);
     
     // Wait for the response with a timeout
     let timeout = Duration::from_secs(10);

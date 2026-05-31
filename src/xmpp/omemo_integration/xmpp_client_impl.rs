@@ -1,12 +1,12 @@
 use anyhow::{anyhow, Result};
 use log::{debug, error, info, warn};
-use tokio::time::Duration;
 use uuid::Uuid;
 
 use xmpp_parsers::BareJid as JidBare;
 
 use crate::models::{Message, DeliveryStatus};
 use crate::xmpp::custom_ns;
+use crate::xmpp::transport;
 use crate::omemo::device_id::DeviceId;
 
 /// Implementation of XEP-0384 OMEMO Encryption
@@ -14,7 +14,7 @@ impl crate::xmpp::XMPPClient {
 
     /// Send an OMEMO encrypted message
     pub async fn send_omemo_encrypted_message(&self, recipient: &str, plaintext: &str) -> Result<()> {
-        let _client = self.client.as_ref().ok_or_else(|| {
+        let _stanza_tx = self.stanza_tx.as_ref().ok_or_else(|| {
             error!("XMPP client not initialized when trying to send encrypted message");
             anyhow!("XMPP client not initialized")
         })?;
@@ -31,10 +31,9 @@ impl crate::xmpp::XMPPClient {
         info!("Preparing to send encrypted message to {} with ID: {}", recipient, msg_id);
         
         // Use the send_encrypted_message method which has proper implementation
-        // This delegates to the method that already implements all OMEMO functionality
         let mut temp_client = Self {
             jid: self.jid.clone(),
-            client: self.client.clone(),
+            stanza_tx: self.stanza_tx.clone(),
             msg_tx: self.msg_tx.clone(),
             pending_receipts: self.pending_receipts.clone(),
             connected: self.connected,
@@ -128,9 +127,7 @@ impl crate::xmpp::XMPPClient {
     /// Request an OMEMO device bundle from a peer
     /// This is the second step in the key discovery process, after getting the device list
     pub async fn request_omemo_bundle(&self, peer_jid: &str, device_id: DeviceId) -> Result<()> {
-        if self.client.is_none() {
-            return Err(anyhow!("XMPP client not initialized"));
-        }
+        let stanza_tx = self.stanza_tx.as_ref().ok_or_else(|| anyhow!("XMPP client not initialized"))?;
         
         // Validate and normalize the JID first
         let _normalized_jid = match self.ensure_full_jid(peer_jid).await {
@@ -140,8 +137,6 @@ impl crate::xmpp::XMPPClient {
                 return Err(anyhow!("Invalid JID format: {}: {}", peer_jid, e));
             }
         };
-        
-        let client = self.client.as_ref().unwrap();
         
         // Generate a unique ID for this request
         let request_id = Uuid::new_v4().to_string();
@@ -165,38 +160,14 @@ impl crate::xmpp::XMPPClient {
             )
             .build();
         
-        // Send the request
-        let send_result = {
-            let lock_timeout = Duration::from_secs(5);
-            let mut client_guard = match tokio::time::timeout(lock_timeout, client.lock()).await {
-                Ok(guard) => guard,
-                Err(_) => return Err(anyhow!("Timed out acquiring client lock for OMEMO bundle request")),
-            };
-            
-            match tokio::time::timeout(
-                Duration::from_secs(5),
-                client_guard.send_stanza(iq)
-            ).await {
-                Ok(result) => result,
-                Err(_) => return Err(anyhow!("Timed out sending OMEMO bundle request")),
-            }
-        };
-        
-        match send_result {
-            Ok(_) => {
-                Ok(())
-            },
-            Err(e) => {
-                error!("Failed to send OMEMO bundle request: {}", e);
-                Err(anyhow!("Failed to send OMEMO bundle request: {}", e))
-            }
-        }
+        transport::send_stanza(stanza_tx, iq)
+            .map_err(|e| anyhow!("Failed to send OMEMO bundle request: {}", e))
     }
     
     /// Publish your OMEMO device list to the server
     /// This advertises which devices you have available for OMEMO encryption
     pub async fn publish_omemo_devicelist(&self, device_ids: &[DeviceId]) -> Result<()> {
-        let client = self.client.as_ref().ok_or_else(|| anyhow!("XMPP client not initialized"))?;
+        let stanza_tx = self.stanza_tx.as_ref().ok_or_else(|| anyhow!("XMPP client not initialized"))?;
         let node_name = format!("{}.devicelist", custom_ns::OMEMO);
         
         // First, try to configure the node for open access
@@ -241,38 +212,17 @@ impl crate::xmpp::XMPPClient {
             .build();
         
         // Send the publish request
-        let send_result = {
-            let lock_timeout = Duration::from_secs(5);
-            let mut client_guard = match tokio::time::timeout(lock_timeout, client.lock()).await {
-                Ok(guard) => guard,
-                Err(_) => return Err(anyhow!("Timed out acquiring client lock for publishing OMEMO device list")),
-            };
-            
-            match tokio::time::timeout(
-                Duration::from_secs(5),
-                client_guard.send_stanza(iq)
-            ).await {
-                Ok(result) => result,
-                Err(_) => return Err(anyhow!("Timed out publishing OMEMO device list")),
-            }
-        };
+        transport::send_stanza(stanza_tx, iq)
+            .map_err(|e| anyhow!("Failed to publish OMEMO device list: {}", e))?;
         
-        match send_result {
-            Ok(_) => {
-                info!("OMEMO device list published successfully");
-                Ok(())
-            },
-            Err(e) => {
-                error!("Failed to publish OMEMO device list: {}", e);
-                Err(anyhow!("Failed to publish OMEMO device list: {}", e))
-            }
-        }
+        info!("OMEMO device list published successfully");
+        Ok(())
     }
     
     /// Publish your OMEMO device bundle to the server
     /// This advertises your keys for encryption
     pub async fn publish_omemo_bundle(&self, device_id: DeviceId, bundle_data: &str) -> Result<()> {
-        let client = self.client.as_ref().ok_or_else(|| anyhow!("XMPP client not initialized"))?;
+        let stanza_tx = self.stanza_tx.as_ref().ok_or_else(|| anyhow!("XMPP client not initialized"))?;
         
         // Configure the bundle node for open access before publishing
         let bundle_node_name = format!("{}.bundles:{}", custom_ns::OMEMO_V1, device_id);
@@ -368,32 +318,11 @@ impl crate::xmpp::XMPPClient {
             .build();
         
         // Send the publish request
-        let send_result = {
-            let lock_timeout = Duration::from_secs(5);
-            let mut client_guard = match tokio::time::timeout(lock_timeout, client.lock()).await {
-                Ok(guard) => guard,
-                Err(_) => return Err(anyhow!("Timed out acquiring client lock for publishing OMEMO bundle")),
-            };
-            
-            match tokio::time::timeout(
-                Duration::from_secs(5),
-                client_guard.send_stanza(iq)
-            ).await {
-                Ok(result) => result,
-                Err(_) => return Err(anyhow!("Timed out publishing OMEMO bundle")),
-            }
-        };
+        transport::send_stanza(stanza_tx, iq)
+            .map_err(|e| anyhow!("Failed to publish OMEMO bundle: {}", e))?;
         
-        match send_result {
-            Ok(_) => {
-                info!("OMEMO bundle published successfully for device {}", device_id);
-                Ok(())
-            },
-            Err(e) => {
-                error!("Failed to publish OMEMO bundle: {}", e);
-                Err(anyhow!("Failed to publish OMEMO bundle: {}", e))
-            }
-        }
+        info!("OMEMO bundle published successfully for device {}", device_id);
+        Ok(())
     }
 
     /// Detect an unrecognized OMEMO key and request verification
@@ -681,7 +610,7 @@ impl crate::xmpp::XMPPClient {
 
     /// Configure a PubSub node for open access (required for OMEMO)
     async fn configure_node_for_open_access(&self, node_name: &str) -> Result<()> {
-        let client = self.client.as_ref().ok_or_else(|| anyhow!("XMPP client not initialized"))?;
+        let stanza_tx = self.stanza_tx.as_ref().ok_or_else(|| anyhow!("XMPP client not initialized"))?;
         let config_id = Uuid::new_v4().to_string();
         
         // Create configuration form for open access
@@ -726,15 +655,7 @@ impl crate::xmpp::XMPPClient {
             .build();
         
         // Send the configuration request
-        let send_result = {
-            let mut client_guard = tokio::time::timeout(Duration::from_secs(5), client.lock()).await
-                .map_err(|_| anyhow!("Timed out acquiring client lock for node configuration"))?;
-            
-            tokio::time::timeout(Duration::from_secs(5), client_guard.send_stanza(config_iq)).await
-                .map_err(|_| anyhow!("Timed out configuring node"))?
-        };
-        
-        match send_result {
+        match transport::send_stanza(stanza_tx, config_iq) {
             Ok(_) => {
                 info!("Successfully configured node {} for open access", node_name);
                 Ok(())

@@ -501,7 +501,7 @@ async fn test_full_xmpp_workflow() -> Result<()> {
     info!("Testing chat state notifications...");
     
     // Sending typing indicator
-    if let Err(e) = client.send_chat_state(test_contact, &TypingStatus::Composing).await {
+    if let Err(e) = client.send_chat_state(test_contact, &TypingStatus::Composing) {
         warn!("Failed to send typing indicator: {}", e);
     } else {
         info!("Typing indicator sent successfully");
@@ -511,7 +511,7 @@ async fn test_full_xmpp_workflow() -> Result<()> {
     tokio::time::sleep(TokioDuration::from_millis(500)).await;
 
     // Send paused state
-    if let Err(e) = client.send_chat_state(test_contact, &TypingStatus::Paused).await {
+    if let Err(e) = client.send_chat_state(test_contact, &TypingStatus::Paused) {
         warn!("Failed to send paused state: {}", e);
     } else {
         info!("Paused state sent successfully");

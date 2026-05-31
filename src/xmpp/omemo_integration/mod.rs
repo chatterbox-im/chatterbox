@@ -2,19 +2,18 @@
 // https://xmpp.org/extensions/xep-0384.html
 
 use anyhow::{anyhow, Result};
-use log::{error, info, warn};
+use log::info;
 use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
 use async_trait::async_trait;
 
-use tokio_xmpp::AsyncClient as XMPPAsyncClient;
 use xmpp_parsers::BareJid as JidBare;
 use tokio_xmpp::Element;
-use futures_util::StreamExt;
 
 use crate::omemo::OmemoManager;
 use crate::omemo::device_id::DeviceId;
 use crate::omemo::OmemoPubSub;
+use crate::xmpp::transport::StanzaTx;
 
 mod xmpp_client_impl;
 mod pubsub;
@@ -57,35 +56,35 @@ pub fn new_pubsub_responses() -> PubSubResponses {
 }
 
 /// Implementation of OmemoPubSub that delegates to the XMPP connection.
-/// Holds an Arc to the raw XMPP client and the shared pubsub response map.
+/// Holds the transport channel sender and the shared pubsub response map.
 #[derive(Clone)]
 pub struct XmppPubSubBridge {
-    pub(super) client: Arc<TokioMutex<XMPPAsyncClient>>,
+    pub(super) stanza_tx: StanzaTx,
     pub(super) responses: PubSubResponses,
 }
 
 impl XmppPubSubBridge {
-    pub fn new(client: Arc<TokioMutex<XMPPAsyncClient>>, responses: PubSubResponses) -> Self {
-        Self { client, responses }
+    pub fn new(stanza_tx: StanzaTx, responses: PubSubResponses) -> Self {
+        Self { stanza_tx, responses }
     }
 }
 
 #[async_trait]
 impl OmemoPubSub for XmppPubSubBridge {
     async fn request_items(&self, from: &str, node: &str) -> Result<String> {
-        request_pubsub_items_with_client(&self.client, &self.responses, from, node).await
+        request_pubsub_items_with_client(&self.stanza_tx, &self.responses, from, node).await
     }
 
     async fn publish_item(&self, to: Option<&str>, node: &str, id: &str, payload: &str) -> Result<()> {
-        publish_pubsub_item_with_client(&self.client, to, node, id, payload).await
+        publish_pubsub_item_with_client(&self.stanza_tx, to, node, id, payload).await
     }
 
     async fn publish_item_alternative(&self, to: Option<&str>, node: &str, id: &str, payload: &str) -> Result<()> {
-        publish_bundle_alternative_format_with_client(&self.client, to, node, id, payload).await
+        publish_bundle_alternative_format_with_client(&self.stanza_tx, to, node, id, payload).await
     }
 
     async fn publish_device_list(&self, device_ids: &[DeviceId]) -> Result<()> {
-        publish_pubsub_item_device_list_with_client(&self.client, device_ids).await
+        publish_pubsub_item_device_list_with_client(&self.stanza_tx, device_ids).await
     }
 }
 
@@ -104,15 +103,17 @@ impl OmemoIntegration {
         Ok(manager_guard.get_device_id())
     }
 
-    pub async fn publish_device_list(&self, client: &mut XMPPAsyncClient) -> Result<()> {
-        // Get the bare JID and device ID
-        let bare_jid = self.jid.to_string();
-        let device_id = self.get_device_id().await?;
+    #[allow(dead_code)]
+    pub fn publish_device_list_via(&self, stanza_tx: &StanzaTx, device_id: DeviceId) -> Result<()> {
+        use crate::xmpp::transport;
+        
+        // Get the bare JID and device ID  
+        let _bare_jid = self.jid.to_string();
         
         // Generate a unique ID for the IQ stanza
         let request_id = uuid::Uuid::new_v4().to_string();
         
-        // Create the element structure directly instead of parsing from string
+        // Create the element structure directly
         let mut device_elem = Element::bare("device", "eu.siacs.conversations.axolotl");
         device_elem.set_attr("id", device_id.to_string());
         
@@ -135,69 +136,9 @@ impl OmemoIntegration {
         iq.set_attr("id", request_id.clone());
         iq.append_child(pubsub_elem);
         
-        info!("Would publish PubSub item: {:?}", iq);
+        info!("Publishing device list via transport channel");
         
-        // Send the stanza
-        client.send_stanza(iq).await?;
-        
-        // Wait for a response with matching ID
-        let timeout = tokio::time::Duration::from_secs(5);
-        let start_time = tokio::time::Instant::now();
-        
-        while tokio::time::Instant::now().duration_since(start_time) < timeout {
-            match tokio::time::timeout(
-                tokio::time::Duration::from_millis(500),
-                client.next()
-            ).await {
-                Ok(Some(event)) => match event {
-                    tokio_xmpp::Event::Stanza(stanza) => {
-                        if stanza.name() == "iq" && stanza.attr("id") == Some(&request_id) {
-                            let iq_type = stanza.attr("type").unwrap_or("");
-                            
-                            if iq_type == "error" {
-                                if let Some(error) = stanza.get_child("error", "") {
-                                    let error_type = error.attr("type").unwrap_or("unknown");
-                                    let mut error_text = "unknown error".to_string();
-                                    
-                                    for child in error.children() {
-                                        if child.name() == "text" {
-                                            error_text = child.text();
-                                        }
-                                    }
-                                    
-                                    let error_msg = format!("Failed to publish device list: {} ({})", error_text, error_type);
-                                    error!("{}", error_msg);
-                                    
-                                    if error_text.contains("invalid item") {
-                                        error!("Invalid item when publishing device list: {:?}", stanza);
-                                    }
-                                    
-                                    return Err(anyhow!(error_msg));
-                                }
-                                
-                                return Err(anyhow!("Failed to publish device list: unknown error"));
-                            } else if iq_type == "result" {
-                                info!("Successfully published device list for {}", bare_jid);
-                                return Ok(());
-                            }
-                        }
-                    },
-                    tokio_xmpp::Event::Disconnected(reason) => {
-                        return Err(anyhow!("Disconnected while waiting for device list publish response: {:?}", reason));
-                    },
-                    _ => {}
-                },
-                Ok(None) => {
-                    return Err(anyhow!("Stream ended while waiting for device list publish response"));
-                },
-                Err(_) => {
-                    // Timeout on this attempt, continue the loop
-                    continue;
-                }
-            }
-        }
-        
-        warn!("Timed out waiting for device list publish response");
-        Ok(())
+        transport::send_stanza(stanza_tx, iq)
+            .map_err(|e| anyhow!("Failed to publish device list: {}", e))
     }
 }

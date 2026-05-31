@@ -4,9 +4,10 @@
 use anyhow::{anyhow, Result};
 use log::{error, info, warn};
 use tokio::sync::broadcast;
-use tokio_xmpp::AsyncClient as XMPPAsyncClient;
 use xmpp_parsers::Element;
 use std::collections::HashSet;
+
+use super::transport::{self, StanzaTx};
 
 use crate::models::{PresenceEvent, ShowStatus, SubscriptionKind};
 
@@ -138,23 +139,17 @@ pub fn subscribe_to_presence() -> broadcast::Receiver<PresenceEvent> {
 /// # Returns
 /// 
 /// Result indicating success or failure
-pub async fn send_initial_presence(client: &mut XMPPAsyncClient) -> Result<()> {
-    //debug!("Sending initial presence");
-    
+pub fn send_initial_presence_via(stanza_tx: &StanzaTx) -> Result<()> {
     let mut presence = Element::builder("presence", NS_JABBER_CLIENT).build();
     
-    // Add show status (Optional)
     let mut show = Element::builder("show", "").build();
-    show.append_text_node("chat"); // chat = Available for chat
+    show.append_text_node("chat");
     presence.append_child(show);
     
-    // Add a status message (Optional)
     let mut status = Element::builder("status", "").build();
     status.append_text_node("Online using Chatterbox XMPP");
     presence.append_child(status);
     
-    // Add caps (entity capabilities) advertisement
-    // This advertises that we have capabilities that can be discovered via Service Discovery
     let caps = Element::builder("c", "http://jabber.org/protocol/caps")
         .attr("hash", "sha-1")
         .attr("node", "https://github.com/user/sermo")
@@ -162,18 +157,8 @@ pub async fn send_initial_presence(client: &mut XMPPAsyncClient) -> Result<()> {
         .build();
     presence.append_child(caps);
     
-    //debug!("[JID DEBUG] send_initial_presence: sending presence from our JID (client state may have JID field)");
-    
-    match client.send_stanza(presence).await {
-        Ok(_) => {
-            //debug!("Initial presence sent successfully");
-            Ok(())
-        },
-        Err(e) => {
-            error!("Failed to send initial presence: {}", e);
-            Err(anyhow!("Failed to send initial presence: {}", e))
-        }
-    }
+    transport::send_stanza(stanza_tx, presence)
+        .map_err(|e| anyhow!("Failed to send initial presence: {}", e))
 }
 
 /// Send an unavailable presence to indicate going offline
@@ -185,25 +170,20 @@ pub async fn send_initial_presence(client: &mut XMPPAsyncClient) -> Result<()> {
 /// # Returns
 /// 
 /// Result indicating success or failure
-pub async fn send_unavailable_presence(client: &mut XMPPAsyncClient) -> Result<()> {
-    //debug!("Sending unavailable presence");
-    
+pub fn send_unavailable_presence_via(stanza_tx: &StanzaTx) -> Result<()> {
     let presence = Element::builder("presence", NS_JABBER_CLIENT)
         .attr("type", "unavailable")
         .build();
     
-    //debug!("[JID DEBUG] send_unavailable_presence: sending unavailable presence from our JID (client state may have JID field)");
-    
-    match client.send_stanza(presence).await {
-        Ok(_) => {
-            //debug!("Unavailable presence sent successfully");
-            Ok(())
-        },
-        Err(e) => {
-            error!("Failed to send unavailable presence: {}", e);
-            Err(anyhow!("Failed to send unavailable presence: {}", e))
-        }
-    }
+    transport::send_stanza(stanza_tx, presence)
+        .map_err(|e| anyhow!("Failed to send unavailable presence: {}", e))
+}
+
+#[allow(dead_code)]
+pub async fn send_unavailable_presence_legacy(_unused: &()) -> Result<()> {
+    // Legacy stub — only kept so callers compile during transition.
+    // Real usage goes through send_unavailable_presence_via.
+    Ok(())
 }
 
 /// Set custom presence status with optional status message
@@ -217,8 +197,8 @@ pub async fn send_unavailable_presence(client: &mut XMPPAsyncClient) -> Result<(
 /// # Returns
 /// 
 /// Result indicating success or failure
-pub async fn set_presence_status(
-    client: &mut XMPPAsyncClient, 
+pub fn set_presence_status_via(
+    stanza_tx: &StanzaTx, 
     status_type: &str, 
     status_msg: Option<&str>
 ) -> Result<()> {
@@ -257,16 +237,8 @@ pub async fn set_presence_status(
     
     //debug!("[JID DEBUG] set_presence_status: sending presence from our JID (client state may have JID field), status_type='{}'", status_type);
     
-    match client.send_stanza(presence_stanza).await {
-        Ok(_) => {
-            //debug!("Presence status updated successfully");
-            Ok(())
-        },
-        Err(e) => {
-            error!("Failed to update presence status: {}", e);
-            Err(anyhow!("Failed to update presence status: {}", e))
-        }
-    }
+    transport::send_stanza(stanza_tx, presence_stanza)
+        .map_err(|e| anyhow!("Failed to update presence status: {}", e))
 }
 
 /// Process subscription-related presence stanzas
@@ -279,7 +251,7 @@ pub async fn set_presence_status(
 /// # Returns
 /// 
 /// Result indicating success or failure
-pub async fn process_subscription(client: &mut XMPPAsyncClient, stanza: &Element) -> Result<()> {
+pub async fn process_subscription(stanza_tx: &StanzaTx, stanza: &Element) -> Result<()> {
     let presence_type = match stanza.attr("type") {
         Some(t) => t,
         None => return Ok(()) // Not a subscription stanza
@@ -309,7 +281,7 @@ pub async fn process_subscription(client: &mut XMPPAsyncClient, stanza: &Element
                 .attr("type", "subscribed")
                 .build();
             
-            match client.send_stanza(response).await {
+            match transport::send_stanza(stanza_tx, response) {
                 Ok(_) => {
                     info!("Automatically accepted subscription request from {}", from);
                     
@@ -319,7 +291,7 @@ pub async fn process_subscription(client: &mut XMPPAsyncClient, stanza: &Element
                         .attr("type", "subscribe")
                         .build();
                     
-                    if let Err(e) = client.send_stanza(subscribe_back).await {
+                    if let Err(e) = transport::send_stanza(stanza_tx, subscribe_back) {
                         warn!("Failed to subscribe back to {}: {}", from, e);
                     } else {
                         info!("Subscribed back to {}", from);
@@ -357,7 +329,7 @@ pub async fn process_subscription(client: &mut XMPPAsyncClient, stanza: &Element
                 .attr("type", "unsubscribed")
                 .build();
             
-            if let Err(e) = client.send_stanza(response).await {
+            if let Err(e) = transport::send_stanza(stanza_tx, response) {
                 warn!("Failed to acknowledge unsubscription from {}: {}", from, e);
             }
         },

@@ -553,7 +553,7 @@ async fn run_main_loop(
     let mut presence_rx = xmpp_client.subscribe_to_presence();
     let mut friend_req_rx = xmpp_client.subscribe_to_friend_requests();
 
-    xmpp_client.resend_presence().await;
+    xmpp_client.resend_presence();
     chat_ui.set_connection_status(xmpp_client.is_client_accessible());
 
     let mut last_key_press = std::time::Instant::now();
@@ -634,7 +634,7 @@ async fn run_main_loop(
                         "Presence broadcast lagged by {} events, requesting refresh",
                         n
                     );
-                    xmpp_client.resend_presence().await;
+                    xmpp_client.resend_presence();
                 }
                 Err(_) => break,
             }
@@ -698,7 +698,6 @@ async fn run_main_loop(
                     {
                         match xmpp_client
                             .send_chat_state(&contact, &TypingStatus::Composing)
-                            .await
                         {
                             Ok(_) => {
                                 last_state_sent = Some(TypingStatus::Composing);
@@ -716,7 +715,6 @@ async fn run_main_loop(
                 {
                     match xmpp_client
                         .send_chat_state(&contact, &TypingStatus::Paused)
-                        .await
                     {
                         Ok(_) => {
                             last_state_sent = Some(TypingStatus::Paused);
@@ -732,7 +730,6 @@ async fn run_main_loop(
                 {
                     match xmpp_client
                         .send_chat_state(&contact, &TypingStatus::Active)
-                        .await
                     {
                         Ok(_) => {
                             last_state_sent = Some(TypingStatus::Active);
@@ -771,8 +768,6 @@ async fn run_main_loop(
             }
             None => {}
         }
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(16)).await;
     }
 
     Ok(())
@@ -1111,7 +1106,6 @@ async fn handle_verify_keys_send(
 
     if let Err(e) = xmpp_client
         .send_chat_state(actual_recipient, &TypingStatus::Active)
-        .await
     {
         error!("Failed to send active state after message: {}", e);
     }
@@ -1503,7 +1497,6 @@ async fn handle_send_message(
 
     if let Err(e) = xmpp_client
         .send_chat_state(recipient, &TypingStatus::Active)
-        .await
     {
         error!("Failed to send active state after message: {}", e);
     }

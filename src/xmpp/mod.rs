@@ -11,6 +11,7 @@ use base64::Engine;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 // Import the core xmpp libraries
+#[allow(unused_imports)]
 use tokio_xmpp::AsyncClient as XMPPAsyncClient;
 
 // Import our submodules - making them public
@@ -25,6 +26,7 @@ pub mod introspection;
 pub mod connection;
 pub mod discovery;
 pub mod iq_registry;
+pub mod transport;
 mod event_loop;
 mod omemo_handler;
 mod send;
@@ -67,7 +69,8 @@ pub fn new_shared_client_ref() -> SharedClientRef {
 // XMPPClient struct - main client implementation
 pub struct XMPPClient {
     pub(crate) jid: String,
-    pub(crate) client: Option<Arc<TokioMutex<XMPPAsyncClient>>>,
+    /// Channel-based stanza sender — stanzas are forwarded to the transport actor.
+    pub(crate) stanza_tx: Option<transport::StanzaTx>,
     pub(crate) msg_tx: mpsc::Sender<Message>,
     pub(crate) pending_receipts: Arc<TokioMutex<HashMap<String, PendingMessage>>>,
     pub(crate) connected: bool,
@@ -99,7 +102,7 @@ impl XMPPClient {
 
         (Self {
             jid: String::new(),
-            client: None,
+            stanza_tx: None,
             msg_tx,
             pending_receipts,
             connected: false,
@@ -146,12 +149,19 @@ impl XMPPClient {
 
     // Helper method to check if client is accessible
     pub fn is_client_accessible(&self) -> bool {
-        if let Some(_client) = &self.client {
+        if self.stanza_tx.is_some() {
             true
         } else {
             error!("XMPP client does not exist");
             false
         }
+    }
+
+    /// Send a stanza via the transport channel.
+    pub(crate) fn send_stanza(&self, stanza: xmpp_parsers::Element) -> anyhow::Result<()> {
+        let tx = self.stanza_tx.as_ref()
+            .ok_or_else(|| anyhow!("XMPP client not initialized"))?;
+        transport::send_stanza(tx, stanza)
     }
 
     // Get a clone of the message sender channel
@@ -167,7 +177,7 @@ impl XMPPClient {
     pub fn clone(&self) -> Self {
         Self {
             jid: self.jid.clone(),
-            client: self.client.clone(),
+            stanza_tx: self.stanza_tx.clone(),
             msg_tx: self.msg_tx.clone(),
             pending_receipts: self.pending_receipts.clone(),
             connected: self.connected,
@@ -188,10 +198,9 @@ impl XMPPClient {
 
     /// Re-send our presence to trigger the server to re-broadcast roster presences.
     /// Useful after subscribing if the broadcast buffer has already wrapped (Lagged).
-    pub async fn resend_presence(&self) {
-        if let Some(client_ref) = &self.client {
-            let mut client_guard = client_ref.lock().await;
-            if let Err(e) = presence::send_initial_presence(&mut client_guard).await {
+    pub fn resend_presence(&self) {
+        if let Some(stanza_tx) = &self.stanza_tx {
+            if let Err(e) = presence::send_initial_presence_via(stanza_tx) {
                 error!("Failed to resend presence: {}", e);
             }
         }
@@ -227,7 +236,7 @@ impl XMPPClient {
 
     /// Enable message carbons (XEP-0280) - compatibility shim
     pub async fn enable_carbons_compat(&self) -> Result<bool> {
-        if let Some(_client_ref) = &self.client {
+        if self.stanza_tx.is_some() {
             return self.enable_carbons().await;
         }
         
@@ -236,13 +245,13 @@ impl XMPPClient {
 
     /// Enable XML inspection for testing and debugging
     pub async fn enable_xml_inspection(&self, tx: mpsc::Sender<String>) -> Result<()> {
-        let client = self.client.as_ref().ok_or_else(|| anyhow!("XMPP client not initialized"))?;
-        let client_guard = client.lock().await;
+        if self.stanza_tx.is_none() {
+            return Err(anyhow!("XMPP client not initialized"));
+        }
         
         introspection::register_inspector(tx);
         
         info!("XML inspection enabled for XMPP stanzas");
-        drop(client_guard);
         
         Ok(())
     }

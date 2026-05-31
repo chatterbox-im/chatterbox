@@ -5,16 +5,15 @@ use anyhow::{Result, anyhow};
 use log::{debug, error, info};
 use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
-use tokio::time::Duration;
 use uuid::Uuid;
 
-use tokio_xmpp::AsyncClient as XMPPAsyncClient;
 use xmpp_parsers::message::Message as XMPPMessage;
 use xmpp_parsers::Element;
 
 use crate::models::{Message, DeliveryStatus};
 use super::custom_ns;
 use super::PendingMessage;
+use super::transport::{self, StanzaTx};
 
 /// Handle receipt notification in an incoming message
 pub async fn handle_receipt(
@@ -54,8 +53,8 @@ pub async fn handle_receipt(
 }
 
 /// Send a receipt for a received message
-pub async fn send_receipt(
-    client: &mut XMPPAsyncClient,
+pub fn send_receipt(
+    stanza_tx: &StanzaTx,
     from: &str,
     id: &str
 ) -> Result<()> {
@@ -72,17 +71,8 @@ pub async fn send_receipt(
         )
         .build();
     
-    // Send the receipt
-    match client.send_stanza(receipt).await {
-        Ok(_) => {
-            debug!("Successfully sent receipt for message {}", id);
-            Ok(())
-        },
-        Err(e) => {
-            error!("Failed to send receipt: {}", e);
-            Err(anyhow!("Failed to send receipt: {}", e))
-        }
-    }
+    transport::send_stanza(stanza_tx, receipt)
+        .map_err(|e| anyhow!("Failed to send receipt: {}", e))
 }
 
 /// Implementation of XEP-0184 Message Delivery Receipts
@@ -150,7 +140,7 @@ impl super::XMPPClient {
 
     /// Send a message to a recipient with delivery receipt support
     pub async fn send_message_with_receipt(&self, recipient: &str, content: &str) -> Result<()> {
-        let client = self.client.as_ref().ok_or_else(|| {
+        let stanza_tx = self.stanza_tx.as_ref().ok_or_else(|| {
             error!("XMPP client not initialized when trying to send message");
             anyhow::anyhow!("XMPP client not initialized")
         })?;
@@ -195,127 +185,23 @@ impl super::XMPPClient {
             error!("Failed to send message to UI: {}", e);
         }
         
-        // Constants for retry logic - reduced to minimize race conditions
-        const MAX_RETRIES: usize = 2;
-        const TOTAL_TIMEOUT_SECS: u64 = 3;
-        
-        let total_timeout = tokio::time::Instant::now() + Duration::from_secs(TOTAL_TIMEOUT_SECS);
-        
-        // Quick check if client is accessible
-        if !self.is_client_accessible() {
-            error!("Client is not accessible - cannot send message");
-            self.update_message_status(&msg_id, DeliveryStatus::Failed).await;
-            return Err(anyhow::anyhow!("XMPP client is not accessible"));
-        }
-        
-        for attempt in 1..=MAX_RETRIES {
-            // Check if we've exceeded total timeout
-            if tokio::time::Instant::now() > total_timeout {
-                error!("Exceeded total timeout trying to send message");
+        // Send via transport channel
+        match transport::send_stanza(stanza_tx, message.into()) {
+            Ok(_) => {
+                info!("Message sent successfully to {}", recipient);
+                self.update_message_status(&msg_id, DeliveryStatus::Sent).await;
+                Ok(())
+            }
+            Err(e) => {
+                error!("Failed to send message: {}", e);
                 self.update_message_status(&msg_id, DeliveryStatus::Failed).await;
-                return Err(anyhow::anyhow!("Timed out sending message"));
-            }
-            
-            debug!("Sending message attempt {}/{}", attempt, MAX_RETRIES);
-            
-            // Try to send the message
-            let result = match self.send_message_attempt(client.clone(), message.clone()).await {
-                Ok(result) => result,
-                Err(e) => {
-                    error!("Error during send attempt {}: {}", attempt, e);
-                    continue;
-                }
-            };
-            
-            match result {
-                Ok(_) => {
-                    info!("Message sent successfully on attempt {}", attempt);
-                    self.update_message_status(&msg_id, DeliveryStatus::Sent).await;
-                    return Ok(());
-                },
-                Err(e) => {
-                    error!("Failed to send message on attempt {}: {}", attempt, e);
-                    
-                    // Check if we should retry
-                    if attempt < MAX_RETRIES {
-                        if !self.prepare_for_retry(attempt).await {
-                            error!("Cannot retry - client in bad state");
-                            break;
-                        }
-                    }
-                }
+                Err(anyhow::anyhow!("Failed to send message: {}", e))
             }
         }
-        
-        // If we get here, all attempts failed
-        error!("Failed to send message after {} attempts", MAX_RETRIES);
-        self.update_message_status(&msg_id, DeliveryStatus::Failed).await;
-        
-        Err(anyhow::anyhow!("Failed to send message after {} attempts", MAX_RETRIES))
-    }
-
-    /// Send a single message attempt with timeout - simplified version to avoid race conditions
-    async fn send_message_attempt(
-        &self, 
-        client: Arc<TokioMutex<XMPPAsyncClient>>,
-        message: XMPPMessage
-    ) -> Result<Result<(), anyhow::Error>> {
-        // Use a shorter timeout for sending to fail faster
-        const SEND_TIMEOUT_SECS: u64 = 2;
-        
-        // Convert the message to a stanza before acquiring the lock
-        let stanza = message.into();
-        
-        // Send directly without spawning a task to avoid race conditions
-        let send_future = async {
-            let mut client_guard = client.lock().await;
-            match client_guard.send_stanza(stanza).await {
-                Ok(_) => Ok(()),
-                Err(e) => Err(anyhow::anyhow!("Failed to send stanza: {}", e))
-            }
-        };
-        
-        // Wait for the send operation to complete with timeout
-        match tokio::time::timeout(
-            Duration::from_secs(SEND_TIMEOUT_SECS),
-            send_future
-        ).await {
-            Ok(result) => Ok(result),
-            Err(_) => Err(anyhow::anyhow!("Timed out sending message")),
-        }
-    }
-
-    /// Prepare for retry by validating connection and adding backoff
-    async fn prepare_for_retry(&self, attempt: usize) -> bool {
-        // Calculate backoff with jitter to prevent thundering herd
-        let backoff_base = 500 * 2u64.pow(attempt as u32); 
-        let jitter = rand::random::<u64>() % 500;
-        let backoff = Duration::from_millis(backoff_base + jitter);
-        
-        info!("Retrying message send in {:?}...", backoff);
-        
-        // Before waiting, check if client is still accessible
-        let pre_backoff_accessible = self.is_client_accessible();
-        if !pre_backoff_accessible {
-            error!("Client not accessible before backoff");
-            return false;
-        }
-        
-        // Wait for backoff period
-        tokio::time::sleep(backoff).await;
-        
-        // Check if client is still accessible after backoff
-        let client_accessible = self.is_client_accessible();
-        if !client_accessible {
-            error!("Client not accessible after backoff");
-            return false;
-        }
-        
-        true
     }
 
     /// Send an XEP-0184 receipt acknowledgment
-    pub async fn send_receipt(client: Arc<TokioMutex<XMPPAsyncClient>>, to: Option<String>, msg_id: String) {
+    pub fn send_receipt_via(stanza_tx: &StanzaTx, to: Option<String>, msg_id: String) {
         if to.is_none() {
             error!("Cannot send receipt: no recipient specified");
             return;
@@ -330,7 +216,6 @@ impl super::XMPPClient {
                 Ok(jid) => jid,
                 Err(e) => {
                     error!("Failed to parse JID for receipt: {}", e);
-                    // Return a placeholder JID in case of parsing error
                     "unknown@example.com".parse().unwrap()
                 }
             }
@@ -347,16 +232,9 @@ impl super::XMPPClient {
         
         // Send receipt
         debug!("Sending message receipt for ID: {}", msg_id);
-        match tokio::time::timeout(
-            Duration::from_secs(5),
-            async {
-                let mut client_guard = client.lock().await;
-                client_guard.send_stanza(receipt.into()).await
-            }
-        ).await {
-            Ok(Ok(_)) => debug!("Sent message receipt successfully"),
-            Ok(Err(e)) => error!("Failed to send message receipt: {}", e),
-            Err(_) => error!("Timed out sending message receipt"),
+        match transport::send_stanza(stanza_tx, receipt.into()) {
+            Ok(_) => debug!("Sent message receipt successfully"),
+            Err(e) => error!("Failed to send message receipt: {}", e),
         }
     }
 

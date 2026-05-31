@@ -13,11 +13,6 @@ use base64::Engine;
 impl super::XMPPClient {
     /// Enable Message Carbons feature
     pub async fn enable_carbons_protocol(&self) -> Result<bool> {
-        let client = self.client.as_ref().ok_or_else(|| {
-            error!("XMPP client not initialized when trying to enable message carbons");
-            anyhow!("XMPP client not initialized")
-        })?;
-        
         // Generate a unique ID for the request
         let id = uuid::Uuid::new_v4().to_string();
         
@@ -38,11 +33,8 @@ impl super::XMPPClient {
         info!("Sending request to enable message carbons with ID: {}", id);
         
         // Send the stanza
-        {
-            let mut client_guard = client.lock().await;
-            client_guard.send_stanza(iq).await
-                .map_err(|e| anyhow!("Failed to send message carbons enable request: {}", e))?;
-        }
+        self.send_stanza(iq)
+            .map_err(|e| anyhow!("Failed to send message carbons enable request: {}", e))?;
         
         // Wait for the event loop to route the response to us
         let response = tokio::time::timeout(
@@ -76,11 +68,6 @@ impl super::XMPPClient {
 
     /// Disable Message Carbons feature
     pub async fn disable_carbons(&self) -> Result<bool> {
-        let client = self.client.as_ref().ok_or_else(|| {
-            error!("XMPP client not initialized when trying to disable message carbons");
-            anyhow!("XMPP client not initialized")
-        })?;
-        
         // Generate a unique ID for the request
         let id = uuid::Uuid::new_v4().to_string();
         
@@ -101,11 +88,8 @@ impl super::XMPPClient {
         info!("Sending request to disable message carbons with ID: {}", id);
         
         // Send the stanza
-        {
-            let mut client_guard = client.lock().await;
-            client_guard.send_stanza(iq).await
-                .map_err(|e| anyhow!("Failed to send message carbons disable request: {}", e))?;
-        }
+        self.send_stanza(iq)
+            .map_err(|e| anyhow!("Failed to send message carbons disable request: {}", e))?;
         
         // Wait for the event loop to route the response to us
         let response = tokio::time::timeout(

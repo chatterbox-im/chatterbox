@@ -146,51 +146,39 @@ impl XMPPClient {
         message_element.append_child(store_hint);
         
         // Send the message
-        if let Some(client) = &self.client {
-            let stanza = message_element.into();
-            let mut client_guard = client.lock().await;
-            match client_guard.send_stanza(stanza).await {
-                Ok(_) => {
-                    info!("Encrypted message sent successfully to {}", to);
-                    
-                    // Store message ID in pending receipts
-                    {
-                        let mut pending_receipts_guard = self.pending_receipts.lock().await;
-                        let pending_message = PendingMessage {
-                            id: id.clone(),
-                            to: to.to_string(),
-                            content: content.to_string(),
-                            timestamp: chrono::Utc::now().timestamp() as u64,
-                            status: DeliveryStatus::Sent,
-                        };
-                        pending_receipts_guard.insert(id.clone(), pending_message);
-                    }
-                    
-                    // Create a "sent" message for the UI
-                    let message = Message {
-                        id: id.clone(),
-                        sender_id: "me".to_string(),
-                        recipient_id: to.to_string(),
-                        content: content.to_string(),
-                        timestamp: chrono::Utc::now().timestamp() as u64,
-                        delivery_status: DeliveryStatus::Sent,
-                    };
-                    
-                    if let Err(e) = self.msg_tx.send(message).await {
-                        error!("Failed to send message to UI: {}", e);
-                    }
-                    
-                    Ok(())
-                },
-                Err(e) => {
-                    error!("Failed to send encrypted message to {}: {}", to, e);
-                    Err(anyhow!("Failed to send encrypted message: {}", e))
-                }
-            }
-        } else {
-            error!("Client not initialized");
-            Err(anyhow!("Client not initialized"))
+        self.send_stanza(message_element)
+            .map_err(|e| anyhow!("Failed to send encrypted message to {}: {}", to, e))?;
+        
+        info!("Encrypted message sent successfully to {}", to);
+        
+        // Store message ID in pending receipts
+        {
+            let mut pending_receipts_guard = self.pending_receipts.lock().await;
+            let pending_message = PendingMessage {
+                id: id.clone(),
+                to: to.to_string(),
+                content: content.to_string(),
+                timestamp: chrono::Utc::now().timestamp() as u64,
+                status: DeliveryStatus::Sent,
+            };
+            pending_receipts_guard.insert(id.clone(), pending_message);
         }
+        
+        // Create a "sent" message for the UI
+        let message = Message {
+            id: id.clone(),
+            sender_id: "me".to_string(),
+            recipient_id: to.to_string(),
+            content: content.to_string(),
+            timestamp: chrono::Utc::now().timestamp() as u64,
+            delivery_status: DeliveryStatus::Sent,
+        };
+        
+        if let Err(e) = self.msg_tx.send(message).await {
+            error!("Failed to send message to UI: {}", e);
+        }
+        
+        Ok(())
     }
 
     /// Store a message ID for tracking status updates
@@ -345,45 +333,35 @@ impl XMPPClient {
         introspection::inspect_outbound_xml(&stanza_str);
         
         // Send the message
-        if let Some(client) = &self.client {
-            let mut client_guard = client.lock().await;
-            match client_guard.send_stanza(stanza).await {
-                Ok(_) => debug!("DEBUG: Successfully sent stanza to XMPP server"),
-                Err(e) => {
-                    error!("DEBUG: Failed to send stanza to XMPP server: {}", e);
-                    return Err(anyhow!("Failed to send stanza: {}", e));
-                }
-            }
-            
-            // Store message ID in pending receipts
-            let mut pending_receipts_guard = self.pending_receipts.lock().await;
-            let pending_message = PendingMessage {
-                id: id.clone(),
-                to: to.to_string(),
-                content: content.to_string(),
-                timestamp: chrono::Utc::now().timestamp() as u64,
-                status: DeliveryStatus::Sent,
-            };
-            pending_receipts_guard.insert(id.clone(), pending_message);
-            
-            // Create a "sent" message for the UI
-            let message = Message {
-                id: id.clone(),
-                sender_id: "me".to_string(),
-                recipient_id: to.to_string(),
-                content: content.to_string(),
-                timestamp: chrono::Utc::now().timestamp() as u64,
-                delivery_status: DeliveryStatus::Sent,
-            };
-            
-            if let Err(e) = self.msg_tx.send(message).await {
-                error!("DEBUG: Failed to send message to UI: {}", e);
-            }
-            
-            Ok(())
-        } else {
-            error!("DEBUG: Client not initialized");
-            Err(anyhow!("Client not initialized"))
+        self.send_stanza(stanza)
+            .map_err(|e| anyhow!("Failed to send stanza: {}", e))?;
+        debug!("DEBUG: Successfully sent stanza to XMPP server");
+        
+        // Store message ID in pending receipts
+        let mut pending_receipts_guard = self.pending_receipts.lock().await;
+        let pending_message = PendingMessage {
+            id: id.clone(),
+            to: to.to_string(),
+            content: content.to_string(),
+            timestamp: chrono::Utc::now().timestamp() as u64,
+            status: DeliveryStatus::Sent,
+        };
+        pending_receipts_guard.insert(id.clone(), pending_message);
+        
+        // Create a "sent" message for the UI
+        let message = Message {
+            id: id.clone(),
+            sender_id: "me".to_string(),
+            recipient_id: to.to_string(),
+            content: content.to_string(),
+            timestamp: chrono::Utc::now().timestamp() as u64,
+            delivery_status: DeliveryStatus::Sent,
+        };
+        
+        if let Err(e) = self.msg_tx.send(message).await {
+            error!("DEBUG: Failed to send message to UI: {}", e);
         }
+        
+        Ok(())
     }
 }

@@ -1,10 +1,11 @@
 use anyhow::Result;
 use log::{info, warn};
 use xmpp_parsers::Element;
-use tokio_xmpp::AsyncClient;
 use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
 use std::collections::HashSet;
+
+use super::transport::{self, StanzaTx};
 
 /// Represents a discovered feature or capability
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -23,16 +24,16 @@ pub struct Identity {
 /// Handles XEP-0030: Service Discovery
 #[derive(Clone)]
 pub struct ServiceDiscovery {
-    client: Arc<TokioMutex<AsyncClient>>,
+    stanza_tx: StanzaTx,
     discovered_features: Arc<TokioMutex<std::collections::HashMap<String, HashSet<Feature>>>>,
     discovered_identities: Arc<TokioMutex<std::collections::HashMap<String, HashSet<Identity>>>>,
 }
 
 impl ServiceDiscovery {
     /// Creates a new ServiceDiscovery instance
-    pub fn new(client: Arc<TokioMutex<AsyncClient>>) -> Self {
+    pub fn new(stanza_tx: StanzaTx) -> Self {
         Self { 
-            client, 
+            stanza_tx, 
             discovered_features: Arc::new(TokioMutex::new(std::collections::HashMap::new())),
             discovered_identities: Arc::new(TokioMutex::new(std::collections::HashMap::new())),
         }
@@ -40,8 +41,6 @@ impl ServiceDiscovery {
 
     /// Sends a service discovery info request to a JID
     pub async fn send_disco_info_request(&self, jid: &str) -> Result<()> {
-        let mut client = self.client.lock().await;
-
         let iq_id = format!("disco_info_{}", uuid::Uuid::new_v4());
         let mut iq = Element::builder("iq", "jabber:client").build();
         iq.set_attr("type", "get");
@@ -51,7 +50,7 @@ impl ServiceDiscovery {
         let query = Element::builder("query", "http://jabber.org/protocol/disco#info").build();
         iq.append_child(query);
 
-        client.send_stanza(iq).await?;
+        transport::send_stanza(&self.stanza_tx, iq)?;
         info!("Sent service discovery info request to {}", jid);
 
         Ok(())
@@ -59,8 +58,6 @@ impl ServiceDiscovery {
 
     /// Sends a service discovery items request to a JID
     pub async fn send_disco_items_request(&self, jid: &str) -> Result<()> {
-        let mut client = self.client.lock().await;
-
         let iq_id = format!("disco_items_{}", uuid::Uuid::new_v4());
         let mut iq = Element::builder("iq", "jabber:client").build();
         iq.set_attr("type", "get");
@@ -70,7 +67,7 @@ impl ServiceDiscovery {
         let query = Element::builder("query", "http://jabber.org/protocol/disco#items").build();
         iq.append_child(query);
 
-        client.send_stanza(iq).await?;
+        transport::send_stanza(&self.stanza_tx, iq)?;
         info!("Sent service discovery items request to {}", jid);
 
         Ok(())
@@ -283,8 +280,6 @@ impl ServiceDiscovery {
 
     /// Advertises supported features for this client
     pub async fn advertise_features(&self) -> Result<()> {
-        let mut client = self.client.lock().await;
-
         let mut iq = Element::builder("iq", "jabber:client").build();
         iq.set_attr("type", "set");
         iq.set_attr("id", "disco3");
@@ -328,7 +323,7 @@ impl ServiceDiscovery {
 
         iq.append_child(query);
 
-        client.send_stanza(iq).await?;
+        transport::send_stanza(&self.stanza_tx, iq)?;
         info!("Advertised supported features");
 
         Ok(())
