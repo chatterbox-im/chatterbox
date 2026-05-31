@@ -207,6 +207,26 @@ struct CoordinatorState {
     our_bare_jid: String,
 }
 
+/// Non-blocking send to the UI message channel.
+///
+/// The coordinator must never block on UI delivery — a slow/paused UI must not
+/// stall XMPP event processing. If the channel is full, the message is dropped
+/// with a warning. This is safe because:
+/// - Chat messages are persisted elsewhere (storage layer)
+/// - Delivery receipts/status updates are best-effort UI notifications
+/// - The alternative (blocking) causes total coordinator deadlock
+fn send_to_ui(msg_tx: &mpsc::Sender<Message>, message: Message) {
+    match msg_tx.try_send(message) {
+        Ok(()) => {}
+        Err(mpsc::error::TrySendError::Full(msg)) => {
+            warn!("UI message channel full, dropping message id={} (UI is not draining fast enough)", msg.id);
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            debug!("UI message channel closed (app shutting down)");
+        }
+    }
+}
+
 /// Spawn the coordinator task. Returns:
 /// - `CoordinatorHandle` for sending commands from the app layer
 /// - Consumes the event_rx from the transport
@@ -428,9 +448,7 @@ async fn handle_message(state: &mut CoordinatorState, stanza: &Element) {
                     encrypted: false,
                 };
 
-                if let Err(e) = state.msg_tx.send(message).await {
-                    error!("Failed to send message to UI: {}", e);
-                }
+                send_to_ui(&state.msg_tx, message);
 
                 // Send receipt if requested
                 if stanza.has_child("request", custom_ns::RECEIPTS) {
@@ -511,7 +529,7 @@ async fn handle_omemo_message(state: &mut CoordinatorState, stanza: &Element) {
             delivery_status: DeliveryStatus::Delivered,
             encrypted: true,
         };
-        let _ = state.msg_tx.send(message).await;
+        send_to_ui(&state.msg_tx, message);
         return;
     }
 
@@ -610,9 +628,7 @@ async fn handle_omemo_message(state: &mut CoordinatorState, stanza: &Element) {
                 encrypted: true,
             };
 
-            if let Err(e) = state.msg_tx.send(message).await {
-                error!("Failed to send decrypted message to UI: {}", e);
-            }
+            send_to_ui(&state.msg_tx, message);
 
             // Send receipt if requested
             if stanza.has_child("request", custom_ns::RECEIPTS) {
@@ -641,7 +657,7 @@ async fn handle_omemo_message(state: &mut CoordinatorState, stanza: &Element) {
                 delivery_status: DeliveryStatus::Delivered,
                 encrypted: true,
             };
-            let _ = state.msg_tx.send(message).await;
+            send_to_ui(&state.msg_tx, message);
         }
     }
 }
@@ -742,7 +758,7 @@ async fn send_encrypted(state: &mut CoordinatorState, to: &str, content: &str) -
         delivery_status: DeliveryStatus::Sent,
         encrypted: true,
     };
-    let _ = state.msg_tx.send(message).await;
+    send_to_ui(&state.msg_tx, message);
 
     Ok(id)
 }
@@ -780,7 +796,7 @@ async fn send_plaintext(state: &mut CoordinatorState, to: &str, content: &str) -
         delivery_status: DeliveryStatus::Sent,
         encrypted: false,
     };
-    let _ = state.msg_tx.send(message).await;
+    send_to_ui(&state.msg_tx, message);
 
     Ok(id)
 }
@@ -893,7 +909,7 @@ async fn handle_receipt_inline(state: &mut CoordinatorState, stanza: &Element) -
                     delivery_status: DeliveryStatus::Delivered,
                     encrypted: false,
                 };
-                let _ = state.msg_tx.send(ui_message).await;
+                send_to_ui(&state.msg_tx, ui_message);
             }
         }
     }
@@ -968,7 +984,7 @@ async fn handle_carbon_inline(state: &mut CoordinatorState, stanza: &Element) {
         encrypted: false,
     };
 
-    let _ = state.msg_tx.send(ui_message).await;
+    send_to_ui(&state.msg_tx, ui_message);
 }
 
 /// Check OMEMO keys for a contact (inline, no spawn).
@@ -1045,7 +1061,7 @@ async fn check_omemo_keys_inline(state: &mut CoordinatorState, contact: &str) ->
                 delivery_status: DeliveryStatus::Delivered,
                 encrypted: false,
             };
-            let _ = state.msg_tx.send(special_message).await;
+            send_to_ui(&state.msg_tx, special_message);
             break;
         }
     }
@@ -1108,7 +1124,7 @@ async fn handle_key_verification_inline(state: &mut CoordinatorState, contact: &
                 delivery_status: DeliveryStatus::Unknown,
                 encrypted: false,
             };
-            let _ = state.msg_tx.send(msg).await;
+            send_to_ui(&state.msg_tx, msg);
         }
         "__KEY_REJECTED__" => {
             info!("OMEMO key for {} rejected", contact);
@@ -1121,7 +1137,7 @@ async fn handle_key_verification_inline(state: &mut CoordinatorState, contact: &
                 delivery_status: DeliveryStatus::Unknown,
                 encrypted: false,
             };
-            let _ = state.msg_tx.send(msg).await;
+            send_to_ui(&state.msg_tx, msg);
         }
         _ => {
             return Err(anyhow!("Unknown key verification response: {}", response));
@@ -1889,6 +1905,104 @@ mod tests {
 
         // Still alive
         assert!(!_handle.is_omemo_enabled().await);
+        _handle.cmd_tx.send(CoordinatorCommand::Shutdown).await.unwrap();
+    }
+
+    // ─── Backpressure: coordinator does NOT deadlock when UI is slow ──────
+
+    #[tokio::test]
+    async fn test_coordinator_does_not_block_when_ui_channel_full() {
+        // Create a TINY msg channel (capacity 1) to easily fill it
+        let (stanza_tx, _stanza_rx) = mpsc::unbounded_channel();
+        let (event_tx, event_rx) = mpsc::unbounded_channel::<tokio_xmpp::Event>();
+        let (msg_tx, msg_rx) = mpsc::channel(1); // capacity=1
+
+        let handle = spawn_coordinator(
+            stanza_tx, event_rx, msg_tx, None,
+            "test@example.org".to_string(), None, None,
+        );
+
+        // Send 5 messages to the coordinator — only 1 can fit in msg_rx
+        for i in 0..5 {
+            let inbound = Element::builder("message", "jabber:client")
+                .attr("from", "alice@example.org/phone")
+                .attr("type", "chat")
+                .attr("id", &format!("flood-{}", i))
+                .append(
+                    Element::builder("body", "jabber:client")
+                        .append(format!("Message {}", i))
+                        .build()
+                )
+                .build();
+            event_tx.send(tokio_xmpp::Event::Stanza(inbound)).unwrap();
+        }
+
+        // Give coordinator time to process all 5 events
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // The coordinator should still be responsive (not deadlocked).
+        // If it were using .await on msg_tx.send(), it would be stuck after
+        // the first message fills the channel, and this would timeout.
+        let responsive = timeout(
+            Duration::from_millis(200),
+            handle.is_omemo_enabled()
+        ).await;
+        assert!(responsive.is_ok(), "Coordinator is deadlocked!");
+        assert!(!responsive.unwrap());
+
+        // We can also send a command and get a reply back
+        let send_result = timeout(
+            Duration::from_millis(200),
+            handle.send_plaintext("bob@example.org", "still alive")
+        ).await;
+        assert!(send_result.is_ok(), "Coordinator deadlocked on command processing");
+
+        handle.cmd_tx.send(CoordinatorCommand::Shutdown).await.unwrap();
+
+        // Clean up — drain what we can
+        drop(msg_rx);
+    }
+
+    #[tokio::test]
+    async fn test_messages_delivered_when_ui_drains() {
+        // Capacity 2: first 2 messages delivered, rest dropped
+        let (stanza_tx, _stanza_rx) = mpsc::unbounded_channel();
+        let (event_tx, event_rx) = mpsc::unbounded_channel::<tokio_xmpp::Event>();
+        let (msg_tx, mut msg_rx) = mpsc::channel(2);
+
+        let _handle = spawn_coordinator(
+            stanza_tx, event_rx, msg_tx, None,
+            "test@example.org".to_string(), None, None,
+        );
+
+        // Send 4 messages
+        for i in 0..4 {
+            let inbound = Element::builder("message", "jabber:client")
+                .attr("from", "alice@example.org/phone")
+                .attr("type", "chat")
+                .attr("id", &format!("msg-{}", i))
+                .append(
+                    Element::builder("body", "jabber:client")
+                        .append(format!("Hello {}", i))
+                        .build()
+                )
+                .build();
+            event_tx.send(tokio_xmpp::Event::Stanza(inbound)).unwrap();
+        }
+
+        // Wait for processing
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // We should get at most 2 messages (channel capacity)
+        let mut received = Vec::new();
+        while let Ok(msg) = msg_rx.try_recv() {
+            received.push(msg);
+        }
+
+        // At least 1 delivered, at most 2 (capacity). The rest were dropped.
+        assert!(!received.is_empty(), "Should have received at least 1 message");
+        assert!(received.len() <= 2, "Should not exceed channel capacity, got {}", received.len());
+
         _handle.cmd_tx.send(CoordinatorCommand::Shutdown).await.unwrap();
     }
 }
