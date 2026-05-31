@@ -87,14 +87,16 @@ impl OmemoManager {
                             info!("Signed prekey signature verified for {}:{} after re-fetch", bare_jid, remote_device_id);
                         }
                         Ok(false) => {
-                            // Proceed with a warning — the bundle may be valid but use a signing
-                            // convention we don't fully support (e.g. Dino/libomemo quirk).
-                            // The SPK signature is a defense against malicious server key substitution;
-                            // if you trust your server, this is safe to proceed past.
-                            warn!("Signed prekey signature INVALID for {}:{} even after re-fetch — proceeding anyway (trust-on-first-use)", bare_jid, remote_device_id);
+                            error!("Signed prekey signature INVALID for {}:{} even after re-fetch — rejecting bundle to prevent potential MITM", bare_jid, remote_device_id);
+                            return Err(OmemoError::ProtocolError(format!(
+                                "Signed prekey signature verification failed for {}:{} — bundle rejected", bare_jid, remote_device_id
+                            )));
                         }
                         Err(e) => {
-                            warn!("Signed prekey signature verification error for {}:{} after re-fetch: {} — proceeding anyway", bare_jid, remote_device_id, e);
+                            error!("Signed prekey signature verification error for {}:{} after re-fetch: {} — rejecting bundle", bare_jid, remote_device_id, e);
+                            return Err(OmemoError::ProtocolError(format!(
+                                "Signed prekey signature verification error for {}:{}: {}", bare_jid, remote_device_id, e
+                            )));
                         }
                     }
                 }
