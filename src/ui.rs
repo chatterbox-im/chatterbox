@@ -746,9 +746,9 @@ impl ChatUI {
         };
 
         let help_spans = vec![
-            Span::styled("ESC quit | TAB switch | Fn+↑/↓ scroll | Ctrl+A add | Ctrl+O toggle OMEMO [", Style::default().fg(Color::Gray)),
+            Span::styled(" ESC quit | TAB switch | Ctrl+H help | Ctrl+A add | Ctrl+O toggle OMEMO [", Style::default().fg(Color::Gray)),
             Span::styled(omemo_status_text, omemo_status_style),
-            Span::styled("] | Ctrl+T trust | Ctrl+H help", Style::default().fg(Color::Gray)),
+            Span::styled("] | Ctrl+T trust | Fn+↑/↓ scroll", Style::default().fg(Color::Gray)),
         ];
         
         let help = Paragraph::new(Line::from(help_spans));
