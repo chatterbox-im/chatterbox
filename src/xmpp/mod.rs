@@ -24,6 +24,7 @@ pub mod presence;
 pub mod roster;
 pub mod introspection;
 pub mod connection;
+pub mod coordinator;
 pub mod discovery;
 pub mod iq_registry;
 pub mod transport;
@@ -33,6 +34,7 @@ mod send;
 
 // Re-export our submodules
 pub use chat_states::*;
+pub use coordinator::{CoordinatorHandle, CoordinatorCommand, spawn_coordinator};
 pub use presence::*;
 pub use discovery::ServiceDiscovery;
 
