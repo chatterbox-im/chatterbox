@@ -192,14 +192,15 @@ async fn main() -> Result<()> {
                 }
             }
             
-            // Create typing notification channel and store in client BEFORE registering global
+            // Create typing notification channel and store in client BEFORE publishing state
             let (typing_tx, typing_rx_inner) = tokio::sync::mpsc::channel::<(String, chatterbox::xmpp::TypingStatus)>(100);
             xmpp_client.typing_tx = Some(typing_tx);
             typing_rx_holder = Some(typing_rx_inner);
             
-            // Register the client in the global registry AFTER OMEMO initialization
-            // This ensures the global client has the OMEMO manager properly set
-            chatterbox::xmpp::set_global_xmpp_client(xmpp_client.clone()).await;
+            // Publish late-bound state to the event loop via watch channel.
+            // This makes OMEMO manager, pubsub_responses, typing_tx available
+            // to the event loop without any mutex locks.
+            chatterbox::xmpp::publish_late_state(&xmpp_client);
 
             // Initialize Service Discovery (XEP-0030)
             // TODO: Fix type mismatch between XMPPClient and AsyncClient

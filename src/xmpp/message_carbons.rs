@@ -304,15 +304,7 @@ impl super::XMPPClient {
         debug!("Carbon OMEMO message from: {},: to:: {}", from, to);
         
         // Get the OMEMO manager
-        let omemo_manager = match self.shared_self.lock().await.as_ref() {
-            Some(client) => {
-                let client_guard = client.lock().await;
-                client_guard.get_omemo_manager().map(|arc| arc.clone())
-            },
-            None => None,
-        };
-        
-        let omemo_manager = match omemo_manager {
+        let omemo_manager = match self.omemo_manager.clone() {
             Some(m) => m,
             None => {
                 warn!("OMEMO manager not initialized for processing carbon");

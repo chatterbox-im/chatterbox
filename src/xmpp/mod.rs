@@ -6,7 +6,7 @@ use anyhow::{anyhow, Result};
 use log::{debug, error, info};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex as TokioMutex};
+use tokio::sync::{mpsc, watch, Mutex as TokioMutex};
 use base64::Engine;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -56,15 +56,19 @@ pub mod custom_ns {
 // XEP namespaces (core and extensions)
 const NS_JABBER_CLIENT: &str = "jabber:client";
 
-/// A shared, late-bound reference to the fully-initialized XMPPClient.
-/// Created at construction time (as None), populated after OMEMO init,
-/// and cloned into spawned tasks so they can access the client without a global.
-pub type SharedClientRef = Arc<TokioMutex<Option<Arc<TokioMutex<XMPPClient>>>>>;
-
-/// Create a new empty SharedClientRef
-pub fn new_shared_client_ref() -> SharedClientRef {
-    Arc::new(TokioMutex::new(None))
+/// Late-bound state published after OMEMO initialization completes.
+/// Sent via a `watch` channel — the event loop reads it with a single
+/// atomic borrow (no mutex locks needed).
+#[derive(Clone, Default)]
+pub(crate) struct LateState {
+    pub omemo_manager: Option<Arc<TokioMutex<crate::omemo::OmemoManager>>>,
+    pub pubsub_responses: Option<crate::xmpp::omemo_integration::PubSubResponses>,
+    pub jid: String,
+    pub typing_tx: Option<mpsc::Sender<(String, crate::xmpp::chat_states::TypingStatus)>>,
 }
+
+pub(crate) type LateStateTx = watch::Sender<LateState>;
+pub(crate) type LateStateRx = watch::Receiver<LateState>;
 
 // XMPPClient struct - main client implementation
 pub struct XMPPClient {
@@ -78,8 +82,9 @@ pub struct XMPPClient {
     pub(crate) carbons_enabled: Arc<AtomicBool>,
     pub(crate) iq_registry: Arc<TokioMutex<iq_registry::IqResponseRegistry>>,
     pub(crate) pubsub_responses: Option<crate::xmpp::omemo_integration::PubSubResponses>,
-    /// Shared reference that spawned tasks use to access the fully-initialized client.
-    pub(crate) shared_self: SharedClientRef,
+    /// Watch channel sender for publishing late-bound state to the event loop.
+    /// `Some` on the real client, `None` on temporary clones.
+    pub(crate) late_state_tx: Option<LateStateTx>,
     /// Typing notification sender — passed to the event loop for chat state notifications.
     pub typing_tx: Option<mpsc::Sender<(String, crate::xmpp::chat_states::TypingStatus)>>,
 }
@@ -99,6 +104,7 @@ impl XMPPClient {
     pub fn new() -> (Self, mpsc::Receiver<Message>) {
         let (msg_tx, msg_rx) = mpsc::channel(100);
         let pending_receipts = Arc::new(TokioMutex::new(HashMap::new()));
+        let (late_state_tx, _) = watch::channel(LateState::default());
 
         (Self {
             jid: String::new(),
@@ -110,7 +116,7 @@ impl XMPPClient {
             carbons_enabled: Arc::new(AtomicBool::new(true)),
             iq_registry: Arc::new(TokioMutex::new(iq_registry::IqResponseRegistry::new())),
             pubsub_responses: None,
-            shared_self: new_shared_client_ref(),
+            late_state_tx: Some(late_state_tx),
             typing_tx: None,
         }, msg_rx)
     }
@@ -185,7 +191,7 @@ impl XMPPClient {
             carbons_enabled: self.carbons_enabled.clone(),
             iq_registry: self.iq_registry.clone(),
             pubsub_responses: self.pubsub_responses.clone(),
-            shared_self: self.shared_self.clone(),
+            late_state_tx: None, // clones don't publish state
             typing_tx: self.typing_tx.clone(),
         }
     }
@@ -257,13 +263,21 @@ impl XMPPClient {
     }
 }
 
-/// Register the fully-initialized client so that spawned tasks can access it
-/// via the `shared_self` field.
-pub async fn set_global_xmpp_client(client: XMPPClient) {
-    let shared = client.shared_self.clone();
-    let client_arc = Arc::new(TokioMutex::new(client));
-    // Populate the shared_self reference so event loop tasks can find the client
-    *shared.lock().await = Some(client_arc);
+/// Publish the fully-initialized late-bound state to the event loop via watch channel.
+/// Called after OMEMO initialization and typing_tx setup are complete.
+pub fn publish_late_state(client: &XMPPClient) {
+    if let Some(ref tx) = client.late_state_tx {
+        let state = LateState {
+            omemo_manager: client.omemo_manager.clone(),
+            pubsub_responses: client.pubsub_responses.clone(),
+            jid: client.jid.clone(),
+            typing_tx: client.typing_tx.clone(),
+        };
+        let _ = tx.send(state);
+        info!("Published late state to event loop (OMEMO: {}, PubSub: {})",
+            client.omemo_manager.is_some(),
+            client.pubsub_responses.is_some());
+    }
 }
 
 /// Verify OMEMO stanza structure for security

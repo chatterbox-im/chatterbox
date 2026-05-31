@@ -1,37 +1,33 @@
-name: Cargo Build
+name: CI
 
 on: push
 jobs:
-  build:
+  build-and-test:
     runs-on: ubuntu-latest
     env:
       XMPP_SERVER: ${{ secrets.XMPP_SERVER }}
       XMPP_USERNAME: ${{ secrets.XMPP_USERNAME }}
       XMPP_PASSWORD: ${{ secrets.XMPP_PASSWORD }}
-      XMPP_USERNAME_B: ${{ secrets.XMPP_USERNAME_B }}
-      XMPP_PASSWORD_B: ${{ secrets.XMPP_PASSWORD_B }}
     steps:
       - uses: actions/checkout@v4
-      - name: Build binaries
-        shell: bash
+
+      - name: Build
         run: cargo build
-      - name: Run
-        shell: bash
-        run: timeout 30s ./target/debug/chatterbox || true 
+
+      - name: Unit tests
+        run: cargo test --lib -- --test-threads=1
+
+      - name: Run headless (30s smoke test)
+        run: ./scripts/run_headless.sh 30
+
       - name: Check connection
-        shell: bash
-        run: grep "Connected to XMPP server successfully" chatterbox.log
-      - name: Check bundle publication
-        shell: bash
-        run: ./scripts/grep_bundle_publication.sh
-      - name: Check for item-not-found errors
-        shell: bash
-        run: ./scripts/grep_item-not-found.sh
-      - name: Check for capability response
-        shell: bash
-        run: grep "<<" chatterbox.log | grep "disco#" | grep register
-      - name: Check for errors 
-        shell: bash
-        run: ./scripts/grep_for_error.sh
-      - name: Check device list fetch from server
-        run: ./scripts/grep_device_fetch.sh 
+        run: ./scripts/check_connection.sh
+
+      - name: Check OMEMO bundle published
+        run: ./scripts/check_bundle_published.sh
+
+      - name: Check OMEMO initialization
+        run: ./scripts/check_omemo_init.sh
+
+      - name: Check no unexpected errors
+        run: ./scripts/check_no_errors.sh

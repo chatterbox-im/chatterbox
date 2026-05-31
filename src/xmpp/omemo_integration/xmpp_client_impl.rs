@@ -41,7 +41,7 @@ impl crate::xmpp::XMPPClient {
             carbons_enabled: self.carbons_enabled.clone(),
             iq_registry: self.iq_registry.clone(),
             pubsub_responses: self.pubsub_responses.clone(),
-            shared_self: self.shared_self.clone(),
+            late_state_tx: None,
             typing_tx: self.typing_tx.clone(),
         };
         

@@ -12,7 +12,7 @@ use std::sync::atomic::AtomicBool;
 use tokio_xmpp::Event as XMPPEvent;
 
 use crate::models::{Message, DeliveryStatus, PendingMessage};
-use super::{XMPPClient, custom_ns, SharedClientRef};
+use super::{XMPPClient, custom_ns, LateStateRx};
 use super::{chat_states, delivery_receipts, discovery, presence};
 use super::transport::StanzaTx;
 
@@ -25,7 +25,7 @@ impl XMPPClient {
         msg_tx: mpsc::Sender<Message>,
         pending_receipts: Arc<TokioMutex<std::collections::HashMap<String, PendingMessage>>>,
         iq_registry: Arc<TokioMutex<crate::xmpp::iq_registry::IqResponseRegistry>>,
-        shared_client: SharedClientRef,
+        late_state: LateStateRx,
         online_tx: Option<tokio::sync::oneshot::Sender<()>>,
     ) {
         let mut seen_online_event = false;
@@ -138,27 +138,21 @@ impl XMPPClient {
                             let stanza_tx_clone = stanza_tx.clone();
                             let msg_tx_clone = msg_tx.clone();
                             let pending_receipts_clone = pending_receipts.clone();
-                            let shared_client_clone = shared_client.clone();
                             let iq_registry_clone = iq_registry.clone();
+                            let state = late_state.borrow().clone();
                             
                             debug!("OMEMO message detected - spawning async task for processing");
                             
                             tokio::spawn(async move {
                                 debug!("Inside OMEMO async task - starting processing");
                                 
-                                let (omemo_manager, jid) = match shared_client_clone.lock().await.as_ref() {
-                                    Some(global_client) => {
-                                        let client_guard = global_client.lock().await;
-                                        let manager = client_guard.omemo_manager.clone();
-                                        let jid = client_guard.jid.clone();
-                                        debug!("Retrieved global OMEMO manager: {:?}", manager.is_some());
-                                        (manager, jid)
-                                    },
-                                    None => {
-                                        error!("No global XMPP client available");
-                                        (None, String::new())
-                                    },
-                                };
+                                let omemo_manager = state.omemo_manager.clone();
+                                let jid = state.jid.clone();
+                                
+                                if omemo_manager.is_none() {
+                                    error!("OMEMO manager not available");
+                                    return;
+                                }
                                 
                                 let mut temp_client = XMPPClient {
                                     jid,
@@ -170,7 +164,7 @@ impl XMPPClient {
                                     carbons_enabled: Arc::new(AtomicBool::new(true)),
                                     iq_registry: iq_registry_clone,
                                     pubsub_responses: None,
-                                    shared_self: shared_client_clone.clone(),
+                                    late_state_tx: None,
                                     typing_tx: None,
                                 };
                                 
@@ -190,10 +184,7 @@ impl XMPPClient {
                             }
                             
                             if typing_tx_cache.is_none() {
-                                if let Some(global) = shared_client.lock().await.as_ref() {
-                                    let guard = global.lock().await;
-                                    typing_tx_cache = guard.typing_tx.clone();
-                                }
+                                typing_tx_cache = late_state.borrow().typing_tx.clone();
                             }
                             if let Err(e) = chat_states::handle_chat_state(&stanza, typing_tx_cache.as_ref()) {
                                 error!("Error processing chat state: {}", e);
@@ -215,29 +206,21 @@ impl XMPPClient {
                                 let stanza_tx_clone = stanza_tx.clone();
                                 let msg_tx_clone = msg_tx.clone();
                                 let pending_receipts_clone = pending_receipts.clone();
-                                let shared_client_clone2 = shared_client.clone();
                                 let iq_registry_clone2 = iq_registry.clone();
+                                let state = late_state.borrow().clone();
                                 
                                 tokio::spawn(async move {
-                                    let omemo_manager = match shared_client_clone2.lock().await.as_ref() {
-                                        Some(global_client) => {
-                                            let client_guard = global_client.lock().await;
-                                            client_guard.omemo_manager.clone()
-                                        },
-                                        None => None,
-                                    };
-                                    
                                     let temp_client = XMPPClient {
-                                        jid: String::new(),
+                                        jid: state.jid.clone(),
                                         stanza_tx: Some(stanza_tx_clone),
                                         msg_tx: msg_tx_clone,
                                         pending_receipts: pending_receipts_clone,
                                         connected: true,
-                                        omemo_manager,
+                                        omemo_manager: state.omemo_manager.clone(),
                                         carbons_enabled: Arc::new(AtomicBool::new(true)),
                                         iq_registry: iq_registry_clone2,
                                         pubsub_responses: None,
-                                        shared_self: shared_client_clone2.clone(),
+                                        late_state_tx: None,
                                         typing_tx: None,
                                     };
                                     
@@ -307,41 +290,28 @@ impl XMPPClient {
                             }
                         } else if let Some(_pubsub) = stanza.get_child("pubsub", "http://jabber.org/protocol/pubsub") {
                             if stanza.attr("type") == Some("get") {
-                                let shared_client_clone3 = shared_client.clone();
-                                tokio::spawn(async move {
-                                    let omemo_manager = match shared_client_clone3.lock().await.as_ref() {
-                                        Some(global_client) => {
-                                            let _client_guard = global_client.lock().await;
-                                            _client_guard.omemo_manager.clone()
-                                        },
-                                        None => None,
-                                    };
-                                    if let Some(_manager) = omemo_manager {
-                                        debug!("Received pubsub request, but handling not implemented yet");
-                                    } else {
-                                        warn!("Received pubsub request but OMEMO manager not available");
-                                    }
-                                });
+                                let has_omemo = late_state.borrow().omemo_manager.is_some();
+                                if has_omemo {
+                                    debug!("Received pubsub request, but handling not implemented yet");
+                                } else {
+                                    warn!("Received pubsub request but OMEMO manager not available");
+                                }
                             } else if stanza.attr("type") == Some("result") {
                                 if let Some(stanza_id) = stanza.attr("id") {
                                     debug!("Received pubsub response with ID: {}", stanza_id);
                                     let xml_string = crate::xmpp::omemo_integration::element_to_xml_string(&stanza);
-                                    if let Some(global) = shared_client.lock().await.as_ref() {
-                                        let guard = global.lock().await;
-                                        if let Some(ref responses) = guard.pubsub_responses {
-                                            crate::xmpp::omemo_integration::store_pubsub_response_to(responses, stanza_id.to_string(), xml_string).await;
-                                        }
+                                    let responses = late_state.borrow().pubsub_responses.clone();
+                                    if let Some(ref responses) = responses {
+                                        crate::xmpp::omemo_integration::store_pubsub_response_to(responses, stanza_id.to_string(), xml_string).await;
                                     }
                                 }
                             }
                         } else if stanza.attr("type") == Some("error") {
                             if let Some(stanza_id) = stanza.attr("id") {
                                 let xml_string = crate::xmpp::omemo_integration::element_to_xml_string(&stanza);
-                                if let Some(global) = shared_client.lock().await.as_ref() {
-                                    let guard = global.lock().await;
-                                    if let Some(ref responses) = guard.pubsub_responses {
-                                        crate::xmpp::omemo_integration::store_pubsub_response_to(responses, stanza_id.to_string(), xml_string).await;
-                                    }
+                                let responses = late_state.borrow().pubsub_responses.clone();
+                                if let Some(ref responses) = responses {
+                                    crate::xmpp::omemo_integration::store_pubsub_response_to(responses, stanza_id.to_string(), xml_string).await;
                                 }
                             }
                         }
@@ -354,10 +324,7 @@ impl XMPPClient {
                         our_bare_jid = Some(bound_jid.to_string().split('/').next().unwrap_or("").to_string());
 
                         if typing_tx_cache.is_none() {
-                            if let Some(global) = shared_client.lock().await.as_ref() {
-                                let guard = global.lock().await;
-                                typing_tx_cache = guard.typing_tx.clone();
-                            }
+                            typing_tx_cache = late_state.borrow().typing_tx.clone();
                         }
 
                         if let Some(tx) = online_tx.take() {

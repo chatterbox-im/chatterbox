@@ -20,7 +20,7 @@ impl XMPPClient {
         let stanza_tx = self.stanza_tx.as_ref().ok_or_else(|| anyhow!("Client not initialized"))?.clone();
         
         // Create the PubSub bridge with the XMPP client and shared response map.
-        // The event loop writes responses into self.pubsub_responses via shared_client,
+        // The event loop reads pubsub_responses via the watch channel (LateState),
         // so the bridge and event loop share the same Arc map.
         let responses = crate::xmpp::omemo_integration::new_pubsub_responses();
         self.pubsub_responses = Some(responses.clone());

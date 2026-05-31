@@ -64,7 +64,9 @@ impl XMPPClient {
             let msg_tx_clone = self.msg_tx.clone();
             let pending_receipts_clone = self.pending_receipts.clone();
             let iq_registry_clone = self.iq_registry.clone();
-            let shared_client_clone = self.shared_self.clone();
+            let late_state_rx = self.late_state_tx.as_ref()
+                .expect("late_state_tx must exist on the real client")
+                .subscribe();
             let stanza_tx_clone = transport_handle.stanza_tx.clone();
             let (online_tx, online_rx) = tokio::sync::oneshot::channel();
             tokio::spawn(Self::handle_incoming_messages(
@@ -73,7 +75,7 @@ impl XMPPClient {
                 msg_tx_clone,
                 pending_receipts_clone,
                 iq_registry_clone,
-                shared_client_clone,
+                late_state_rx,
                 Some(online_tx),
             ));
             

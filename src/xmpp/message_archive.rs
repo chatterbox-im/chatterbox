@@ -3,9 +3,11 @@
 
 use anyhow::{anyhow, Result};
 use log::{error, info, warn};
+use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 use base64::Engine;
+use tokio::sync::Mutex as TokioMutex;
 
 use crate::models::{Message, DeliveryStatus};
 use crate::omemo::crypto;
@@ -85,7 +87,7 @@ impl super::XMPPClient {
         info!("Fetching message history with options: {:?}", options);
         
         // Check OMEMO initialization state before proceeding
-        let omemo_initialized = Self::is_omemo_fully_initialized(&self.shared_self).await;
+        let omemo_initialized = Self::is_omemo_fully_initialized(&self.omemo_manager).await;
         if !omemo_initialized {
             info!("OMEMO not fully initialized yet when fetching message history - encrypted messages may not be decrypted");
         }
@@ -331,8 +333,8 @@ impl super::XMPPClient {
                             if has_omemo_v1 || has_omemo_axolotl {
                                 info!("Found OMEMO encrypted message in archive from {}", sender_id);
                                 
-                                if self.omemo_manager.is_some() {
-                                    match Self::decrypt_archived_omemo_message(&message_stanza, &from, &self.shared_self).await {
+                                if let Some(ref mgr) = self.omemo_manager {
+                                    match Self::decrypt_archived_omemo_message(&message_stanza, &from, mgr).await {
                                         Ok(Some(decrypted_content)) => {
                                             archived_messages.push(Message {
                                                 id: message_id,
@@ -506,7 +508,7 @@ impl super::XMPPClient {
     async fn decrypt_archived_omemo_message(
         message_stanza: &xmpp_parsers::Element,
         sender_jid: &str,
-        shared_client: &crate::xmpp::SharedClientRef,
+        omemo_manager: &Arc<TokioMutex<crate::omemo::OmemoManager>>,
     ) -> Result<Option<String>> {
         //debug!("Attempting to decrypt archived OMEMO message from {}", sender_jid);
         
@@ -542,22 +544,8 @@ impl super::XMPPClient {
             }
         };
         
-        // Retrieve our OMEMO manager instance
-        let omemo_manager = match shared_client.lock().await.as_ref() {
-            Some(client) => {
-                let client_guard = client.lock().await;
-                client_guard.get_omemo_manager().map(|arc| arc.clone())
-            },
-            None => None,
-        };
-        
-        let omemo_manager = match omemo_manager {
-            Some(m) => m,
-            None => {
-                warn!("OMEMO manager not initialized");
-                return Err(anyhow!("OMEMO manager not initialized"));
-            }
-        };
+        // Use the provided OMEMO manager instance directly
+        let omemo_manager = omemo_manager.clone();
         
         // Get IV (initialization vector) - try with OMEMO namespace first, then with no namespace
         let iv = match header.get_child("iv", custom_ns::OMEMO)
@@ -708,15 +696,7 @@ impl super::XMPPClient {
     // Use the implementation from mod.rs instead of duplicating it here
 
     // Helper method to check if OMEMO is fully initialized
-    pub async fn is_omemo_fully_initialized(shared_client: &crate::xmpp::SharedClientRef) -> bool {
-        let omemo_manager = match shared_client.lock().await.as_ref() {
-            Some(client) => {
-                let client_guard = client.lock().await;
-                client_guard.get_omemo_manager().map(|arc| arc.clone())
-            },
-            None => None,
-        };
-        
+    pub async fn is_omemo_fully_initialized(omemo_manager: &Option<Arc<TokioMutex<crate::omemo::OmemoManager>>>) -> bool {
         if let Some(omemo_manager) = omemo_manager {
             let manager = omemo_manager.lock().await;
             // Consider OMEMO fully initialized if we have a device ID and bundle published
