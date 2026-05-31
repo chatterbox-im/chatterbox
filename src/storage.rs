@@ -70,13 +70,20 @@ impl MessageStore {
                 recipient_id TEXT NOT NULL,
                 content     TEXT NOT NULL,
                 timestamp   INTEGER NOT NULL,
-                delivery_status INTEGER NOT NULL DEFAULT 0
+                delivery_status INTEGER NOT NULL DEFAULT 0,
+                encrypted   INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE INDEX IF NOT EXISTS idx_messages_contact_ts
                 ON messages (contact_jid, timestamp);
             ",
         )?;
+
+        // Migration: add encrypted column to databases created before this field existed
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE messages ADD COLUMN encrypted INTEGER NOT NULL DEFAULT 0;"
+        );
+
         Ok(())
     }
 
@@ -86,8 +93,8 @@ impl MessageStore {
         let status = msg.delivery_status as i32;
 
         self.conn.execute(
-            "INSERT OR IGNORE INTO messages (id, contact_jid, sender_id, recipient_id, content, timestamp, delivery_status)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT OR IGNORE INTO messages (id, contact_jid, sender_id, recipient_id, content, timestamp, delivery_status, encrypted)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 msg.id,
                 contact_jid,
@@ -96,6 +103,7 @@ impl MessageStore {
                 msg.content,
                 msg.timestamp as i64,
                 status,
+                msg.encrypted as i32,
             ],
         )?;
         Ok(())
@@ -104,7 +112,7 @@ impl MessageStore {
     /// Load the most recent `limit` messages for a contact, ordered oldest-first.
     pub fn load_messages(&self, contact_jid: &str, limit: usize) -> Result<Vec<Message>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, sender_id, recipient_id, content, timestamp, delivery_status
+            "SELECT id, sender_id, recipient_id, content, timestamp, delivery_status, encrypted
              FROM messages
              WHERE contact_jid = ?1
              ORDER BY timestamp DESC
@@ -119,7 +127,7 @@ impl MessageStore {
                 content: row.get(3)?,
                 timestamp: row.get::<_, i64>(4)? as u64,
                 delivery_status: Self::status_from_i32(row.get(5)?),
-                encrypted: false, // Legacy messages from DB don't have this info
+                encrypted: row.get::<_, i32>(6).unwrap_or(0) != 0,
             })
         })?;
 
