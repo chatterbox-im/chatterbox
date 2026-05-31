@@ -2,7 +2,7 @@
 // https://xmpp.org/extensions/xep-0384.html
 
 use anyhow::{anyhow, Result};
-use log::{info, error, debug};
+use log::{info, error, debug, warn};
 use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
 use async_trait::async_trait;
@@ -190,12 +190,24 @@ impl XmppPubSubBridge {
                         // Log the error details like Conversations does
                         let error_xml = element_to_xml_string(&response);
                         let is_precondition_not_met = error_xml.contains("precondition-not-met");
-                        error!(
-                            "Server returned error for device list publish (publish-options: {}, precondition-not-met: {}): {}",
-                            with_publish_options,
-                            is_precondition_not_met,
-                            &error_xml[..error_xml.len().min(500)]
-                        );
+                        // Use warn (not error) when publish-options are set, since we'll
+                        // retry without them — this is expected on servers where the node
+                        // already exists with a different access_model.
+                        if with_publish_options {
+                            warn!(
+                                "Server returned error for device list publish (publish-options: {}, precondition-not-met: {}): {}",
+                                with_publish_options,
+                                is_precondition_not_met,
+                                &error_xml[..error_xml.len().min(500)]
+                            );
+                        } else {
+                            error!(
+                                "Server returned error for device list publish (publish-options: {}, precondition-not-met: {}): {}",
+                                with_publish_options,
+                                is_precondition_not_met,
+                                &error_xml[..error_xml.len().min(500)]
+                            );
+                        }
                         Err(anyhow!("Server rejected device list publish"))
                     }
                     other => {
