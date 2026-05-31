@@ -44,6 +44,7 @@ pub struct ChatUI {
     connection_status: bool, // Track XMPP server connection status
     message_scroll_offset: Option<usize>, // None = auto-scroll to bottom, Some(n) = n lines scrolled up from bottom
     unread_contacts: HashSet<String>, // Contacts with unread messages
+    pub history_loaded_contacts: HashSet<String>, // Contacts whose history has been loaded
 }
 
 // Add this new struct to represent key confirmation data
@@ -110,6 +111,7 @@ impl ChatUI {
             connection_status: false, // Initialize connection status to disconnected
             message_scroll_offset: None, // Auto-scroll to bottom by default
             unread_contacts: HashSet::new(), // No unread messages initially
+            history_loaded_contacts: HashSet::new(), // No history loaded yet
         }
     }
 

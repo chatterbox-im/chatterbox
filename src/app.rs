@@ -809,6 +809,8 @@ async fn handle_user_command(
         chat_ui.clear_messages();
         terminal.draw(|f| chat_ui.draw(f))?;
 
+        let first_view = !chat_ui.history_loaded_contacts.contains(recipient);
+
         // Load from local store first (instant)
         let local_count = if let Some(s) = store {
             match s.load_messages(recipient, 100) {
@@ -829,16 +831,20 @@ async fn handle_user_command(
             0
         };
 
-        if local_count > 0 {
-            chat_ui.add_message(create_system_message(
-                recipient,
-                &format!("Loaded {} messages from local history", local_count),
-            ));
-        }
+        if first_view {
+            if local_count > 0 {
+                chat_ui.add_message(create_system_message(
+                    recipient,
+                    &format!("Loaded {} messages from local history", local_count),
+                ));
+            }
 
-        // MAM catch-up for messages newer than what we have locally
-        let newest_ts = store.and_then(|s| s.newest_timestamp(recipient).ok().flatten());
-        load_message_history_with_catchup(chat_ui, xmpp_client, recipient, disable_mam, newest_ts);
+            // MAM catch-up for messages newer than what we have locally
+            let newest_ts = store.and_then(|s| s.newest_timestamp(recipient).ok().flatten());
+            load_message_history_with_catchup(chat_ui, xmpp_client, recipient, disable_mam, newest_ts);
+
+            chat_ui.history_loaded_contacts.insert(recipient.to_string());
+        }
 
         terminal.draw(|f| chat_ui.draw(f))?;
         return Ok(());
