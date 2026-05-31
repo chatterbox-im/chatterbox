@@ -33,6 +33,7 @@ impl XMPPClient {
             crate::xmpp::omemo_integration::XmppPubSubBridge::new(
                 stanza_tx,
                 responses,
+                self.iq_registry.clone(),
             )
         );
         

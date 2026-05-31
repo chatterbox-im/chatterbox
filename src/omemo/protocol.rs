@@ -1344,4 +1344,41 @@ mod tests {
         let payload_bytes = B64.decode(payload.text()).unwrap();
         assert_eq!(payload_bytes, vec![0xCC; 48]);
     }
+
+    #[test]
+    fn test_sign_verify_pre_key_roundtrip() {
+        // This test exercises the EXACT same path as production:
+        // 1. Generate identity key pair (raw 32-byte keys)
+        // 2. Generate SPK pair (raw 32-byte keys)
+        // 3. Sign SPK public key with identity private key
+        // 4. Encode keys with 0x05 prefix (as stored in bundle XML)
+        // 5. Verify using the 33-byte prefixed keys (as parsed from bundle)
+        //
+        // This catches any format mismatch between sign and verify paths.
+        for i in 0..20 {
+            let identity_kp = X3DHProtocol::generate_key_pair().unwrap();
+            let spk_kp = X3DHProtocol::generate_key_pair().unwrap();
+
+            // Sign: uses raw 32-byte private key and raw 32-byte SPK public
+            let signature = X3DHProtocol::sign_pre_key(
+                &identity_kp.private_key,
+                &spk_kp.public_key,
+            ).unwrap();
+            assert_eq!(signature.len(), 64, "Signature should be 64 bytes");
+
+            // Simulate bundle encoding: identity public and SPK public get 0x05 prefix
+            let identity_public_33 = crypto::encode_public_key_with_prefix(&identity_kp.public_key);
+            let spk_public_33 = crypto::encode_public_key_with_prefix(&spk_kp.public_key);
+            assert_eq!(identity_public_33.len(), 33);
+            assert_eq!(spk_public_33.len(), 33);
+
+            // Verify: uses 33-byte prefixed keys (as parsed from bundle XML)
+            let valid = X3DHProtocol::verify_pre_key(
+                &identity_public_33,
+                &spk_public_33,
+                &signature,
+            ).unwrap();
+            assert!(valid, "SPK signature verification failed on iteration {} (key format mismatch between sign and verify)", i);
+        }
+    }
 }

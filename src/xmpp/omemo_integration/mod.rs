@@ -2,7 +2,7 @@
 // https://xmpp.org/extensions/xep-0384.html
 
 use anyhow::{anyhow, Result};
-use log::info;
+use log::{info, error, debug};
 use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
 use async_trait::async_trait;
@@ -14,6 +14,7 @@ use crate::omemo::OmemoManager;
 use crate::omemo::device_id::DeviceId;
 use crate::omemo::OmemoPubSub;
 use crate::xmpp::transport::StanzaTx;
+use crate::xmpp::iq_registry::IqResponseRegistry;
 
 mod xmpp_client_impl;
 mod pubsub;
@@ -60,11 +61,12 @@ pub fn new_pubsub_responses() -> PubSubResponses {
 pub struct XmppPubSubBridge {
     pub(super) stanza_tx: StanzaTx,
     pub(super) responses: PubSubResponses,
+    pub(super) iq_registry: Arc<TokioMutex<IqResponseRegistry>>,
 }
 
 impl XmppPubSubBridge {
-    pub fn new(stanza_tx: StanzaTx, responses: PubSubResponses) -> Self {
-        Self { stanza_tx, responses }
+    pub fn new(stanza_tx: StanzaTx, responses: PubSubResponses, iq_registry: Arc<TokioMutex<IqResponseRegistry>>) -> Self {
+        Self { stanza_tx, responses, iq_registry }
     }
 }
 
@@ -83,7 +85,110 @@ impl OmemoPubSub for XmppPubSubBridge {
     }
 
     async fn publish_device_list(&self, device_ids: &[DeviceId]) -> Result<()> {
-        publish_pubsub_item_device_list_with_client(&self.stanza_tx, device_ids).await
+        use crate::xmpp::transport;
+        use uuid::Uuid;
+        use tokio::time::Duration;
+
+        let iq_id = Uuid::new_v4().to_string();
+
+        // Register for the IQ response BEFORE sending
+        let rx = {
+            let mut registry = self.iq_registry.lock().await;
+            registry.register(iq_id.clone())
+        };
+
+        // Build the device list stanza
+        let mut list_element = xmpp_parsers::Element::builder("list", "eu.siacs.conversations.axolotl").build();
+        for device_id in device_ids {
+            let device_element = xmpp_parsers::Element::builder("device", "eu.siacs.conversations.axolotl")
+                .attr("id", &device_id.to_string())
+                .build();
+            list_element.append_child(device_element);
+        }
+
+        let item_element = xmpp_parsers::Element::builder("item", "http://jabber.org/protocol/pubsub")
+            .attr("id", "current")
+            .append(list_element)
+            .build();
+
+        let publish_element = xmpp_parsers::Element::builder("publish", "http://jabber.org/protocol/pubsub")
+            .attr("node", "eu.siacs.conversations.axolotl.devicelist")
+            .append(item_element)
+            .build();
+
+        // Add publish-options for open access (required for OMEMO interop)
+        let publish_options = xmpp_parsers::Element::builder("publish-options", "http://jabber.org/protocol/pubsub")
+            .append(
+                xmpp_parsers::Element::builder("x", "jabber:x:data")
+                    .attr("type", "submit")
+                    .append(
+                        xmpp_parsers::Element::builder("field", "jabber:x:data")
+                            .attr("var", "FORM_TYPE")
+                            .attr("type", "hidden")
+                            .append({
+                                let mut v = xmpp_parsers::Element::builder("value", "jabber:x:data").build();
+                                v.append_text_node("http://jabber.org/protocol/pubsub#publish-options");
+                                v
+                            })
+                            .build()
+                    )
+                    .append(
+                        xmpp_parsers::Element::builder("field", "jabber:x:data")
+                            .attr("var", "pubsub#access_model")
+                            .append({
+                                let mut v = xmpp_parsers::Element::builder("value", "jabber:x:data").build();
+                                v.append_text_node("open");
+                                v
+                            })
+                            .build()
+                    )
+                    .build()
+            )
+            .build();
+
+        let pubsub_element = xmpp_parsers::Element::builder("pubsub", "http://jabber.org/protocol/pubsub")
+            .append(publish_element)
+            .append(publish_options)
+            .build();
+
+        let iq = xmpp_parsers::Element::builder("iq", "jabber:client")
+            .attr("type", "set")
+            .attr("id", &iq_id)
+            .append(pubsub_element)
+            .build();
+
+        info!("Sending device list publish stanza with ID: {}", iq_id);
+
+        transport::send_stanza(&self.stanza_tx, iq)
+            .map_err(|e| anyhow!("Failed to send device list publish stanza: {}", e))?;
+
+        // Wait for server acknowledgment
+        match tokio::time::timeout(Duration::from_secs(10), rx).await {
+            Ok(Ok(response)) => {
+                match response.attr("type") {
+                    Some("result") => {
+                        debug!("Device list publish confirmed by server (ID: {})", iq_id);
+                        Ok(())
+                    }
+                    Some("error") => {
+                        error!("Server returned error for device list publish");
+                        Err(anyhow!("Server rejected device list publish"))
+                    }
+                    other => {
+                        debug!("Unexpected IQ type {:?} for device list publish", other);
+                        Ok(()) // Treat as success
+                    }
+                }
+            }
+            Ok(Err(_)) => {
+                error!("IQ response channel closed while waiting for device list publish ack");
+                Err(anyhow!("Channel closed waiting for device list publish response"))
+            }
+            Err(_) => {
+                error!("Timeout waiting for device list publish acknowledgment (ID: {})", iq_id);
+                Err(anyhow!("Timeout waiting for device list publish acknowledgment"))
+            }
+        }
     }
 }
 
