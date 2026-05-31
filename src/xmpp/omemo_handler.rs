@@ -228,6 +228,8 @@ impl XMPPClient {
                 }
                 
                 // Get payload - children inherit namespace from parent encrypted element
+                // Note: key-transport-only messages (no payload) are valid OMEMO messages
+                // used for silent session establishment. We process them but don't show them.
                 let payload = match encrypted.get_child("payload", "")
                     .or_else(|| encrypted.get_child("payload", custom_ns::OMEMO)) {
                     Some(payload_elem) => {
@@ -235,7 +237,7 @@ impl XMPPClient {
                             text => {
                                 let payload_base64 = text;
                                 match base64::engine::general_purpose::STANDARD.decode(payload_base64) {
-                                    Ok(payload_bytes) => payload_bytes,
+                                    Ok(payload_bytes) => Some(payload_bytes),
                                     Err(e) => {
                                         error!("Failed to decode payload: {}", e);
                                         return Err(anyhow!("Failed to decode payload: {}", e));
@@ -245,10 +247,24 @@ impl XMPPClient {
                         }
                     },
                     None => {
-                        error!("Missing payload in OMEMO message");
-                        return Err(anyhow!("Missing payload in OMEMO message"));
+                        debug!("Key-transport OMEMO message (no payload) from {}:{}", from, sender_device_id);
+                        None
                     }
                 };
+                
+                // For key-transport messages (no payload), just process the key exchange
+                if payload.is_none() {
+                    let mut omemo_manager_guard = omemo_manager.lock().await;
+                    debug!("Processing key-transport message from {}:{}", from, sender_device_id);
+                    // Process the PreKey message to establish/advance the session
+                    if let Some(our_key) = encrypted_keys.get(&omemo_manager_guard.get_device_id()) {
+                        match omemo_manager_guard.decrypt_message_key(from.to_string(), sender_device_id, our_key).await {
+                            Ok(_) => debug!("Key-transport message processed successfully from {}:{}", from, sender_device_id),
+                            Err(e) => warn!("Failed to process key-transport message from {}:{}: {}", from, sender_device_id, e),
+                        }
+                    }
+                    return Ok(());
+                }
                 
                 // Create the OMEMO message
                 let omemo_message = crate::omemo::protocol::OmemoMessage {
@@ -256,7 +272,7 @@ impl XMPPClient {
                     ratchet_key: vec![],
                     previous_counter: 0,
                     counter: 0,
-                    ciphertext: payload,
+                    ciphertext: payload.unwrap(),
                     mac: vec![],
                     iv,
                     encrypted_keys,

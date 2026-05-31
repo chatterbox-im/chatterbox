@@ -284,7 +284,12 @@ impl XMPPClient {
                         }
                         
                         if let Some(_query) = stanza.get_child("query", "http://jabber.org/protocol/disco#info") {
-                            if let Err(e) = service_discovery.handle_disco_response(&stanza).await {
+                            if stanza.attr("type") == Some("get") {
+                                // Respond to incoming disco#info queries with our capabilities
+                                if let Err(e) = service_discovery.respond_to_disco_info_query(&stanza) {
+                                    warn!("Failed to respond to disco#info query: {}", e);
+                                }
+                            } else if let Err(e) = service_discovery.handle_disco_response(&stanza).await {
                                 warn!("Failed to process service discovery info response: {}", e);
                             }
                         } else if let Some(_query) = stanza.get_child("query", "http://jabber.org/protocol/disco#items") {

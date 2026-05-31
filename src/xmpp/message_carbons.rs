@@ -451,6 +451,7 @@ impl super::XMPPClient {
         };
         
         // Get the payload (encrypted message content)
+        // Key-transport messages (no payload) are valid but contain no visible content
         let payload = match encrypted.get_child("payload", custom_ns::OMEMO).or_else(|| encrypted.get_child("payload", "")) {
             Some(payload_elem) => {
                 let payload_base64 = payload_elem.text();
@@ -463,8 +464,8 @@ impl super::XMPPClient {
                 }
             },
             None => {
-                error!("Missing payload in carbon OMEMO message");
-                return Err(anyhow!("Missing payload in message"));
+                debug!("Key-transport OMEMO carbon message (no payload) - skipping");
+                return Ok(());
             }
         };
         

@@ -227,6 +227,9 @@ impl OmemoManager {
         let content = String::from_utf8(plaintext)
             .map_err(|e| OmemoError::ProtocolError(format!("Failed to decode message: {}", e)))?;
         
+        // Strip OMEMO padding (trailing space characters per XEP-0384 §13.4)
+        let content = content.trim_end().to_string();
+        
         info!("Message decrypted successfully from {}:{}", sender, device_id);
         
         Ok(content)

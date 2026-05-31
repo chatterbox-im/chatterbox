@@ -2,7 +2,7 @@
 // https://xmpp.org/extensions/xep-0313.html
 
 use anyhow::{anyhow, Result};
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
@@ -628,13 +628,14 @@ impl super::XMPPClient {
         };
         
         // Get the payload (encrypted message content) - try both OMEMO namespaces
+        // Key-transport messages (no payload) are valid but contain no visible content
         let payload = match encrypted.get_child("payload", custom_ns::OMEMO)
             .or_else(|| encrypted.get_child("payload", custom_ns::OMEMO_V1))
             .or_else(|| encrypted.get_child("payload", "")) {
             Some(payload_elem) => {
                 let payload_base64 = payload_elem.text();
                 match base64::engine::general_purpose::STANDARD.decode(payload_base64) {
-                    Ok(decoded) => decoded,
+                    Ok(decoded) => Some(decoded),
                     Err(e) => {
                         error!("Failed to decode payload: {}", e);
                         return Err(anyhow!("Failed to decode payload: {}", e));
@@ -642,8 +643,8 @@ impl super::XMPPClient {
                 }
             },
             None => {
-                error!("Missing payload in OMEMO message");
-                return Err(anyhow!("Missing payload in OMEMO message"));
+                debug!("Key-transport OMEMO message in MAM (no payload) - skipping");
+                return Ok(None);
             }
         };
         
@@ -672,7 +673,7 @@ impl super::XMPPClient {
                     ratchet_key: vec![], // This will be handled by the session
                     previous_counter: 0,  // This will be handled by the session
                     counter: 0,           // This will be handled by the session
-                    ciphertext: payload,
+                    ciphertext: payload.unwrap(),
                     mac: crypto::sha256_hash(&key)[..16].to_vec(),
                     iv,
                     encrypted_keys: {

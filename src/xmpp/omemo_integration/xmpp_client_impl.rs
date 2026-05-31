@@ -541,20 +541,12 @@ impl crate::xmpp::XMPPClient {
         }
     }
 
-    /// Publish device list to the server
+    /// Publish device list to the server (fetches existing list and merges our device ID)
     pub async fn publish_device_list(&self) -> Result<()> {
         if let Some(omemo_manager) = &self.omemo_manager {
-            // Get our device ID
-            let device_id = {
-                let manager = omemo_manager.lock().await;
-                manager.get_device_id()
-            };
-            
-            // Create a device list with our device ID
-            let device_ids = vec![device_id];
-            
-            // Publish the device list
-            self.publish_omemo_devicelist(&device_ids).await
+            let manager = omemo_manager.lock().await;
+            manager.ensure_device_list_published().await
+                .map_err(|e| anyhow!("Failed to publish device list: {}", e))
         } else {
             Err(anyhow!("OMEMO manager not initialized"))
         }

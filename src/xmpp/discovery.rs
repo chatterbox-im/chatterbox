@@ -278,6 +278,53 @@ impl ServiceDiscovery {
         }
     }
 
+    /// Returns the list of features this client supports (used for disco#info responses)
+    fn supported_features() -> Vec<&'static str> {
+        vec![
+            "eu.siacs.conversations.axolotl",
+            "eu.siacs.conversations.axolotl.devicelist+notify",
+            "http://jabber.org/protocol/chatstates",
+            "urn:xmpp:receipts",
+            "urn:xmpp:carbons:2",
+            "http://jabber.org/protocol/disco#info",
+            "http://jabber.org/protocol/disco#items",
+            "urn:xmpp:mam:2",
+            "http://jabber.org/protocol/pubsub",
+        ]
+    }
+
+    /// Responds to an incoming disco#info query (type="get") with our capabilities
+    pub fn respond_to_disco_info_query(&self, stanza: &Element) -> Result<()> {
+        let from = match stanza.attr("from") {
+            Some(f) => f,
+            None => return Ok(()),
+        };
+        let id = stanza.attr("id").unwrap_or("");
+
+        let mut result_iq = Element::builder("iq", "jabber:client").build();
+        result_iq.set_attr("type", "result");
+        result_iq.set_attr("to", from);
+        result_iq.set_attr("id", id);
+
+        let mut query = Element::builder("query", "http://jabber.org/protocol/disco#info").build();
+
+        let identity = Element::builder("identity", "")
+            .attr("category", "client")
+            .attr("type", "console")
+            .attr("name", "Chatterbox")
+            .build();
+        query.append_child(identity);
+
+        for feature in Self::supported_features() {
+            let feature_elem = Element::builder("feature", "").attr("var", feature).build();
+            query.append_child(feature_elem);
+        }
+
+        result_iq.append_child(query);
+        transport::send_stanza(&self.stanza_tx, result_iq)?;
+        Ok(())
+    }
+
     /// Advertises supported features for this client
     pub async fn advertise_features(&self) -> Result<()> {
         let mut iq = Element::builder("iq", "jabber:client").build();
@@ -294,29 +341,7 @@ impl ServiceDiscovery {
             .build();
         query.append_child(identity);
 
-        // Add supported features
-        let features = vec![
-            // Core XMPP and OMEMO
-            "eu.siacs.conversations.axolotl", // OMEMO encryption (legacy namespace that actually works)
-            "eu.siacs.conversations.axolotl", // Legacy OMEMO namespace for compatibility
-            
-            // Chat features
-            "http://jabber.org/protocol/chatstates", // Chat states
-            "urn:xmpp:receipts",  // Message receipts
-            "urn:xmpp:carbons:2", // Message carbons
-            
-            // Service discovery
-            "http://jabber.org/protocol/disco#info",
-            "http://jabber.org/protocol/disco#items",
-            
-            // Message archive management
-            "urn:xmpp:mam:2",     // Message Archive Management
-            
-            // PubSub related
-            "http://jabber.org/protocol/pubsub", // PubSub core
-        ];
-
-        for feature in features {
+        for feature in Self::supported_features() {
             let feature_elem = Element::builder("feature", "").attr("var", feature).build();
             query.append_child(feature_elem);
         }

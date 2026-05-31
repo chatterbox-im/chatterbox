@@ -55,28 +55,14 @@ pub async fn handle_omemo_message(
     Ok(plaintext)
 }
 
-/// Publish device list to the XMPP server
+/// Publish device list to the XMPP server (fetches existing list and merges our device ID)
 pub async fn publish_device_list(
     manager: Arc<TokioMutex<OmemoManager>>,
-    xmpp_client: &impl XmppClient,
+    _xmpp_client: &impl XmppClient,
 ) -> Result<()> {
-    // Get the device list XML
-    let xml = {
-        let manager_guard = manager.lock().await;
-        manager_guard.get_device_list_xml()?
-    };
-    
-    // Publish to the XMPP server
-    xmpp_client.publish_pubsub_item(
-        None,
-        &format!("{}.devices", OMEMO_NAMESPACE),
-        "current",
-        &xml,
-    ).await?;
-    
-    info!("Device list published successfully");
-    
-    Ok(())
+    let manager_guard = manager.lock().await;
+    manager_guard.ensure_device_list_published().await
+        .map_err(|e| anyhow::anyhow!("Failed to publish device list: {}", e))
 }
 
 /// Publish key bundle to the XMPP server
