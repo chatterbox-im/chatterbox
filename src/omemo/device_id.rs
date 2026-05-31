@@ -385,6 +385,29 @@ pub fn load_or_generate_identity_key() -> Result<(KeyPair, bool)> {
     }
 }
 
+/// Load or generate an identity key at a specific path.
+/// Used when per-instance storage overrides the global path.
+pub fn load_or_generate_identity_key_at(path: &std::path::Path) -> Result<(KeyPair, bool)> {
+    if path.exists() {
+        let content = fs::read_to_string(path)?;
+        match deserialize_key_pair(&content) {
+            Ok(key_pair) => return Ok((key_pair, false)),
+            Err(e) => {
+                warn!("Error parsing Identity Key from {}: {}", path.display(), e);
+            }
+        }
+    }
+    // Generate and save
+    let key_pair = generate_identity_key()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let serialized = serialize_key_pair(&key_pair);
+    let mut file = fs::File::create(path)?;
+    write!(file, "{}", serialized)?;
+    Ok((key_pair, true))
+}
+
 /// Generate a new Identity Key pair and save it to persistent storage
 fn generate_and_save_identity_key() -> Result<KeyPair> {
     let key_pair = generate_identity_key()?;

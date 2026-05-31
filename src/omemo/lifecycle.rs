@@ -30,7 +30,11 @@ impl OmemoManager {
         }
         
         // No bundle in storage, need to generate a new one
-        let identity_key_pair = match crate::omemo::device_id::load_or_generate_identity_key() {
+        let identity_key_path = {
+            let storage_guard = self.storage.lock().await;
+            storage_guard.identity_key_path()
+        };
+        let identity_key_pair = match crate::omemo::device_id::load_or_generate_identity_key_at(&identity_key_path) {
             Ok((key_pair, was_generated)) => {
                 if was_generated {
                     info!("Generated new persistent identity key for device {}", self.device_id);

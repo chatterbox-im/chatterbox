@@ -211,6 +211,11 @@ impl OmemoStorage {
     pub fn get_device_id(&self) -> DeviceId {
         self.device_id
     }
+
+    /// Get the path to the identity key file within this storage's directory
+    pub fn identity_key_path(&self) -> PathBuf {
+        self.base_path.join("identity_key")
+    }
     
     /// Store a device list
     pub fn save_device_list(&self, entry: &DeviceListEntry) -> Result<()> {

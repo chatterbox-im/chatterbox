@@ -202,7 +202,8 @@ impl OmemoManager {
     ) -> Result<Self, OmemoError> {
         let storage = Arc::new(Mutex::new(storage));
         
-        // Determine the device ID
+        // Determine the device ID — prefer the one already loaded by OmemoStorage
+        // (which respects per-instance paths), falling back to the global path.
         let device_id = match device_id {
             Some(id) => {
                 info!("Using explicitly provided device ID: {}", id);
@@ -218,40 +219,25 @@ impl OmemoManager {
                 id
             },
             None => {
-                match device_id::load_or_generate_device_id() {
-                    Ok((id, was_generated)) => {
-                        if was_generated {
-                            info!("Generated new device ID: {}", id);
-                        } else {
-                            info!("Loaded existing device ID: {}", id);
-                        }
-                        
-                        let mut storage_guard = storage.lock().await;
-                        storage_guard.store_device_id(id)
-                            .map_err(|e| OmemoError::StorageError(e.to_string()))?;
-                        drop(storage_guard);
-                        
-                        id
-                    },
-                    Err(e) => {
-                        warn!("Failed to load/generate device ID from file: {}, falling back to database", e);
-                        
-                        let mut storage_guard = storage.lock().await;
-                        let db_device_id = storage_guard.get_device_id();
-                        
-                        if db_device_id > 0 {
-                            info!("Using existing device ID from database: {}", db_device_id);
-                            db_device_id
-                        } else {
-                            let id = device_id::generate_device_id();
-                            info!("Generated new device ID: {}", id);
-                            
-                            storage_guard.store_device_id(id)
-                                .map_err(|e| OmemoError::StorageError(e.to_string()))?;
-                            
-                            id
-                        }
-                    }
+                // Use the device ID from OmemoStorage (already loaded from the correct path)
+                let storage_guard = storage.lock().await;
+                let storage_device_id = storage_guard.get_device_id();
+                drop(storage_guard);
+
+                if storage_device_id > 0 {
+                    info!("Loaded existing device ID: {}", storage_device_id);
+                    storage_device_id
+                } else {
+                    // Storage had no device ID — generate a new one
+                    let id = device_id::generate_device_id();
+                    info!("Generated new device ID: {}", id);
+
+                    let mut storage_guard = storage.lock().await;
+                    storage_guard.store_device_id(id)
+                        .map_err(|e| OmemoError::StorageError(e.to_string()))?;
+                    drop(storage_guard);
+
+                    id
                 }
             }
         };
