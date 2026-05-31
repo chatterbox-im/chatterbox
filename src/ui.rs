@@ -11,7 +11,7 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, Paragraph, Clear, ListState},
     Frame,
 };
-use std::{io, time::Duration, collections::HashMap};
+use std::{io, time::Duration, collections::{HashMap, HashSet}};
 use tui_input::{backend::crossterm::EventHandler, Input};
 use uuid::Uuid;
 use textwrap::wrap;
@@ -43,6 +43,7 @@ pub struct ChatUI {
     resources: HashMap<String, Vec<String>>, // Map of base JID -> resource JIDs
     connection_status: bool, // Track XMPP server connection status
     message_scroll_offset: Option<usize>, // None = auto-scroll to bottom, Some(n) = n lines scrolled up from bottom
+    unread_contacts: HashSet<String>, // Contacts with unread messages
 }
 
 // Add this new struct to represent key confirmation data
@@ -108,6 +109,7 @@ impl ChatUI {
             resources: HashMap::new(), // Initialize resources map
             connection_status: false, // Initialize connection status to disconnected
             message_scroll_offset: None, // Auto-scroll to bottom by default
+            unread_contacts: HashSet::new(), // No unread messages initially
         }
     }
 
@@ -127,6 +129,12 @@ impl ChatUI {
     }
 
     pub fn add_message(&mut self, message: Message) {
+        // Mark contact as unread if message is from someone other than the active contact
+        let sender_base = Self::get_base_jid(&message.sender_id);
+        if sender_base != "me" && sender_base != "system" && sender_base != self.contact {
+            self.unread_contacts.insert(sender_base);
+        }
+
         // First check if we already have this message by ID
         if let Some(idx) = self.messages.iter().position(|m| m.id == message.id) {
             // Update the existing message's status
@@ -543,8 +551,9 @@ impl ChatUI {
                                     let contact_changed = new_contact != self.contact;
                                     self.contact = new_contact;
                                     
-                                    // Signal contact change for message history loading
+                                    // Clear unread status for the newly selected contact
                                     if contact_changed {
+                                        self.unread_contacts.remove(&self.contact);
                                         return Ok(Some((self.contact.clone(), String::from("__CONTACT_CHANGED__"))));
                                     }
                                 }
@@ -558,8 +567,9 @@ impl ChatUI {
                                     let contact_changed = new_contact != self.contact;
                                     self.contact = new_contact;
                                     
-                                    // Signal contact change for message history loading
+                                    // Clear unread status for the newly selected contact
                                     if contact_changed {
+                                        self.unread_contacts.remove(&self.contact);
                                         return Ok(Some((self.contact.clone(), String::from("__CONTACT_CHANGED__"))));
                                     }
                                 }
@@ -691,7 +701,12 @@ impl ChatUI {
                 } else {
                     format!("  {}{}{}", status_indicator, c, resources_text)
                 };
-                ListItem::new(content)
+                let style = if self.unread_contacts.contains(c) {
+                    Style::default().add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                ListItem::new(content).style(style)
             })
             .collect();
 
