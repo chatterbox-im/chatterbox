@@ -17,7 +17,7 @@ use chatterbox::xmpp::XMPPClient;
 #[derive(Parser, Debug)]
 #[command(
     author,
-    version,
+    version = concat!(env!("CARGO_PKG_VERSION"), " (#", env!("GIT_COMMIT_HASH"), ")"),
     about = "Chatterbox: A CLI XMPP chat client with OMEMO encryption.",
     long_about = "Chatterbox is a command-line chat client for XMPP with OMEMO encryption support.\n\n\
     Optional parameters:\n\
