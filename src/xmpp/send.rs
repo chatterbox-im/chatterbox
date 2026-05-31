@@ -164,7 +164,7 @@ impl XMPPClient {
             content: content.to_string(),
             timestamp: chrono::Utc::now().timestamp() as u64,
             delivery_status: DeliveryStatus::Sent,
-            encrypted: false,
+            encrypted: true,
         };
         
         if let Err(e) = self.msg_tx.send(message).await {
