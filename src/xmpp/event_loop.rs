@@ -166,6 +166,7 @@ impl XMPPClient {
                                     pubsub_responses: None,
                                     late_state_tx: None,
                                     typing_tx: None,
+                                    omemo_dir: None,
                                 };
                                 
                                 debug!("Calling handle_message_encrypted method");
@@ -222,6 +223,7 @@ impl XMPPClient {
                                         pubsub_responses: None,
                                         late_state_tx: None,
                                         typing_tx: None,
+                                        omemo_dir: None,
                                     };
                                     
                                     if let Err(e) = temp_client.process_carbon(&stanza_clone).await {

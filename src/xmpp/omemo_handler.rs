@@ -37,8 +37,12 @@ impl XMPPClient {
         );
         
         // Create the OMEMO manager
+        let storage = match &self.omemo_dir {
+            Some(dir) => crate::omemo::storage::OmemoStorage::new(Some(dir.clone()))?,
+            None => crate::omemo::storage::OmemoStorage::new_default()?,
+        };
         let omemo_manager = match crate::omemo::OmemoManager::new(
-            crate::omemo::storage::OmemoStorage::new_default()?,
+            storage,
             self.jid.clone(),
             None,
             pubsub_bridge,

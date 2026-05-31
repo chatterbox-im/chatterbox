@@ -10,6 +10,7 @@
 use anyhow::Result;
 use log::{info, error};
 use tokio::time::{timeout, Duration};
+use tempfile::TempDir;
 
 use chatterbox::models::Message;
 use chatterbox::xmpp::XMPPClient;
@@ -56,14 +57,22 @@ async fn test_bidirectional_omemo_exchange() -> Result<()> {
     let jid_a = format!("{}@{}", user_a, server);
     let jid_b = format!("{}@{}", user_b, server);
 
+    // Create separate OMEMO storage directories so each client gets a unique device ID
+    let omemo_dir_a = TempDir::new()?;
+    let omemo_dir_b = TempDir::new()?;
+    info!("OMEMO dir A: {:?}", omemo_dir_a.path());
+    info!("OMEMO dir B: {:?}", omemo_dir_b.path());
+
     // --- Connect both clients ---
     info!("Connecting client A ({})...", user_a);
     let (mut client_a, mut rx_a) = XMPPClient::new();
+    client_a.omemo_dir = Some(omemo_dir_a.path().to_path_buf());
     client_a.connect(&server, &user_a, &pass_a).await?;
     info!("Client A connected");
 
     info!("Connecting client B ({})...", user_b);
     let (mut client_b, mut rx_b) = XMPPClient::new();
+    client_b.omemo_dir = Some(omemo_dir_b.path().to_path_buf());
     client_b.connect(&server, &user_b, &pass_b).await?;
     info!("Client B connected");
 

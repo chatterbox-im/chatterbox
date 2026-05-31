@@ -87,6 +87,8 @@ pub struct XMPPClient {
     pub(crate) late_state_tx: Option<LateStateTx>,
     /// Typing notification sender — passed to the event loop for chat state notifications.
     pub typing_tx: Option<mpsc::Sender<(String, crate::xmpp::chat_states::TypingStatus)>>,
+    /// Per-instance OMEMO storage directory override (for tests with multiple clients).
+    pub omemo_dir: Option<std::path::PathBuf>,
 }
 
 // Enum for representing client state
@@ -118,6 +120,7 @@ impl XMPPClient {
             pubsub_responses: None,
             late_state_tx: Some(late_state_tx),
             typing_tx: None,
+            omemo_dir: None,
         }, msg_rx)
     }
 
@@ -193,6 +196,7 @@ impl XMPPClient {
             pubsub_responses: self.pubsub_responses.clone(),
             late_state_tx: None, // clones don't publish state
             typing_tx: self.typing_tx.clone(),
+            omemo_dir: self.omemo_dir.clone(),
         }
     }
 

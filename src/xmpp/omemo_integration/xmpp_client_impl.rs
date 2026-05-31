@@ -43,6 +43,7 @@ impl crate::xmpp::XMPPClient {
             pubsub_responses: self.pubsub_responses.clone(),
             late_state_tx: None,
             typing_tx: self.typing_tx.clone(),
+            omemo_dir: self.omemo_dir.clone(),
         };
         
         match temp_client.send_encrypted_message(recipient, plaintext).await {
