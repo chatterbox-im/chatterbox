@@ -61,33 +61,38 @@ async fn main() -> Result<()> {
     let args = Args::parse();
 
     // Determine the log file path based on --omemo-dir
-    let log_file_path = match &args.omemo_dir {
-        Some(dir) => {
-            // Ensure the directory exists, create it if not
-            if !dir.exists() {
-                if let Err(e) = std::fs::create_dir_all(dir) {
-                    // Log an error but continue, logging might still work to stdout/stderr
-                    eprintln!("Warning: Failed to create OMEMO directory {}: {}. Log file might not be created.", dir.display(), e);
-                    // Fallback to default filename
-                    PathBuf::from("chatterbox.log")
+    // In release builds, do not create a log file (avoid leaking sensitive data to disk)
+    let log_file_path: Option<PathBuf> = if cfg!(debug_assertions) {
+        Some(match &args.omemo_dir {
+            Some(dir) => {
+                // Ensure the directory exists, create it if not
+                if !dir.exists() {
+                    if let Err(e) = std::fs::create_dir_all(dir) {
+                        eprintln!("Warning: Failed to create OMEMO directory {}: {}. Log file might not be created.", dir.display(), e);
+                        PathBuf::from("chatterbox.log")
+                    } else {
+                        dir.join("chatterbox.log")
+                    }
                 } else {
                     dir.join("chatterbox.log")
                 }
-            } else {
-                dir.join("chatterbox.log")
             }
-        }
-        None => PathBuf::from("chatterbox.log"), // Default path
+            None => PathBuf::from("chatterbox.log"),
+        })
+    } else {
+        None
     };
 
     // Setup logging with the determined path
-    // Convert PathBuf to Option<&str> for setup_logging
-    utils::setup_logging(log_file_path.to_str(), LevelFilter::Debug)?;
+    // In release builds, disable logging entirely (no file, no stdout)
+    let log_level = if cfg!(debug_assertions) { LevelFilter::Debug } else { LevelFilter::Off };
+    utils::setup_logging(log_file_path.as_deref().and_then(|p| p.to_str()), log_level)?;
     
     info!("Chatterbox XMPP Chat client starting up");
     info!("System information: {} {}", std::env::consts::OS, std::env::consts::ARCH);
-    // Add log message indicating where the log file is being written
-    info!("Logging to file: {}", log_file_path.display());
+    if let Some(ref path) = log_file_path {
+        info!("Logging to file: {}", path.display());
+    }
 
     // Patch: Override OMEMO secrets directory if provided
     // This needs to happen AFTER logging setup but before client initialization
