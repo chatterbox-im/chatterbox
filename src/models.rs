@@ -1,3 +1,6 @@
+use chrono::Utc;
+use uuid::Uuid;
+
 pub struct Contact {
     pub id: String,
     pub name: String,
@@ -94,6 +97,86 @@ pub struct Message {
     pub timestamp: u64,
     pub delivery_status: DeliveryStatus,
     pub encrypted: bool,
+}
+
+impl Message {
+    /// Outgoing encrypted message (OMEMO). Use this for all sent OMEMO messages.
+    pub fn outgoing_encrypted(id: impl Into<String>, recipient: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            sender_id: "me".to_string(),
+            recipient_id: recipient.into(),
+            content: content.into(),
+            timestamp: Utc::now().timestamp() as u64,
+            delivery_status: DeliveryStatus::Sent,
+            encrypted: true,
+        }
+    }
+
+    /// Outgoing plaintext message. Use this for unencrypted sends.
+    pub fn outgoing_plaintext(id: impl Into<String>, recipient: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            sender_id: "me".to_string(),
+            recipient_id: recipient.into(),
+            content: content.into(),
+            timestamp: Utc::now().timestamp() as u64,
+            delivery_status: DeliveryStatus::Sent,
+            encrypted: false,
+        }
+    }
+
+    /// Incoming encrypted message (OMEMO). Use for received OMEMO messages.
+    pub fn incoming_encrypted(id: impl Into<String>, sender: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            sender_id: sender.into(),
+            recipient_id: "me".to_string(),
+            content: content.into(),
+            timestamp: Utc::now().timestamp() as u64,
+            delivery_status: DeliveryStatus::Delivered,
+            encrypted: true,
+        }
+    }
+
+    /// Incoming plaintext message. Use for received unencrypted messages.
+    pub fn incoming_plaintext(id: impl Into<String>, sender: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            sender_id: sender.into(),
+            recipient_id: "me".to_string(),
+            content: content.into(),
+            timestamp: Utc::now().timestamp() as u64,
+            delivery_status: DeliveryStatus::Delivered,
+            encrypted: false,
+        }
+    }
+
+    /// System/notification message. Never encrypted.
+    pub fn system(recipient: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            sender_id: "system".to_string(),
+            recipient_id: recipient.into(),
+            content: content.into(),
+            timestamp: Utc::now().timestamp() as u64,
+            delivery_status: DeliveryStatus::Delivered,
+            encrypted: false,
+        }
+    }
+
+    /// Delivery status update message (echoed back to UI to update status display).
+    pub fn delivery_update(id: impl Into<String>, recipient: impl Into<String>, content: impl Into<String>, status: DeliveryStatus, encrypted: bool) -> Self {
+        Self {
+            id: id.into(),
+            sender_id: "me".to_string(),
+            recipient_id: recipient.into(),
+            content: content.into(),
+            timestamp: Utc::now().timestamp() as u64,
+            delivery_status: status,
+            encrypted,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

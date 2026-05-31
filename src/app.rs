@@ -12,22 +12,14 @@ use crate::{
 };
 use chatterbox::{
     xmpp::{XMPPClient, chat_states::TypingStatus},
-    models::{Message, DeliveryStatus},
+    models::Message,
     xmpp::message_archive::MAMQueryOptions,
     storage::MessageStore,
 };
 
 /// Creates a system message for display in the UI
 pub fn create_system_message(to: &str, content: &str) -> Message {
-    Message {
-        id: uuid::Uuid::new_v4().to_string(),
-        sender_id: "system".to_string(),
-        recipient_id: to.to_string(),
-        content: content.to_string(),
-        timestamp: chrono::Utc::now().timestamp() as u64,
-        delivery_status: DeliveryStatus::Delivered,
-        encrypted: false,
-    }
+    Message::system(to, content)
 }
 
 /// Run the full application after a successful XMPP connection.
@@ -755,15 +747,11 @@ async fn handle_user_command(
             .await
         {
             Ok(_) => {
-                chat_ui.add_message(Message {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    sender_id: "You".to_string(),
-                    recipient_id: recipient.to_string(),
-                    content: plain_content.to_string(),
-                    timestamp: chrono::Utc::now().timestamp() as u64,
-                    delivery_status: DeliveryStatus::Sent,
-                    encrypted: false,
-                });
+                chat_ui.add_message(Message::outgoing_plaintext(
+                    uuid::Uuid::new_v4().to_string(),
+                    recipient.to_string(),
+                    plain_content.to_string(),
+                ));
             }
             Err(e) => {
                 error!("Failed to send plaintext message: {}", e);
@@ -1480,15 +1468,7 @@ async fn handle_send_message(
         Ok(_) => {
             chat_ui.remove_last_message();
             let message_id = uuid::Uuid::new_v4().to_string();
-            let message = Message {
-                id: message_id.clone(),
-                sender_id: "me".to_string(),
-                recipient_id: recipient.to_string(),
-                content: content.to_string(),
-                timestamp: chrono::Utc::now().timestamp() as u64,
-                delivery_status: DeliveryStatus::Sent,
-                encrypted: true,
-            };
+            let message = Message::outgoing_encrypted(message_id.clone(), recipient.to_string(), content.to_string());
             chat_ui.add_message(message.clone());
             // Persist outgoing message locally
             if let Some(s) = store {

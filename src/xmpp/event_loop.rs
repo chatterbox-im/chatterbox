@@ -11,7 +11,7 @@ use std::sync::atomic::AtomicBool;
 
 use tokio_xmpp::Event as XMPPEvent;
 
-use crate::models::{Message, DeliveryStatus, PendingMessage};
+use crate::models::{Message, PendingMessage};
 use super::{XMPPClient, custom_ns, LateStateRx};
 use super::{chat_states, delivery_receipts, discovery, presence};
 use super::transport::StanzaTx;
@@ -243,15 +243,7 @@ impl XMPPClient {
                                 if !content.is_empty() {
                                     let sender_bare_jid = from.split('/').next().unwrap_or(from).to_string();
                                     
-                                    let message = Message {
-                                        id: id.clone(),
-                                        sender_id: sender_bare_jid.clone(),
-                                        recipient_id: "me".to_string(),
-                                        content: content.clone(),
-                                        timestamp: chrono::Utc::now().timestamp() as u64,
-                                        delivery_status: DeliveryStatus::Delivered,
-            encrypted: false,
-                                    };
+                                    let message = Message::incoming_plaintext(id.clone(), sender_bare_jid.clone(), content.clone());
                                     
                                     info!("Sending message to UI: from='{}' (bare: '{}'), content='{}'", from, sender_bare_jid, content);
                                     

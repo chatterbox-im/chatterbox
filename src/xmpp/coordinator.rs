@@ -438,15 +438,7 @@ async fn handle_message(state: &mut CoordinatorState, stanza: &Element) {
             if !content.is_empty() {
                 let sender_bare_jid = from.split('/').next().unwrap_or(from).to_string();
 
-                let message = Message {
-                    id: id.clone(),
-                    sender_id: sender_bare_jid,
-                    recipient_id: "me".to_string(),
-                    content,
-                    timestamp: chrono::Utc::now().timestamp() as u64,
-                    delivery_status: DeliveryStatus::Delivered,
-                    encrypted: false,
-                };
+                let message = Message::incoming_plaintext(id.clone(), sender_bare_jid, content);
 
                 send_to_ui(&state.msg_tx, message);
 
@@ -520,15 +512,8 @@ async fn handle_omemo_message(state: &mut CoordinatorState, stanza: &Element) {
         debug!("Skipping decryption of our own sent message (device {})", sender_device_id);
         let to = stanza.attr("to").unwrap_or("unknown");
         let recipient_jid = to.split('/').next().unwrap_or(to).to_string();
-        let message = Message {
-            id: id.to_string(),
-            sender_id: "me".to_string(),
-            recipient_id: recipient_jid,
-            content: "[Sent encrypted message]".to_string(),
-            timestamp: chrono::Utc::now().timestamp() as u64,
-            delivery_status: DeliveryStatus::Delivered,
-            encrypted: true,
-        };
+        let mut message = Message::outgoing_encrypted(id.to_string(), recipient_jid, "[Sent encrypted message]");
+        message.delivery_status = DeliveryStatus::Delivered;
         send_to_ui(&state.msg_tx, message);
         return;
     }
@@ -618,15 +603,7 @@ async fn handle_omemo_message(state: &mut CoordinatorState, stanza: &Element) {
     match omemo_manager.decrypt_message(from, sender_device_id, &omemo_message).await {
         Ok(plaintext) => {
             let sender_bare_jid = from.split('/').next().unwrap_or(from).to_string();
-            let message = Message {
-                id: id.to_string(),
-                sender_id: sender_bare_jid,
-                recipient_id: state.our_jid.clone(),
-                content: plaintext,
-                timestamp: chrono::Utc::now().timestamp() as u64,
-                delivery_status: DeliveryStatus::Delivered,
-                encrypted: true,
-            };
+            let message = Message::incoming_encrypted(id.to_string(), sender_bare_jid, plaintext);
 
             send_to_ui(&state.msg_tx, message);
 
@@ -648,15 +625,7 @@ async fn handle_omemo_message(state: &mut CoordinatorState, stanza: &Element) {
         }
         Err(e) => {
             error!("Failed to decrypt message from {} (device {}): {}", from, sender_device_id, e);
-            let message = Message {
-                id: id.to_string(),
-                sender_id: from.to_string(),
-                recipient_id: state.our_jid.clone(),
-                content: format!("[Encrypted message could not be decrypted: {}]", e),
-                timestamp: chrono::Utc::now().timestamp() as u64,
-                delivery_status: DeliveryStatus::Delivered,
-                encrypted: true,
-            };
+            let message = Message::incoming_encrypted(id.to_string(), from.to_string(), format!("[Encrypted message could not be decrypted: {}]", e));
             send_to_ui(&state.msg_tx, message);
         }
     }
@@ -749,15 +718,7 @@ async fn send_encrypted(state: &mut CoordinatorState, to: &str, content: &str) -
     });
 
     // Notify UI of sent message
-    let message = Message {
-        id: id.clone(),
-        sender_id: "me".to_string(),
-        recipient_id: to.to_string(),
-        content: content.to_string(),
-        timestamp: chrono::Utc::now().timestamp() as u64,
-        delivery_status: DeliveryStatus::Sent,
-        encrypted: true,
-    };
+    let message = Message::outgoing_encrypted(id.clone(), to.to_string(), content.to_string());
     send_to_ui(&state.msg_tx, message);
 
     Ok(id)
@@ -787,15 +748,7 @@ async fn send_plaintext(state: &mut CoordinatorState, to: &str, content: &str) -
         status: DeliveryStatus::Sent,
     });
 
-    let message = Message {
-        id: id.clone(),
-        sender_id: "me".to_string(),
-        recipient_id: to.to_string(),
-        content: content.to_string(),
-        timestamp: chrono::Utc::now().timestamp() as u64,
-        delivery_status: DeliveryStatus::Sent,
-        encrypted: false,
-    };
+    let message = Message::outgoing_plaintext(id.clone(), to.to_string(), content.to_string());
     send_to_ui(&state.msg_tx, message);
 
     Ok(id)
@@ -900,15 +853,7 @@ async fn handle_receipt_inline(state: &mut CoordinatorState, stanza: &Element) -
                 info!("Received delivery receipt for message {}", receipt_id);
                 pending.status = DeliveryStatus::Delivered;
 
-                let ui_message = Message {
-                    id: pending.id.clone(),
-                    sender_id: "me".to_string(),
-                    recipient_id: pending.to.clone(),
-                    content: pending.content.clone(),
-                    timestamp: pending.timestamp,
-                    delivery_status: DeliveryStatus::Delivered,
-                    encrypted: false,
-                };
+                let ui_message = Message::delivery_update(pending.id.clone(), pending.to.clone(), pending.content.clone(), DeliveryStatus::Delivered, false);
                 send_to_ui(&state.msg_tx, ui_message);
             }
         }
@@ -974,14 +919,10 @@ async fn handle_carbon_inline(state: &mut CoordinatorState, stanza: &Element) {
         (from.to_string(), "me".to_string())
     };
 
-    let ui_message = Message {
-        id: msg_id,
-        sender_id,
-        recipient_id,
-        content: body_text,
-        timestamp: chrono::Utc::now().timestamp() as u64,
-        delivery_status: DeliveryStatus::Delivered,
-        encrypted: false,
+    let ui_message = if sender_id == "me" {
+        Message::outgoing_plaintext(msg_id, recipient_id, body_text)
+    } else {
+        Message::incoming_plaintext(msg_id, sender_id, body_text)
     };
 
     send_to_ui(&state.msg_tx, ui_message);
@@ -1051,16 +992,8 @@ async fn check_omemo_keys_inline(state: &mut CoordinatorState, contact: &str) ->
             let _ = storage.store_pending_device_verification(contact, device_id, &fingerprint);
 
             // Send verification request to UI
-            let special_message = Message {
-                id: uuid::Uuid::new_v4().to_string(),
-                sender_id: "system".to_string(),
-                recipient_id: "me".to_string(),
-                content: format!("__OMEMO_KEY_VERIFY__:{}:{}:{}",
-                    contact, fingerprint, device_id),
-                timestamp: chrono::Utc::now().timestamp() as u64,
-                delivery_status: DeliveryStatus::Delivered,
-                encrypted: false,
-            };
+            let special_message = Message::system("me", format!("__OMEMO_KEY_VERIFY__:{}:{}:{}",
+                    contact, fingerprint, device_id));
             send_to_ui(&state.msg_tx, special_message);
             break;
         }
@@ -1115,28 +1048,12 @@ async fn handle_key_verification_inline(state: &mut CoordinatorState, contact: &
     match response {
         "__KEY_ACCEPTED__" => {
             info!("OMEMO key for {} accepted", contact);
-            let msg = Message {
-                id: uuid::Uuid::new_v4().to_string(),
-                sender_id: "system".to_string(),
-                recipient_id: "me".to_string(),
-                content: format!("OMEMO key for {} has been accepted and marked as trusted", contact),
-                timestamp: chrono::Utc::now().timestamp() as u64,
-                delivery_status: DeliveryStatus::Unknown,
-                encrypted: false,
-            };
+            let msg = Message::system("me", format!("OMEMO key for {} has been accepted and marked as trusted", contact));
             send_to_ui(&state.msg_tx, msg);
         }
         "__KEY_REJECTED__" => {
             info!("OMEMO key for {} rejected", contact);
-            let msg = Message {
-                id: uuid::Uuid::new_v4().to_string(),
-                sender_id: "system".to_string(),
-                recipient_id: "me".to_string(),
-                content: format!("OMEMO key for {} has been rejected", contact),
-                timestamp: chrono::Utc::now().timestamp() as u64,
-                delivery_status: DeliveryStatus::Unknown,
-                encrypted: false,
-            };
+            let msg = Message::system("me", format!("OMEMO key for {} has been rejected", contact));
             send_to_ui(&state.msg_tx, msg);
         }
         _ => {

@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use log::{debug, error, info, warn};
 use uuid::Uuid;
 
-use crate::models::{Message, DeliveryStatus};
+use crate::models::Message;
 use crate::xmpp::custom_ns;
 use crate::xmpp::transport;
 use crate::omemo::device_id::DeviceId;
@@ -352,19 +352,10 @@ impl crate::xmpp::XMPPClient {
         let device_id_str = device_id.map(|id| id.to_string());
         
         // Create a special system message to trigger the verification UI
-        let special_message = Message {
-            id: uuid::Uuid::new_v4().to_string(),
-            sender_id: "system".to_string(),
-            recipient_id: "me".to_string(),
-            // Format: __OMEMO_KEY_VERIFY__:contact:fingerprint:device_id
-            content: format!("__OMEMO_KEY_VERIFY__:{}:{}:{}", 
+        let special_message = Message::system("me", format!("__OMEMO_KEY_VERIFY__:{}:{}:{}", 
                             sender, 
                             key_fingerprint, 
-                            device_id_str.as_deref().unwrap_or("")),
-            timestamp: chrono::Utc::now().timestamp() as u64,
-            delivery_status: DeliveryStatus::Delivered,
-            encrypted: false,
-        };
+                            device_id_str.as_deref().unwrap_or("")));
         
         // Send the special message to the UI
         if let Err(e) = self.msg_tx.send(special_message).await {

@@ -171,15 +171,8 @@ impl super::XMPPClient {
         }
         
         // Create and immediately send UI message to show pending message
-        let ui_message = Message {
-            id: msg_id.clone(),
-            sender_id: "me".to_string(),
-            recipient_id: recipient.to_string(),
-            content: content.to_string(),
-            timestamp: chrono::Utc::now().timestamp() as u64,
-            delivery_status: DeliveryStatus::Sending,
-            encrypted: false,
-        };
+        let mut ui_message = Message::outgoing_plaintext(msg_id.clone(), recipient.to_string(), content.to_string());
+        ui_message.delivery_status = DeliveryStatus::Sending;
         
         // Send to UI first
         if let Err(e) = self.msg_tx.send(ui_message).await {
@@ -313,15 +306,7 @@ impl super::XMPPClient {
         // If we found and updated the message, send an update to the UI
         if let Some(pending) = pending_message {
             // Create a new message with the updated status for the UI
-            let ui_message = Message {
-                id: pending.id.clone(),
-                sender_id: "me".to_string(),
-                recipient_id: pending.to.clone(),
-                content: pending.content.clone(),
-                timestamp: pending.timestamp,
-                delivery_status: new_status,
-                encrypted: false,
-            };
+            let ui_message = Message::delivery_update(pending.id.clone(), pending.to.clone(), pending.content.clone(), new_status, false);
             
             // Send to UI
             match msg_tx.send(ui_message).await {

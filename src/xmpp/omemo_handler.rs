@@ -159,15 +159,8 @@ impl XMPPClient {
                         // Use the "to" attribute as recipient (this is who we sent to)
                         let to = element.attr("to").unwrap_or("unknown");
                         let recipient_jid = to.split('/').next().unwrap_or(to).to_string();
-                        let message = Message {
-                            id: id.to_string(),
-                            sender_id: "me".to_string(),
-                            recipient_id: recipient_jid,
-                            content: "[Sent encrypted message]".to_string(),
-                            timestamp: chrono::Utc::now().timestamp() as u64,
-                            delivery_status: DeliveryStatus::Delivered,
-            encrypted: true,
-                        };
+                        let mut message = Message::outgoing_encrypted(id.to_string(), recipient_jid, "[Sent encrypted message]");
+                        message.delivery_status = DeliveryStatus::Delivered;
                         if let Err(e) = self.msg_tx.send(message).await {
                             error!("Failed to send own-message placeholder to UI: {}", e);
                         }
@@ -295,15 +288,7 @@ impl XMPPClient {
                         let sender_bare_jid = from.split('/').next().unwrap_or(from).to_string();
                         
                         // Create a message for the UI
-                        let message = Message {
-                            id: id.to_string(),
-                            sender_id: sender_bare_jid.clone(),
-                            recipient_id: self.jid.clone(),
-                            content: plaintext.clone(),
-                            timestamp: chrono::Utc::now().timestamp() as u64,
-                            delivery_status: DeliveryStatus::Delivered,
-            encrypted: true,
-                        };
+                        let message = Message::incoming_encrypted(id.to_string(), sender_bare_jid.clone(), plaintext.clone());
                         
                         warn!("UI_DELIVERY_DEBUG: Sending decrypted message to UI channel");
                         warn!("UI_DELIVERY_DEBUG: Message details - ID: {}, Sender: {}, Content: '{}'", 
@@ -345,15 +330,11 @@ impl XMPPClient {
                             omemo_message.ciphertext.len(),
                             omemo_message.encrypted_keys.len());
                         
-                        let message = Message {
-                            id: id.to_string(),
-                            sender_id: from.to_string(),
-                            recipient_id: self.jid.clone(),
-                            content: format!("[Encrypted message could not be decrypted: {}. You may need to refresh the OMEMO keys or verify device identity.]", e),
-                            timestamp: chrono::Utc::now().timestamp() as u64,
-                            delivery_status: DeliveryStatus::Delivered,
-            encrypted: true,
-                        };
+                        let message = Message::incoming_encrypted(
+                            id.to_string(),
+                            from.to_string(),
+                            format!("[Encrypted message could not be decrypted: {}. You may need to refresh the OMEMO keys or verify device identity.]", e),
+                        );
                         
                         if let Err(e) = self.msg_tx.send(message).await {
                             error!("Failed to send error message to UI: {}", e);
@@ -377,15 +358,7 @@ impl XMPPClient {
             "__KEY_ACCEPTED__" => {
                 info!("OMEMO key for {} has been accepted by user", contact);
                 
-                let system_message = Message {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    sender_id: "system".to_string(),
-                    recipient_id: "me".to_string(),
-                    content: format!("OMEMO key for {} has been accepted and marked as trusted", contact),
-                    timestamp: chrono::Utc::now().timestamp() as u64,
-                    delivery_status: DeliveryStatus::Unknown,
-            encrypted: false,
-                };
+                let system_message = Message::system("me", format!("OMEMO key for {} has been accepted and marked as trusted", contact));
                 
                 if let Err(e) = self.msg_tx.send(system_message).await {
                     error!("Failed to send key acceptance message to UI: {}", e);
@@ -399,15 +372,7 @@ impl XMPPClient {
             "__KEY_REJECTED__" => {
                 info!("OMEMO key for {} has been rejected by user", contact);
                 
-                let system_message = Message {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    sender_id: "system".to_string(),
-                    recipient_id: "me".to_string(),
-                    content: format!("OMEMO key for {} has been rejected", contact),
-                    timestamp: chrono::Utc::now().timestamp() as u64,
-                    delivery_status: DeliveryStatus::Unknown,
-            encrypted: false,
-                };
+                let system_message = Message::system("me", format!("OMEMO key for {} has been rejected", contact));
                 
                 if let Err(e) = self.msg_tx.send(system_message).await {
                     error!("Failed to send key rejection message to UI: {}", e);
@@ -553,18 +518,10 @@ impl XMPPClient {
 
     /// Request verification for an OMEMO key
     pub async fn process_key_verification_response(&self, sender: &str, key_fingerprint: &str, device_id: Option<u32>) -> Result<()> {
-        let special_message = Message {
-            id: uuid::Uuid::new_v4().to_string(),
-            sender_id: "system".to_string(),
-            recipient_id: "me".to_string(),
-            content: format!("__OMEMO_KEY_VERIFY__:{}:{}:{}", 
+        let special_message = Message::system("me", format!("__OMEMO_KEY_VERIFY__:{}:{}:{}", 
                             sender, 
                             key_fingerprint, 
-                            device_id.map(|id| id.to_string()).unwrap_or_default()),
-            timestamp: chrono::Utc::now().timestamp() as u64,
-            delivery_status: DeliveryStatus::Delivered,
-            encrypted: false,
-        };
+                            device_id.map(|id| id.to_string()).unwrap_or_default()));
         
         if let Err(e) = self.msg_tx.send(special_message).await {
             error!("Failed to send key verification request to UI: {}", e);

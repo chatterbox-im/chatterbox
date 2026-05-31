@@ -209,7 +209,8 @@ CREATE TABLE messages (
     recipient_id    TEXT NOT NULL,
     content         TEXT NOT NULL,
     timestamp       INTEGER NOT NULL,
-    delivery_status INTEGER NOT NULL DEFAULT 0
+    delivery_status INTEGER NOT NULL DEFAULT 0,
+    encrypted       INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX idx_messages_contact_ts ON messages (contact_jid, timestamp);
 ```
@@ -227,3 +228,49 @@ CREATE INDEX idx_messages_contact_ts ON messages (contact_jid, timestamp);
 *   **Idempotent writes:** `INSERT OR IGNORE` keyed on message ID ensures safe replay and deduplication.
 *   **Synchronous access:** All store operations are fast local I/O and run on the main event loop — no need for async wrapping or cross-thread sharing.
 *   **Graceful degradation:** If the store fails to open, the app continues without local persistence (MAM-only mode).
+
+## 9. Message Construction Safety
+
+The `Message` struct uses **factory functions** to prevent a class of bugs where fields like `encrypted` are set incorrectly at construction sites scattered across the codebase.
+
+### 9.1 The Problem
+
+With ~35 `Message` construction sites across 10+ files, manual struct literal construction led to bugs where:
+*   OMEMO-encrypted messages were created with `encrypted: false` (causing incorrect UI indicators).
+*   The `encrypted` field wasn't persisted to SQLite at all (schema omission).
+*   Carbon copy echoes and own-device reflections had inconsistent field values.
+
+### 9.2 Factory Functions
+
+`Message` provides six factory constructors in `models.rs` that enforce correct field invariants by construction:
+
+| Factory | `sender_id` | `encrypted` | `delivery_status` | Use case |
+|---------|-------------|-------------|-------------------|----------|
+| `outgoing_encrypted()` | `"me"` | `true` | `Sent` | Sending an OMEMO message |
+| `outgoing_plaintext()` | `"me"` | `false` | `Sent` | Sending a plaintext message |
+| `incoming_encrypted()` | sender JID | `true` | `Delivered` | Receiving an OMEMO message |
+| `incoming_plaintext()` | sender JID | `false` | `Delivered` | Receiving a plaintext message |
+| `system()` | `"system"` | `false` | `Delivered` | Notifications, key verification prompts |
+| `delivery_update()` | `"me"` | caller-specified | caller-specified | Status updates (Sending→Delivered) |
+
+### 9.3 Design Rules
+
+*   **Production code** must use factory functions for all `Message` creation.
+*   **Test code** may use struct literals to test specific field combinations.
+*   **`delivery_status` overrides** are allowed via mutation after construction (e.g., carbon echoes set `Delivered` instead of the factory's default `Sent`).
+*   Fields remain `pub` — the factories are a convention enforced by code review, not the type system. A future improvement could make fields private and add accessor methods.
+
+### 9.4 Coverage
+
+All ~35 production construction sites across `send.rs`, `omemo_handler.rs`, `message_carbons.rs`, `coordinator.rs`, `event_loop.rs`, `delivery_receipts.rs`, `ui.rs`, `app.rs`, and `omemo_integration/xmpp_client_impl.rs` use factory functions.
+
+## 10. Coordinator Architecture (Additive)
+
+A new single-threaded coordinator pattern exists in `xmpp/coordinator.rs` and `xmpp/transport.rs` as an alternative to the current `event_loop.rs` architecture. It is **not yet wired into `main.rs`** but provides:
+
+*   **`CoordinatorState`:** All mutable state in one struct (no `Arc<Mutex<>>` needed).
+*   **`send_to_ui()` helper:** Non-blocking `try_send()` to prevent channel backpressure from deadlocking the event loop.
+*   **`TransportHandle`:** Bounded channels for stanza send/receive with automatic reconnection and exponential backoff.
+*   **Command dispatch:** `CoordinatorCommand` enum for type-safe app→XMPP communication.
+
+The coordinator handles plaintext messages, OMEMO encryption/decryption, carbon copies, delivery receipts, presence, and key verification — all inline without spawning additional tasks.

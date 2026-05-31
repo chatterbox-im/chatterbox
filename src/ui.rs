@@ -272,15 +272,7 @@ impl ChatUI {
         });
         
         // Add a system message about the friend request acceptance
-        self.add_message(Message {
-            id: Uuid::new_v4().to_string(),
-            content: format!("Friend request from {} automatically accepted", contact),
-            sender_id: "system".to_string(),
-            recipient_id: "me".to_string(),
-            timestamp: chrono::Utc::now().timestamp() as u64,
-            delivery_status: DeliveryStatus::Unknown,
-            encrypted: false,
-        });
+        self.add_message(Message::system("me", format!("Friend request from {} automatically accepted", contact)));
     }
 
     // Add a helper method to process the entered JID
@@ -318,15 +310,7 @@ impl ChatUI {
                                 self.key_confirmation = None;
                                 
                                 // Add system message about key acceptance
-                                self.add_message(Message {
-                                    id: "system_key_acceptance".to_string(),
-                                    content: format!("OMEMO key for {} has been accepted", contact),
-                                    sender_id: "system".to_string(),
-                                    recipient_id: "me".to_string(),
-                                    timestamp: chrono::Utc::now().timestamp() as u64,
-                                    delivery_status: DeliveryStatus::Unknown,
-            encrypted: false,
-                                });
+                                self.add_message(Message::system("me", format!("OMEMO key for {} has been accepted", contact)));
                                 
                                 return Ok(Some((contact, String::from("__KEY_ACCEPTED__"))));
                             }
@@ -336,15 +320,7 @@ impl ChatUI {
                                 self.key_confirmation = None;
                                 
                                 // Add system message about key rejection
-                                self.add_message(Message {
-                                    id: "system_key_rejection".to_string(),
-                                    content: format!("OMEMO key for {} has been rejected", contact),
-                                    sender_id: "system".to_string(),
-                                    recipient_id: "me".to_string(),
-                                    timestamp: chrono::Utc::now().timestamp() as u64,
-                                    delivery_status: DeliveryStatus::Unknown,
-            encrypted: false,
-                                });
+                                self.add_message(Message::system("me", format!("OMEMO key for {} has been rejected", contact)));
                                 
                                 return Ok(Some((contact, String::from("__KEY_REJECTED__"))));
                             }
@@ -368,15 +344,7 @@ impl ChatUI {
                                 self.contact_remove_dialog = None;
                                 
                                 // Add system message about the removal
-                                self.add_message(Message {
-                                    id: Uuid::new_v4().to_string(),
-                                    content: format!("Removing contact {}...", contact),
-                                    sender_id: "system".to_string(),
-                                    recipient_id: "me".to_string(),
-                                    timestamp: chrono::Utc::now().timestamp() as u64,
-                                    delivery_status: DeliveryStatus::Unknown,
-            encrypted: false,
-                                });
+                                self.add_message(Message::system("me", format!("Removing contact {}...", contact)));
                                 
                                 return Ok(Some((contact, String::from("__REMOVE_CONTACT_CONFIRMED__"))));
                             }
@@ -385,15 +353,7 @@ impl ChatUI {
                                 self.contact_remove_dialog = None;
                                 
                                 // Add system message about cancellation
-                                self.add_message(Message {
-                                    id: Uuid::new_v4().to_string(),
-                                    content: "Contact removal cancelled".to_string(),
-                                    sender_id: "system".to_string(),
-                                    recipient_id: "me".to_string(),
-                                    timestamp: chrono::Utc::now().timestamp() as u64,
-                                    delivery_status: DeliveryStatus::Unknown,
-            encrypted: false,
-                                });
+                                self.add_message(Message::system("me", "Contact removal cancelled"));
                                 
                                 return Ok(None);
                             }
@@ -492,14 +452,10 @@ impl ChatUI {
                                 self.input = Input::default();
                                 
                                 // When creating a new message:
-                                let message = Message {
-                                    id: Uuid::new_v4().to_string(), // unique ID
-                                    content: message_content.clone(),
-                                    sender_id: "me".to_string(),
-                                    recipient_id: recipient_jid.clone(),
-                                    timestamp: chrono::Utc::now().timestamp() as u64,
-                                    delivery_status: DeliveryStatus::Sending,
-                                    encrypted: self.omemo_enabled,
+                                let message = if self.omemo_enabled {
+                                    Message::outgoing_encrypted(Uuid::new_v4().to_string(), recipient_jid.clone(), message_content.clone())
+                                } else {
+                                    Message::outgoing_plaintext(Uuid::new_v4().to_string(), recipient_jid.clone(), message_content.clone())
                                 };
                                 
                                 // Add the message to UI immediately
@@ -534,15 +490,7 @@ impl ChatUI {
                                 "OMEMO encryption disabled for this conversation"
                             };
                             
-                            self.add_message(Message {
-                                id: "system_encryption".to_string(),
-                                content: status_msg.to_string(),
-                                sender_id: "system".to_string(),
-                                recipient_id: "me".to_string(), // Add the missing field
-                                timestamp: chrono::Utc::now().timestamp() as u64,
-                                delivery_status: DeliveryStatus::Unknown,
-            encrypted: false,
-                            });
+                            self.add_message(Message::system("me", status_msg));
                         },
                         KeyCode::Char('t') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
                             // Toggle trust for the current contact's OMEMO keys
@@ -951,15 +899,7 @@ impl ChatUI {
         self.add_contact("test@example.com");
         
         // Add a system message to confirm test was triggered
-        self.add_message(Message {
-            id: Uuid::new_v4().to_string(),
-            content: "TEST: Friend request notification triggered manually".to_string(),
-            sender_id: "system".to_string(),
-            recipient_id: "me".to_string(),
-            timestamp: chrono::Utc::now().timestamp() as u64,
-            delivery_status: DeliveryStatus::Unknown,
-            encrypted: false,
-        });
+        self.add_message(Message::system("me", "TEST: Friend request notification triggered manually"));
     }
 }
 

@@ -227,14 +227,10 @@ impl super::XMPPClient {
                                     };
                                     
                                     // Create a Message object for the UI
-                                    let ui_message = Message {
-                                        id: msg_id,
-                                        sender_id,
-                                        recipient_id,
-                                        content: body,
-                                        timestamp: chrono::Utc::now().timestamp() as u64,
-                                        delivery_status: DeliveryStatus::Delivered, // Carbon copies are always delivered
-            encrypted: false,
+                                    let ui_message = if sender_id == "me" {
+                                        Message::outgoing_plaintext(msg_id, recipient_id, body)
+                                    } else {
+                                        Message::incoming_plaintext(msg_id, sender_id, body)
                                     };
                                     
                                     // Send the message to the UI
@@ -275,14 +271,10 @@ impl super::XMPPClient {
         };
         
         // Create a Message object for the UI
-        let ui_message = Message {
-            id: msg_id,
-            sender_id,
-            recipient_id,
-            content: body_text,
-            timestamp: chrono::Utc::now().timestamp() as u64,
-            delivery_status: DeliveryStatus::Delivered, // Carbon copies are always delivered
-            encrypted: false,
+        let ui_message = if sender_id == "me" {
+            Message::outgoing_plaintext(msg_id, recipient_id, body_text)
+        } else {
+            Message::incoming_plaintext(msg_id, sender_id, body_text)
         };
         
         // Send the message to the UI
@@ -382,15 +374,8 @@ impl super::XMPPClient {
             debug!("Skipping decryption of our own sent carbon (device {})", sender_device_id);
             let msg_id = message.attr("id").map(|s| s.to_string()).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
             let recipient_jid = to.split('/').next().unwrap_or(to).to_string();
-            let ui_message = Message {
-                id: msg_id,
-                sender_id: "me".to_string(),
-                recipient_id: recipient_jid,
-                content: "[Sent encrypted message]".to_string(),
-                timestamp: chrono::Utc::now().timestamp() as u64,
-                delivery_status: DeliveryStatus::Delivered,
-            encrypted: true,
-            };
+            let mut ui_message = Message::outgoing_encrypted(msg_id, recipient_jid, "[Sent encrypted message]");
+            ui_message.delivery_status = DeliveryStatus::Delivered;
             if let Err(e) = self.msg_tx.send(ui_message).await {
                 error!("Failed to send own-carbon placeholder to UI: {}", e);
             }
@@ -411,14 +396,10 @@ impl super::XMPPClient {
             };
             
             // Create a Message object for the UI with a user-friendly message
-            let ui_message = Message {
-                id: msg_id,
-                sender_id,
-                recipient_id,
-                content: "[Message from another device - not encrypted for this device]".to_string(),
-                timestamp: chrono::Utc::now().timestamp() as u64,
-                delivery_status: DeliveryStatus::Delivered,
-            encrypted: true,
+            let ui_message = if sender_id == "me" {
+                Message::outgoing_encrypted(msg_id, recipient_id, "[Message from another device - not encrypted for this device]")
+            } else {
+                Message::incoming_encrypted(msg_id, sender_id, "[Message from another device - not encrypted for this device]")
             };
             
             // Send the message to the UI
@@ -529,14 +510,10 @@ impl super::XMPPClient {
         };
         
         // Create a Message object for the UI
-        let ui_message = Message {
-            id: msg_id,
-            sender_id,
-            recipient_id,
-            content: decrypted_content,
-            timestamp: chrono::Utc::now().timestamp() as u64,
-            delivery_status: DeliveryStatus::Delivered, // Carbon copies are always delivered
-            encrypted: true,
+        let ui_message = if sender_id == "me" {
+            Message::outgoing_encrypted(msg_id, recipient_id, decrypted_content)
+        } else {
+            Message::incoming_encrypted(msg_id, sender_id, decrypted_content)
         };
         
         // Send the message to the UI

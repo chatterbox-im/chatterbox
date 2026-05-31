@@ -157,15 +157,7 @@ impl XMPPClient {
         }
         
         // Create a "sent" message for the UI
-        let message = Message {
-            id: id.clone(),
-            sender_id: "me".to_string(),
-            recipient_id: to.to_string(),
-            content: content.to_string(),
-            timestamp: chrono::Utc::now().timestamp() as u64,
-            delivery_status: DeliveryStatus::Sent,
-            encrypted: true,
-        };
+        let message = Message::outgoing_encrypted(id.clone(), to, content);
         
         if let Err(e) = self.msg_tx.send(message).await {
             error!("Failed to send message to UI: {}", e);
