@@ -14,6 +14,11 @@ use ratatui::{
 use std::{
     collections::{HashMap, HashSet},
     io,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    thread,
     time::Duration,
 };
 use textwrap::wrap;
@@ -28,7 +33,63 @@ use chatterbox::xmpp::chat_states::TypingStatus;
 pub use ratatui::backend::CrosstermBackend;
 pub use ratatui::Terminal;
 
-const INPUT_POLL_TIMEOUT: Duration = Duration::from_millis(50);
+const EVENT_READER_POLL_TIMEOUT: Duration = Duration::from_millis(250);
+
+pub struct TerminalEventReader {
+    rx: tokio::sync::mpsc::UnboundedReceiver<Event>,
+    stop: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl TerminalEventReader {
+    pub fn new() -> Self {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+
+        let thread = thread::spawn(move || {
+            while !thread_stop.load(Ordering::Relaxed) {
+                match event::poll(EVENT_READER_POLL_TIMEOUT) {
+                    Ok(true) => match event::read() {
+                        Ok(event) => {
+                            if tx.send(event).is_err() {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            debug!("Terminal event read failed: {}", e);
+                            break;
+                        }
+                    },
+                    Ok(false) => {}
+                    Err(e) => {
+                        debug!("Terminal event poll failed: {}", e);
+                        break;
+                    }
+                }
+            }
+        });
+
+        Self {
+            rx,
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    pub async fn recv(&mut self) -> Option<Event> {
+        self.rx.recv().await
+    }
+}
+
+impl Drop for TerminalEventReader {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
 
 pub struct ChatUI {
     pub messages: Vec<Message>, // Make messages public so it can be accessed from main.rs
@@ -332,151 +393,119 @@ impl ChatUI {
         }
     }
 
-    // Modify handle_input to process key confirmation responses
-    pub fn handle_input(&mut self) -> Result<Option<(String, String)>> {
+    pub fn handle_terminal_event(
+        &mut self,
+        terminal_event: Event,
+    ) -> Result<Option<(String, String)>> {
+        if let Some(focused) = focus_state_from_event(&terminal_event) {
+            self.terminal_focused = focused;
+            return Ok(None);
+        }
+
+        let Event::Key(key) = terminal_event else {
+            return Ok(None);
+        };
+
+        if key.kind != KeyEventKind::Press {
+            return Ok(None);
+        }
+
         // Handle key confirmation popup if active
         if self.key_confirmation.is_some() {
-            if event::poll(INPUT_POLL_TIMEOUT)? {
-                let terminal_event = event::read()?;
-                if let Some(focused) = focus_state_from_event(&terminal_event) {
-                    self.terminal_focused = focused;
-                    return Ok(None);
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    // Accept the key
+                    let contact = self.key_confirmation.as_ref().unwrap().contact.clone();
+                    self.key_confirmation = None;
+
+                    // Add system message about key acceptance
+                    self.add_message(Message::system(
+                        "me",
+                        format!("OMEMO key for {} has been accepted", contact),
+                    ));
+
+                    return Ok(Some((contact, String::from("__KEY_ACCEPTED__"))));
                 }
-                if let Event::Key(key) = terminal_event {
-                    if key.kind == KeyEventKind::Press {
-                        match key.code {
-                            KeyCode::Char('y') | KeyCode::Char('Y') => {
-                                // Accept the key
-                                let contact =
-                                    self.key_confirmation.as_ref().unwrap().contact.clone();
-                                self.key_confirmation = None;
+                KeyCode::Char('n') | KeyCode::Char('N') => {
+                    // Reject the key
+                    let contact = self.key_confirmation.as_ref().unwrap().contact.clone();
+                    self.key_confirmation = None;
 
-                                // Add system message about key acceptance
-                                self.add_message(Message::system(
-                                    "me",
-                                    format!("OMEMO key for {} has been accepted", contact),
-                                ));
+                    // Add system message about key rejection
+                    self.add_message(Message::system(
+                        "me",
+                        format!("OMEMO key for {} has been rejected", contact),
+                    ));
 
-                                return Ok(Some((contact, String::from("__KEY_ACCEPTED__"))));
-                            }
-                            KeyCode::Char('n') | KeyCode::Char('N') => {
-                                // Reject the key
-                                let contact =
-                                    self.key_confirmation.as_ref().unwrap().contact.clone();
-                                self.key_confirmation = None;
-
-                                // Add system message about key rejection
-                                self.add_message(Message::system(
-                                    "me",
-                                    format!("OMEMO key for {} has been rejected", contact),
-                                ));
-
-                                return Ok(Some((contact, String::from("__KEY_REJECTED__"))));
-                            }
-                            _ => {} // Ignore other keys when popup is active
-                        }
-                    }
+                    return Ok(Some((contact, String::from("__KEY_REJECTED__"))));
                 }
+                _ => {} // Ignore other keys when popup is active
             }
             return Ok(None);
         }
 
         // Handle contact remove confirmation dialog if active
         if let Some(dialog) = &self.contact_remove_dialog {
-            if event::poll(INPUT_POLL_TIMEOUT)? {
-                let terminal_event = event::read()?;
-                if let Some(focused) = focus_state_from_event(&terminal_event) {
-                    self.terminal_focused = focused;
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    // Confirm contact removal
+                    let contact = dialog.contact.clone();
+                    self.contact_remove_dialog = None;
+
+                    // Add system message about the removal
+                    self.add_message(Message::system(
+                        "me",
+                        format!("Removing contact {}...", contact),
+                    ));
+
+                    return Ok(Some((
+                        contact,
+                        String::from("__REMOVE_CONTACT_CONFIRMED__"),
+                    )));
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    // Cancel contact removal
+                    self.contact_remove_dialog = None;
+
+                    // Add system message about cancellation
+                    self.add_message(Message::system("me", "Contact removal cancelled"));
+
                     return Ok(None);
                 }
-                if let Event::Key(key) = terminal_event {
-                    if key.kind == KeyEventKind::Press {
-                        match key.code {
-                            KeyCode::Char('y') | KeyCode::Char('Y') => {
-                                // Confirm contact removal
-                                let contact = dialog.contact.clone();
-                                self.contact_remove_dialog = None;
-
-                                // Add system message about the removal
-                                self.add_message(Message::system(
-                                    "me",
-                                    format!("Removing contact {}...", contact),
-                                ));
-
-                                return Ok(Some((
-                                    contact,
-                                    String::from("__REMOVE_CONTACT_CONFIRMED__"),
-                                )));
-                            }
-                            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                                // Cancel contact removal
-                                self.contact_remove_dialog = None;
-
-                                // Add system message about cancellation
-                                self.add_message(Message::system(
-                                    "me",
-                                    "Contact removal cancelled",
-                                ));
-
-                                return Ok(None);
-                            }
-                            _ => {} // Ignore other keys when dialog is active
-                        }
-                    }
-                }
+                _ => {} // Ignore other keys when dialog is active
             }
             return Ok(None);
         }
 
         // Handle contact add dialog if active
         if let Some(dialog) = &self.contact_add_dialog {
-            if event::poll(INPUT_POLL_TIMEOUT)? {
-                let terminal_event = event::read()?;
-                if let Some(focused) = focus_state_from_event(&terminal_event) {
-                    self.terminal_focused = focused;
+            match key.code {
+                KeyCode::Esc => {
+                    // Cancel the dialog
+                    self.contact_add_dialog = None;
                     return Ok(None);
                 }
-                if let Event::Key(key) = terminal_event {
-                    if key.kind == KeyEventKind::Press {
-                        match key.code {
-                            KeyCode::Esc => {
-                                // Cancel the dialog
-                                self.contact_add_dialog = None;
-                                return Ok(None);
-                            }
-                            KeyCode::Enter => {
-                                // Process and add contact
-                                let input = dialog.input.value().trim();
-                                if !input.is_empty() {
-                                    // Get the input before closing the dialog
-                                    let input_str = input.to_string();
+                KeyCode::Enter => {
+                    // Process and add contact
+                    let input = dialog.input.value().trim();
+                    if !input.is_empty() {
+                        let contact_jid = self.process_jid_input(input);
+                        self.contact_add_dialog = None;
 
-                                    // Close the dialog
-                                    self.contact_add_dialog = None;
-
-                                    // Process the input (add domain if needed)
-                                    let contact_jid = self.process_jid_input(&input_str);
-
-                                    // Return the new contact JID to be added
-                                    return Ok(Some((
-                                        contact_jid,
-                                        String::from("__ADD_CONTACT__"),
-                                    )));
-                                }
-                            }
-                            _ => {
-                                // Create a new dialog with the updated input
-                                let mut new_input = dialog.input.clone();
-                                new_input.handle_event(&Event::Key(key));
-
-                                // Update the dialog with the modified input
-                                self.contact_add_dialog = Some(ContactAddDialog {
-                                    input: new_input,
-                                    server_domain: dialog.server_domain.clone(),
-                                });
-                            }
-                        }
+                        // Return the new contact JID to be added
+                        return Ok(Some((contact_jid, String::from("__ADD_CONTACT__"))));
                     }
+                }
+                _ => {
+                    // Create a new dialog with the updated input
+                    let mut new_input = dialog.input.clone();
+                    new_input.handle_event(&Event::Key(key));
+
+                    // Update the dialog with the modified input
+                    self.contact_add_dialog = Some(ContactAddDialog {
+                        input: new_input,
+                        server_domain: dialog.server_domain.clone(),
+                    });
                 }
             }
             return Ok(None);
@@ -484,343 +513,291 @@ impl ChatUI {
 
         // Handle help dialog if active
         if self.help_dialog.is_some() {
-            if event::poll(INPUT_POLL_TIMEOUT)? {
-                let terminal_event = event::read()?;
-                if let Some(focused) = focus_state_from_event(&terminal_event) {
-                    self.terminal_focused = focused;
-                    return Ok(None);
-                }
-                if let Event::Key(key) = terminal_event {
-                    if key.kind == KeyEventKind::Press {
-                        // Any key press will close the help dialog
-                        self.help_dialog = None;
-                    }
-                }
-            }
+            // Any key press will close the help dialog
+            self.help_dialog = None;
             return Ok(None);
         }
 
         // Handle device fingerprints dialog if active
         if let Some(ref mut dialog) = self.device_fingerprints_dialog {
-            if event::poll(INPUT_POLL_TIMEOUT)? {
-                let terminal_event = event::read()?;
-                if let Some(focused) = focus_state_from_event(&terminal_event) {
-                    self.terminal_focused = focused;
-                    return Ok(None);
-                }
-                if let Event::Key(key) = terminal_event {
-                    if key.kind == KeyEventKind::Press {
-                        match key.code {
-                            KeyCode::Up => {
-                                // Up arrow to scroll up one line
-                                if dialog.scroll_offset > 0 {
-                                    dialog.scroll_offset -= 1;
-                                }
-                            }
-                            KeyCode::Down => {
-                                // Down arrow to scroll down one line
-                                dialog.scroll_offset += 1;
-                            }
-                            KeyCode::Home => {
-                                // Home to jump to top
-                                dialog.scroll_offset = 0;
-                            }
-                            KeyCode::End => {
-                                // End to jump to bottom
-                                dialog.scroll_offset = usize::MAX;
-                            }
-                            _ => {
-                                // Any other key closes the dialog
-                                self.device_fingerprints_dialog = None;
-                            }
-                        }
+            match key.code {
+                KeyCode::Up => {
+                    // Up arrow to scroll up one line
+                    if dialog.scroll_offset > 0 {
+                        dialog.scroll_offset -= 1;
                     }
+                }
+                KeyCode::Down => {
+                    // Down arrow to scroll down one line
+                    dialog.scroll_offset += 1;
+                }
+                KeyCode::Home => {
+                    // Home to jump to top
+                    dialog.scroll_offset = 0;
+                }
+                KeyCode::End => {
+                    // End to jump to bottom
+                    dialog.scroll_offset = usize::MAX;
+                }
+                _ => {
+                    // Any other key closes the dialog
+                    self.device_fingerprints_dialog = None;
                 }
             }
             return Ok(None);
         }
 
-        // Original input handling code
-        if event::poll(INPUT_POLL_TIMEOUT)? {
-            let terminal_event = event::read()?;
-            if let Some(focused) = focus_state_from_event(&terminal_event) {
-                self.terminal_focused = focused;
+        match key.code {
+            KeyCode::Esc => return Ok(Some((String::new(), String::new()))), // Signal to quit
+            KeyCode::Enter => {
+                if !self.input.value().is_empty() {
+                    let message_content = self.input.value().to_string();
+                    let recipient_jid = self.contact.clone();
+
+                    // Clear input field immediately
+                    self.input = Input::default();
+
+                    // When creating a new message:
+                    let message = if self.omemo_enabled {
+                        Message::outgoing_encrypted(
+                            Uuid::new_v4().to_string(),
+                            recipient_jid.clone(),
+                            message_content.clone(),
+                        )
+                    } else {
+                        Message::outgoing_plaintext(
+                            Uuid::new_v4().to_string(),
+                            recipient_jid.clone(),
+                            message_content.clone(),
+                        )
+                    };
+
+                    // Add the message to UI immediately
+                    self.add_message(message);
+
+                    // Check if we're about to send an encrypted message
+                    if self.omemo_enabled {
+                        info!("UI: Preparing encrypted message for {}", recipient_jid);
+                        // Instead of appending to the message content, add it as a separate flag
+                        info!("UI: Using __VERIFY_KEYS__ prefix in recipient field instead of content");
+                        return Ok(Some((
+                            format!("__VERIFY_KEYS__:{}", recipient_jid),
+                            message_content,
+                        )));
+                    } else {
+                        info!("UI: Sending unencrypted message to {}", recipient_jid);
+                        return Ok(Some((recipient_jid, message_content)));
+                    }
+                }
+            }
+            KeyCode::Tab => {
+                self.active_tab = match self.active_tab {
+                    Tab::Messages => Tab::Contacts,
+                    Tab::Contacts => Tab::Messages,
+                };
+            }
+            KeyCode::Char('o') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
+                // Toggle OMEMO encryption
+                self.omemo_enabled = !self.omemo_enabled;
+
+                // Add a system message about the change
+                let status_msg = if self.omemo_enabled {
+                    "OMEMO encryption enabled for this conversation"
+                } else {
+                    "OMEMO encryption disabled for this conversation"
+                };
+
+                self.add_message(Message::system("me", status_msg));
+            }
+            KeyCode::Char('p') | KeyCode::Char('P')
+                if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
+            {
+                self.os_notifications_enabled = !self.os_notifications_enabled;
+                let status_msg = if self.os_notifications_enabled {
+                    "OS notifications enabled"
+                } else {
+                    "OS notifications disabled"
+                };
+
+                self.add_message(Message::system("me", status_msg));
+                return Ok(Some((
+                    String::new(),
+                    String::from("__TOGGLE_OS_NOTIFICATIONS__"),
+                )));
+            }
+            KeyCode::Char('t') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
+                // Toggle trust for the current contact's OMEMO keys
+                if self.has_active_contact() {
+                    let current_contact = self.contact.clone();
+
+                    // Request a trust toggle operation from the main app
+                    // We'll use a special message format that will be handled in main.rs
+                    return Ok(Some((
+                        current_contact,
+                        String::from("__TOGGLE_OMEMO_TRUST__"),
+                    )));
+                }
+            }
+            KeyCode::Char('a') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
+                // Show add contact dialog
+                // We'll use the base domain from the current credentials
+                // The server domain will be supplied by main.rs before showing the dialog
+                return Ok(Some((String::new(), String::from("__SHOW_ADD_CONTACT__"))));
+            }
+            KeyCode::Char('d') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
+                // Delete/remove the current contact
+                if self.has_active_contact() {
+                    let current_contact = self.contact.clone();
+
+                    // Request contact removal from the main app
+                    return Ok(Some((current_contact, String::from("__REMOVE_CONTACT__"))));
+                }
+            }
+            KeyCode::Char('h') | KeyCode::Char('H')
+                if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
+            {
+                // Show help dialog
+                self.show_help_dialog();
                 return Ok(None);
             }
-            if let Event::Key(key) = terminal_event {
-                if key.kind == KeyEventKind::Press {
-                    match key.code {
-                        KeyCode::Esc => return Ok(Some((String::new(), String::new()))), // Signal to quit
-                        KeyCode::Enter => {
-                            if !self.input.value().is_empty() {
-                                let message_content = self.input.value().to_string();
-                                let recipient_jid = self.contact.clone();
+            KeyCode::Char('f') | KeyCode::Char('F')
+                if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
+            {
+                return Ok(Some((
+                    String::new(),
+                    String::from("__SHOW_DEVICE_FINGERPRINTS__"),
+                )));
+            }
+            KeyCode::Char('m') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
+                return Ok(Some((String::new(), String::from("__ENABLE_CARBONS__"))));
+            }
+            KeyCode::Char('r') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {}
+            // Add test shortcut for friend request notifications (Ctrl+N)
+            KeyCode::Char('n') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
+                return Ok(Some((
+                    String::new(),
+                    String::from("__TEST_FRIEND_REQUEST__"),
+                )));
+            }
+            KeyCode::Up => {
+                if let Tab::Contacts = self.active_tab {
+                    if !self.contacts.is_empty() {
+                        self.current_contact_index =
+                            (self.current_contact_index + self.contacts.len() - 1)
+                                % self.contacts.len();
+                        let new_contact = self.contacts[self.current_contact_index].clone();
+                        let contact_changed = new_contact != self.contact;
+                        self.contact = new_contact;
 
-                                // Clear input field immediately
-                                self.input = Input::default();
-
-                                // When creating a new message:
-                                let message = if self.omemo_enabled {
-                                    Message::outgoing_encrypted(
-                                        Uuid::new_v4().to_string(),
-                                        recipient_jid.clone(),
-                                        message_content.clone(),
-                                    )
-                                } else {
-                                    Message::outgoing_plaintext(
-                                        Uuid::new_v4().to_string(),
-                                        recipient_jid.clone(),
-                                        message_content.clone(),
-                                    )
-                                };
-
-                                // Add the message to UI immediately
-                                self.add_message(message);
-
-                                // Check if we're about to send an encrypted message
-                                if self.omemo_enabled {
-                                    info!("UI: Preparing encrypted message for {}", recipient_jid);
-                                    // Instead of appending to the message content, add it as a separate flag
-                                    info!("UI: Using __VERIFY_KEYS__ prefix in recipient field instead of content");
-                                    return Ok(Some((
-                                        format!("__VERIFY_KEYS__:{}", recipient_jid),
-                                        message_content,
-                                    )));
-                                } else {
-                                    info!("UI: Sending unencrypted message to {}", recipient_jid);
-                                    return Ok(Some((recipient_jid, message_content)));
-                                }
-                            }
-                        }
-                        KeyCode::Tab => {
-                            self.active_tab = match self.active_tab {
-                                Tab::Messages => Tab::Contacts,
-                                Tab::Contacts => Tab::Messages,
-                            };
-                        }
-                        KeyCode::Char('o')
-                            if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
-                        {
-                            // Toggle OMEMO encryption
-                            self.omemo_enabled = !self.omemo_enabled;
-
-                            // Add a system message about the change
-                            let status_msg = if self.omemo_enabled {
-                                "OMEMO encryption enabled for this conversation"
-                            } else {
-                                "OMEMO encryption disabled for this conversation"
-                            };
-
-                            self.add_message(Message::system("me", status_msg));
-                        }
-                        KeyCode::Char('p') | KeyCode::Char('P')
-                            if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
-                        {
-                            self.os_notifications_enabled = !self.os_notifications_enabled;
-                            let status_msg = if self.os_notifications_enabled {
-                                "OS notifications enabled"
-                            } else {
-                                "OS notifications disabled"
-                            };
-
-                            self.add_message(Message::system("me", status_msg));
+                        // Clear unread status for the newly selected contact
+                        if contact_changed {
+                            self.unread_contacts.remove(&self.contact);
                             return Ok(Some((
-                                String::new(),
-                                String::from("__TOGGLE_OS_NOTIFICATIONS__"),
+                                self.contact.clone(),
+                                String::from("__CONTACT_CHANGED__"),
                             )));
                         }
-                        KeyCode::Char('t')
-                            if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
-                        {
-                            // Toggle trust for the current contact's OMEMO keys
-                            if self.has_active_contact() {
-                                let current_contact = self.contact.clone();
+                    }
+                }
+            }
+            KeyCode::Down => {
+                if let Tab::Contacts = self.active_tab {
+                    if !self.contacts.is_empty() {
+                        self.current_contact_index =
+                            (self.current_contact_index + 1) % self.contacts.len();
+                        let new_contact = self.contacts[self.current_contact_index].clone();
+                        let contact_changed = new_contact != self.contact;
+                        self.contact = new_contact;
 
-                                // Request a trust toggle operation from the main app
-                                // We'll use a special message format that will be handled in main.rs
-                                return Ok(Some((
-                                    current_contact,
-                                    String::from("__TOGGLE_OMEMO_TRUST__"),
-                                )));
-                            }
-                        }
-                        KeyCode::Char('a')
-                            if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
-                        {
-                            // Show add contact dialog
-                            // We'll use the base domain from the current credentials
-                            // The server domain will be supplied by main.rs before showing the dialog
-                            return Ok(Some((String::new(), String::from("__SHOW_ADD_CONTACT__"))));
-                        }
-                        KeyCode::Char('d')
-                            if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
-                        {
-                            // Delete/remove the current contact
-                            if self.has_active_contact() {
-                                let current_contact = self.contact.clone();
-
-                                // Request contact removal from the main app
-                                return Ok(Some((
-                                    current_contact,
-                                    String::from("__REMOVE_CONTACT__"),
-                                )));
-                            }
-                        }
-                        KeyCode::Char('h') | KeyCode::Char('H')
-                            if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
-                        {
-                            // Show help dialog
-                            self.show_help_dialog();
-                            return Ok(None);
-                        }
-                        KeyCode::Char('f') | KeyCode::Char('F')
-                            if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
-                        {
+                        // Clear unread status for the newly selected contact
+                        if contact_changed {
+                            self.unread_contacts.remove(&self.contact);
                             return Ok(Some((
-                                String::new(),
-                                String::from("__SHOW_DEVICE_FINGERPRINTS__"),
+                                self.contact.clone(),
+                                String::from("__CONTACT_CHANGED__"),
                             )));
                         }
-                        KeyCode::Char('m')
-                            if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
-                        {
-                            return Ok(Some((String::new(), String::from("__ENABLE_CARBONS__"))));
-                        }
-                        KeyCode::Char('r')
-                            if key.modifiers.contains(event::KeyModifiers::CONTROL) => {}
-                        // Add test shortcut for friend request notifications (Ctrl+N)
-                        KeyCode::Char('n')
-                            if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
-                        {
-                            return Ok(Some((
-                                String::new(),
-                                String::from("__TEST_FRIEND_REQUEST__"),
-                            )));
-                        }
-                        KeyCode::Up => {
-                            if let Tab::Contacts = self.active_tab {
-                                if !self.contacts.is_empty() {
-                                    self.current_contact_index =
-                                        (self.current_contact_index + self.contacts.len() - 1)
-                                            % self.contacts.len();
-                                    let new_contact =
-                                        self.contacts[self.current_contact_index].clone();
-                                    let contact_changed = new_contact != self.contact;
-                                    self.contact = new_contact;
-
-                                    // Clear unread status for the newly selected contact
-                                    if contact_changed {
-                                        self.unread_contacts.remove(&self.contact);
-                                        return Ok(Some((
-                                            self.contact.clone(),
-                                            String::from("__CONTACT_CHANGED__"),
-                                        )));
-                                    }
+                    }
+                }
+            }
+            KeyCode::PageUp => {
+                // Scroll messages up (Fn+Up on Mac)
+                let current = self.message_scroll_offset.unwrap_or(0);
+                self.message_scroll_offset = Some(current + 10);
+            }
+            KeyCode::PageDown => {
+                // Scroll messages down (Fn+Down on Mac)
+                if let Some(offset) = self.message_scroll_offset {
+                    if offset <= 10 {
+                        // Back to auto-scroll mode
+                        self.message_scroll_offset = None;
+                    } else {
+                        self.message_scroll_offset = Some(offset - 10);
+                    }
+                }
+                // If already None (auto-scroll), do nothing
+            }
+            KeyCode::End => {
+                // Jump back to latest messages
+                self.message_scroll_offset = None;
+            }
+            _ => {
+                if let Tab::Messages = self.active_tab {
+                    // Option+Left/Right for word navigation (macOS style)
+                    if key.modifiers.contains(event::KeyModifiers::ALT) {
+                        match key.code {
+                            KeyCode::Left => {
+                                let val = self.input.value();
+                                let cursor = self.input.cursor();
+                                // Move left past whitespace, then past word chars
+                                let bytes = val.as_bytes();
+                                let mut pos = cursor;
+                                while pos > 0 && bytes[pos - 1] == b' ' {
+                                    pos -= 1;
+                                }
+                                while pos > 0 && bytes[pos - 1] != b' ' {
+                                    pos -= 1;
+                                }
+                                // Move cursor to new position
+                                let steps = cursor - pos;
+                                for _ in 0..steps {
+                                    self.input.handle_event(&Event::Key(
+                                        crossterm::event::KeyEvent::new(
+                                            KeyCode::Left,
+                                            event::KeyModifiers::NONE,
+                                        ),
+                                    ));
                                 }
                             }
-                        }
-                        KeyCode::Down => {
-                            if let Tab::Contacts = self.active_tab {
-                                if !self.contacts.is_empty() {
-                                    self.current_contact_index =
-                                        (self.current_contact_index + 1) % self.contacts.len();
-                                    let new_contact =
-                                        self.contacts[self.current_contact_index].clone();
-                                    let contact_changed = new_contact != self.contact;
-                                    self.contact = new_contact;
-
-                                    // Clear unread status for the newly selected contact
-                                    if contact_changed {
-                                        self.unread_contacts.remove(&self.contact);
-                                        return Ok(Some((
-                                            self.contact.clone(),
-                                            String::from("__CONTACT_CHANGED__"),
-                                        )));
-                                    }
+                            KeyCode::Right => {
+                                let val = self.input.value();
+                                let cursor = self.input.cursor();
+                                let len = val.len();
+                                let bytes = val.as_bytes();
+                                // Move right past word chars, then past whitespace
+                                let mut pos = cursor;
+                                while pos < len && bytes[pos] != b' ' {
+                                    pos += 1;
+                                }
+                                while pos < len && bytes[pos] == b' ' {
+                                    pos += 1;
+                                }
+                                let steps = pos - cursor;
+                                for _ in 0..steps {
+                                    self.input.handle_event(&Event::Key(
+                                        crossterm::event::KeyEvent::new(
+                                            KeyCode::Right,
+                                            event::KeyModifiers::NONE,
+                                        ),
+                                    ));
                                 }
                             }
-                        }
-                        KeyCode::PageUp => {
-                            // Scroll messages up (Fn+Up on Mac)
-                            let current = self.message_scroll_offset.unwrap_or(0);
-                            self.message_scroll_offset = Some(current + 10);
-                        }
-                        KeyCode::PageDown => {
-                            // Scroll messages down (Fn+Down on Mac)
-                            if let Some(offset) = self.message_scroll_offset {
-                                if offset <= 10 {
-                                    // Back to auto-scroll mode
-                                    self.message_scroll_offset = None;
-                                } else {
-                                    self.message_scroll_offset = Some(offset - 10);
-                                }
-                            }
-                            // If already None (auto-scroll), do nothing
-                        }
-                        KeyCode::End => {
-                            // Jump back to latest messages
-                            self.message_scroll_offset = None;
-                        }
-                        _ => {
-                            if let Tab::Messages = self.active_tab {
-                                // Option+Left/Right for word navigation (macOS style)
-                                if key.modifiers.contains(event::KeyModifiers::ALT) {
-                                    match key.code {
-                                        KeyCode::Left => {
-                                            let val = self.input.value();
-                                            let cursor = self.input.cursor();
-                                            // Move left past whitespace, then past word chars
-                                            let bytes = val.as_bytes();
-                                            let mut pos = cursor;
-                                            while pos > 0 && bytes[pos - 1] == b' ' {
-                                                pos -= 1;
-                                            }
-                                            while pos > 0 && bytes[pos - 1] != b' ' {
-                                                pos -= 1;
-                                            }
-                                            // Move cursor to new position
-                                            let steps = cursor - pos;
-                                            for _ in 0..steps {
-                                                self.input.handle_event(&Event::Key(
-                                                    crossterm::event::KeyEvent::new(
-                                                        KeyCode::Left,
-                                                        event::KeyModifiers::NONE,
-                                                    ),
-                                                ));
-                                            }
-                                        }
-                                        KeyCode::Right => {
-                                            let val = self.input.value();
-                                            let cursor = self.input.cursor();
-                                            let len = val.len();
-                                            let bytes = val.as_bytes();
-                                            // Move right past word chars, then past whitespace
-                                            let mut pos = cursor;
-                                            while pos < len && bytes[pos] != b' ' {
-                                                pos += 1;
-                                            }
-                                            while pos < len && bytes[pos] == b' ' {
-                                                pos += 1;
-                                            }
-                                            let steps = pos - cursor;
-                                            for _ in 0..steps {
-                                                self.input.handle_event(&Event::Key(
-                                                    crossterm::event::KeyEvent::new(
-                                                        KeyCode::Right,
-                                                        event::KeyModifiers::NONE,
-                                                    ),
-                                                ));
-                                            }
-                                        }
-                                        _ => {
-                                            self.input.handle_event(&Event::Key(key));
-                                        }
-                                    }
-                                } else {
-                                    self.input.handle_event(&Event::Key(key));
-                                }
+                            _ => {
+                                self.input.handle_event(&Event::Key(key));
                             }
                         }
+                    } else {
+                        self.input.handle_event(&Event::Key(key));
                     }
                 }
             }
@@ -1053,7 +1030,7 @@ impl ChatUI {
     }
 
     // Check and clear typing states older than the timeout duration
-    pub fn clean_typing_states(&mut self, timeout_secs: i64) {
+    pub fn clean_typing_states(&mut self, timeout_secs: i64) -> bool {
         let now = chrono::Utc::now();
         let mut to_remove = Vec::new();
 
@@ -1066,9 +1043,12 @@ impl ChatUI {
             }
         }
 
+        let changed = !to_remove.is_empty();
         for jid in to_remove {
             self.typing_states.remove(&jid);
         }
+
+        changed
     }
 
     // Reset typing status when a message is received from contact
@@ -1123,7 +1103,7 @@ impl ChatUI {
     }
 
     // Check and clear friend request notification if it's been shown for enough time
-    pub fn clean_friend_request_notifications(&mut self, timeout_secs: i64) {
+    pub fn clean_friend_request_notifications(&mut self, timeout_secs: i64) -> bool {
         if let Some(notification) = &self.friend_request_notification {
             let now = chrono::Utc::now();
             if (now - notification.timestamp).num_seconds() > timeout_secs {
@@ -1132,12 +1112,14 @@ impl ChatUI {
                     notification.contact
                 );
                 self.friend_request_notification = None;
+                return true;
             }
         } else {
             // Auto-dismissal isn't happening because there's no active notification
             // This is expected most of the time, so we'll use a trace level log
             // debug!("UI: No friend request notification to clean");
         }
+        false
     }
 
     /// Test the friend request notification UI by artificially triggering a notification

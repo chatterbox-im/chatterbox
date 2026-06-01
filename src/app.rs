@@ -12,7 +12,7 @@ use crate::{
     ui::ChatUI,
 };
 use chatterbox::{
-    models::Message,
+    models::{Message, PresenceEvent},
     storage::MessageStore,
     xmpp::message_archive::MAMQueryOptions,
     xmpp::{chat_states::TypingStatus, XMPPClient},
@@ -565,6 +565,7 @@ async fn run_main_loop(
 ) -> Result<()> {
     let mut presence_rx = xmpp_client.subscribe_to_presence();
     let mut friend_req_rx = xmpp_client.subscribe_to_friend_requests();
+    let mut terminal_events = crate::ui::TerminalEventReader::new();
 
     xmpp_client.resend_presence();
     chat_ui.set_connection_status(xmpp_client.is_client_accessible());
@@ -572,221 +573,292 @@ async fn run_main_loop(
     let mut last_key_press = std::time::Instant::now();
     let mut last_state_sent = None::<TypingStatus>;
     let mut verified_contacts = std::collections::HashSet::new();
-    let mut last_connection_check = std::time::Instant::now();
     let mut typing_failures: u32 = 0;
-    let mut last_typing_check: Option<std::time::Instant> = None;
+    let mut cleanup_tick = tokio::time::interval(std::time::Duration::from_secs(1));
+    let mut connection_tick = tokio::time::interval(std::time::Duration::from_secs(5));
+    let mut typing_tick = tokio::time::interval(std::time::Duration::from_secs(1));
+    let mut render_needed = true;
+    let mut terminal_events_closed = false;
+    let mut presence_closed = false;
+    let mut friend_req_closed = false;
+    let mut typing_closed = false;
+
+    check_active_contact_omemo_keys(chat_ui, xmpp_client, &mut verified_contacts);
 
     loop {
-        terminal.draw(|f| chat_ui.draw(f))?;
-
-        chat_ui.clean_typing_states(30);
-        chat_ui.clean_friend_request_notifications(5);
-
-        let input_result = chat_ui.handle_input()?;
-
-        // Check OMEMO keys for newly-selected contacts
-        if chat_ui.has_active_contact() && chat_ui.is_omemo_enabled() {
-            let active_contact = chat_ui.get_active_contact();
-            if !verified_contacts.contains(&active_contact) {
-                verified_contacts.insert(active_contact.clone());
-                let client_clone = xmpp_client.clone();
-                let contact_clone = active_contact.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = client_clone
-                        .check_omemo_keys_for_contact(&contact_clone)
-                        .await
-                    {
-                        error!("Failed to check OMEMO keys for {}: {}", contact_clone, e);
-                    }
-                });
-            }
+        if render_needed {
+            terminal.draw(|f| chat_ui.draw(f))?;
+            render_needed = false;
         }
 
-        // Process incoming messages
-        if let Ok(message) = msg_rx.try_recv() {
-            if message.sender_id == "system" && message.content.starts_with("__OMEMO_KEY_VERIFY__:")
-            {
-                let parts: Vec<&str> = message.content.splitn(4, ':').collect();
-                if parts.len() >= 3 {
-                    let contact = parts[1];
-                    let fingerprint = parts[2];
-                    let device_id = if parts.len() > 3 {
-                        Some(parts[3])
-                    } else {
-                        None
-                    };
-                    handle_new_omemo_key(chat_ui, contact, fingerprint, device_id.as_deref());
-                }
-            } else {
-                chat_ui.add_message(message.clone());
-                // Persist non-system messages locally
-                if message.sender_id != "system" {
-                    if let Some(s) = store {
-                        if let Err(e) = s.store_message(&message) {
-                            error!("Failed to persist message: {}", e);
-                        }
-                    }
-                }
-                if message.sender_id != "me" && message.sender_id != "system" {
-                    chat_ui.message_received_from(&message.sender_id);
-                    if chat_ui.os_notifications_enabled() && !chat_ui.is_terminal_focused() {
-                        notify_incoming_message(&message);
-                    }
-                }
-                if !chat_ui.contacts.contains(&message.sender_id)
-                    && message.sender_id != "me"
-                    && message.sender_id != "system"
-                {
-                    chat_ui.add_contact(&message.sender_id);
-                }
-            }
-        }
+        tokio::select! {
+            terminal_event = terminal_events.recv(), if !terminal_events_closed => {
+                match terminal_event {
+                    Some(event) => {
+                        let is_key_press = matches!(&event, crossterm::event::Event::Key(key) if key.kind == crossterm::event::KeyEventKind::Press);
+                        let input_result = chat_ui.handle_terminal_event(event)?;
 
-        // Drain presence updates
-        loop {
-            match presence_rx.try_recv() {
-                Ok(event) => {
-                    if let Some((contact_id, status)) = event.to_contact_status() {
-                        chat_ui.update_contact_status(&contact_id, status);
-                    }
-                }
-                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => {
-                    warn!(
-                        "Presence broadcast lagged by {} events, requesting refresh",
-                        n
-                    );
-                    xmpp_client.resend_presence();
-                }
-                Err(_) => break,
-            }
-        }
-
-        // Friend request notifications
-        match friend_req_rx.try_recv() {
-            Ok(contact_id) => {
-                info!(
-                    "Received auto-accepted friend request notification for {}",
-                    contact_id
-                );
-                chat_ui.show_friend_request_notification(&contact_id);
-                if !chat_ui.contacts.contains(&contact_id) {
-                    chat_ui.add_contact(&contact_id);
-                    info!("Added new contact {} to contacts list", contact_id);
-                }
-            }
-            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => {
-                warn!("Friend request broadcast lagged by {} events", n);
-            }
-            Err(_) => {}
-        }
-
-        // Typing notifications from remote
-        if let Ok((contact_id, typing_status)) = typing_rx.try_recv() {
-            chat_ui.update_typing_status(&contact_id, typing_status);
-        }
-
-        // Periodic connection status check
-        let now = std::time::Instant::now();
-        if now.duration_since(last_connection_check) >= std::time::Duration::from_secs(5) {
-            chat_ui.set_connection_status(xmpp_client.is_client_accessible());
-            last_connection_check = now;
-        }
-
-        // Outbound typing state management
-        if input_result.is_none() && chat_ui.has_active_contact() {
-            let now = std::time::Instant::now();
-            let elapsed = now.duration_since(last_key_press);
-            let contact = chat_ui.get_active_contact();
-
-            let should_check_typing = if let Some(last_check) = last_typing_check {
-                if now.duration_since(last_check) >= std::time::Duration::from_secs(1) {
-                    last_typing_check = Some(now);
-                    true
-                } else {
-                    false
-                }
-            } else {
-                last_typing_check = Some(now);
-                true
-            };
-
-            let should_send_typing = typing_failures < 3;
-
-            if should_check_typing && should_send_typing {
-                if elapsed < std::time::Duration::from_secs(5) {
-                    if last_state_sent != Some(TypingStatus::Composing)
-                        || elapsed > std::time::Duration::from_secs(10)
-                    {
-                        match xmpp_client.send_chat_state(&contact, &TypingStatus::Composing) {
-                            Ok(_) => {
-                                last_state_sent = Some(TypingStatus::Composing);
-                                typing_failures = 0;
-                            }
-                            Err(e) => {
-                                error!("Failed to send typing indicator: {}", e);
-                                typing_failures += 1;
-                            }
-                        }
-                    }
-                } else if elapsed >= std::time::Duration::from_secs(5)
-                    && elapsed < std::time::Duration::from_secs(30)
-                    && last_state_sent != Some(TypingStatus::Paused)
-                {
-                    match xmpp_client.send_chat_state(&contact, &TypingStatus::Paused) {
-                        Ok(_) => {
-                            last_state_sent = Some(TypingStatus::Paused);
+                        if is_key_press {
+                            last_key_press = std::time::Instant::now();
                             typing_failures = 0;
                         }
-                        Err(e) => {
-                            error!("Failed to send paused typing indicator: {}", e);
-                            typing_failures += 1;
+
+                        if let Some((recipient, content)) = input_result {
+                            handle_user_command(
+                                chat_ui,
+                                terminal,
+                                xmpp_client,
+                                &recipient,
+                                &content,
+                                disable_mam,
+                                &mut last_state_sent,
+                                store,
+                                app_settings,
+                            )
+                            .await?;
+
+                            if recipient.is_empty() && content.is_empty() {
+                                break;
+                            }
                         }
+
+                        check_active_contact_omemo_keys(chat_ui, xmpp_client, &mut verified_contacts);
+                        render_needed = true;
                     }
-                } else if elapsed >= std::time::Duration::from_secs(30)
-                    && last_state_sent != Some(TypingStatus::Active)
-                {
-                    match xmpp_client.send_chat_state(&contact, &TypingStatus::Active) {
-                        Ok(_) => {
-                            last_state_sent = Some(TypingStatus::Active);
-                            typing_failures = 0;
-                        }
-                        Err(e) => {
-                            error!("Failed to send active state: {}", e);
-                            typing_failures += 1;
-                        }
+                    None => {
+                        terminal_events_closed = true;
                     }
                 }
             }
-        } else if input_result.is_some() {
-            last_key_press = std::time::Instant::now();
-            typing_failures = 0;
-        }
-
-        match input_result {
-            Some((recipient, content)) => {
-                handle_user_command(
+            message = msg_rx.recv() => {
+                match message {
+                    Some(message) => {
+                        process_incoming_message(chat_ui, message, store);
+                        while let Ok(message) = msg_rx.try_recv() {
+                            process_incoming_message(chat_ui, message, store);
+                        }
+                        render_needed = true;
+                    }
+                    None => {
+                        warn!("Message channel closed; exiting UI loop");
+                        break;
+                    }
+                }
+            }
+            presence = presence_rx.recv(), if !presence_closed => {
+                match presence {
+                    Ok(event) => {
+                        let mut changed = process_presence_event(chat_ui, event);
+                        loop {
+                            match presence_rx.try_recv() {
+                                Ok(event) => changed |= process_presence_event(chat_ui, event),
+                                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => {
+                                    warn!("Presence broadcast lagged by {} events, requesting refresh", n);
+                                    xmpp_client.resend_presence();
+                                }
+                                Err(tokio::sync::broadcast::error::TryRecvError::Closed) => {
+                                    presence_closed = true;
+                                    break;
+                                }
+                                Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+                            }
+                        }
+                        render_needed |= changed;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        warn!("Presence broadcast lagged by {} events, requesting refresh", n);
+                        xmpp_client.resend_presence();
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        presence_closed = true;
+                    }
+                }
+            }
+            friend_req = friend_req_rx.recv(), if !friend_req_closed => {
+                match friend_req {
+                    Ok(contact_id) => {
+                        process_friend_request(chat_ui, contact_id);
+                        loop {
+                            match friend_req_rx.try_recv() {
+                                Ok(contact_id) => process_friend_request(chat_ui, contact_id),
+                                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => warn!("Friend request broadcast lagged by {} events", n),
+                                Err(tokio::sync::broadcast::error::TryRecvError::Closed) => {
+                                    friend_req_closed = true;
+                                    break;
+                                }
+                                Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+                            }
+                        }
+                        render_needed = true;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        warn!("Friend request broadcast lagged by {} events", n);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        friend_req_closed = true;
+                    }
+                }
+            }
+            typing = typing_rx.recv(), if !typing_closed => {
+                match typing {
+                    Some((contact_id, typing_status)) => {
+                        chat_ui.update_typing_status(&contact_id, typing_status);
+                        while let Ok((contact_id, typing_status)) = typing_rx.try_recv() {
+                            chat_ui.update_typing_status(&contact_id, typing_status);
+                        }
+                        render_needed = true;
+                    }
+                    None => {
+                        typing_closed = true;
+                    }
+                }
+            }
+            _ = cleanup_tick.tick() => {
+                let typing_changed = chat_ui.clean_typing_states(30);
+                let friend_request_changed = chat_ui.clean_friend_request_notifications(5);
+                render_needed |= typing_changed || friend_request_changed;
+            }
+            _ = connection_tick.tick() => {
+                let connected = xmpp_client.is_client_accessible();
+                if chat_ui.is_connected() != connected {
+                    chat_ui.set_connection_status(connected);
+                    render_needed = true;
+                }
+            }
+            _ = typing_tick.tick() => {
+                update_outbound_typing_state(
                     chat_ui,
-                    terminal,
                     xmpp_client,
-                    &recipient,
-                    &content,
-                    disable_mam,
+                    last_key_press,
                     &mut last_state_sent,
-                    store,
-                    app_settings,
-                )
-                .await?;
-
-                // Quit signal: both empty
-                if recipient.is_empty() && content.is_empty() {
-                    break;
-                }
+                    &mut typing_failures,
+                );
             }
-            None => {}
         }
     }
 
     Ok(())
+}
+
+fn process_incoming_message(chat_ui: &mut ChatUI, message: Message, store: Option<&MessageStore>) {
+    if message.sender_id == "system" && message.content.starts_with("__OMEMO_KEY_VERIFY__:") {
+        let parts: Vec<&str> = message.content.splitn(4, ':').collect();
+        if parts.len() >= 3 {
+            let contact = parts[1];
+            let fingerprint = parts[2];
+            let device_id = if parts.len() > 3 {
+                Some(parts[3])
+            } else {
+                None
+            };
+            handle_new_omemo_key(chat_ui, contact, fingerprint, device_id);
+        }
+        return;
+    }
+
+    chat_ui.add_message(message.clone());
+    if message.sender_id != "system" {
+        if let Some(s) = store {
+            if let Err(e) = s.store_message(&message) {
+                error!("Failed to persist message: {}", e);
+            }
+        }
+    }
+    if message.sender_id != "me" && message.sender_id != "system" {
+        chat_ui.message_received_from(&message.sender_id);
+        if chat_ui.os_notifications_enabled() && !chat_ui.is_terminal_focused() {
+            notify_incoming_message(&message);
+        }
+    }
+    if !chat_ui.contacts.contains(&message.sender_id)
+        && message.sender_id != "me"
+        && message.sender_id != "system"
+    {
+        chat_ui.add_contact(&message.sender_id);
+    }
+}
+
+fn process_presence_event(chat_ui: &mut ChatUI, event: PresenceEvent) -> bool {
+    if let Some((contact_id, status)) = event.to_contact_status() {
+        let changed = chat_ui.get_contact_status(&contact_id) != status;
+        chat_ui.update_contact_status(&contact_id, status);
+        changed
+    } else {
+        false
+    }
+}
+
+fn process_friend_request(chat_ui: &mut ChatUI, contact_id: String) {
+    info!(
+        "Received auto-accepted friend request notification for {}",
+        contact_id
+    );
+    chat_ui.show_friend_request_notification(&contact_id);
+    if !chat_ui.contacts.contains(&contact_id) {
+        chat_ui.add_contact(&contact_id);
+        info!("Added new contact {} to contacts list", contact_id);
+    }
+}
+
+fn check_active_contact_omemo_keys(
+    chat_ui: &ChatUI,
+    xmpp_client: &XMPPClient,
+    verified_contacts: &mut std::collections::HashSet<String>,
+) {
+    if chat_ui.has_active_contact() && chat_ui.is_omemo_enabled() {
+        let active_contact = chat_ui.get_active_contact();
+        if !verified_contacts.contains(&active_contact) {
+            verified_contacts.insert(active_contact.clone());
+            let client_clone = xmpp_client.clone();
+            let contact_clone = active_contact.clone();
+            tokio::spawn(async move {
+                if let Err(e) = client_clone
+                    .check_omemo_keys_for_contact(&contact_clone)
+                    .await
+                {
+                    error!("Failed to check OMEMO keys for {}: {}", contact_clone, e);
+                }
+            });
+        }
+    }
+}
+
+fn update_outbound_typing_state(
+    chat_ui: &ChatUI,
+    xmpp_client: &mut XMPPClient,
+    last_key_press: std::time::Instant,
+    last_state_sent: &mut Option<TypingStatus>,
+    typing_failures: &mut u32,
+) {
+    if !chat_ui.has_active_contact() || *typing_failures >= 3 {
+        return;
+    }
+
+    let elapsed = std::time::Instant::now().duration_since(last_key_press);
+    let contact = chat_ui.get_active_contact();
+    let next_state = if elapsed < std::time::Duration::from_secs(5) {
+        Some(TypingStatus::Composing)
+    } else if elapsed < std::time::Duration::from_secs(30) {
+        Some(TypingStatus::Paused)
+    } else {
+        Some(TypingStatus::Active)
+    };
+
+    if next_state == *last_state_sent {
+        return;
+    }
+
+    let next_state = next_state.expect("typing state is always selected");
+    match xmpp_client.send_chat_state(&contact, &next_state) {
+        Ok(_) => {
+            *last_state_sent = Some(next_state);
+            *typing_failures = 0;
+        }
+        Err(e) => {
+            error!("Failed to send typing state {:?}: {}", next_state, e);
+            *typing_failures += 1;
+        }
+    }
 }
 
 fn notify_incoming_message(message: &Message) {
