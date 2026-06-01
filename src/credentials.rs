@@ -8,6 +8,12 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::path::PathBuf;
 
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct AppSettings {
+    #[serde(default)]
+    pub os_notifications_enabled: bool,
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Credentials {
     pub server: String,
@@ -80,6 +86,32 @@ pub fn load_credentials() -> Result<Option<Credentials>> {
     Ok(Some(credentials))
 }
 
+pub fn save_app_settings(settings: &AppSettings) -> Result<()> {
+    let config_path = get_settings_path()?;
+    let file = File::create(config_path)?;
+    serde_json::to_writer_pretty(file, settings)?;
+
+    info!("Application settings saved");
+    Ok(())
+}
+
+pub fn load_app_settings() -> Result<AppSettings> {
+    let config_path = get_settings_path()?;
+
+    if !config_path.exists() {
+        return Ok(AppSettings::default());
+    }
+
+    let mut file = File::open(config_path)?;
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)?;
+
+    let settings: AppSettings = serde_json::from_str(&contents)?;
+    info!("Application settings loaded");
+
+    Ok(settings)
+}
+
 static CONFIG_PATH_OVERRIDE: OnceCell<PathBuf> = OnceCell::new();
 
 fn get_config_path() -> Result<PathBuf> {
@@ -87,4 +119,8 @@ fn get_config_path() -> Result<PathBuf> {
         return Ok(path.clone());
     }
     Ok(get_config_dir()?.join("credentials.json"))
+}
+
+fn get_settings_path() -> Result<PathBuf> {
+    Ok(get_config_dir()?.join("settings.json"))
 }

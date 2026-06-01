@@ -49,6 +49,7 @@ textwrap = "0.16.0"
 clap = { version = "4.5", features = ["derive"] }
 regex = "1.11.1"
 rusqlite = { version = "0.31", features = ["bundled"] }
+notify-rust = "4.11"
 
 [build-dependencies]
 regex = "1.11.1"

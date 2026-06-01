@@ -1,6 +1,6 @@
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind},
+    event::{self, DisableFocusChange, EnableFocusChange, Event, KeyCode, KeyEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -38,10 +38,12 @@ pub struct ChatUI {
     contact_status: HashMap<String, ContactStatus>,
     typing_states: HashMap<String, (TypingStatus, chrono::DateTime<chrono::Utc>)>, // Contact -> (Status, Timestamp)
     omemo_enabled: bool, // Track if OMEMO encryption is enabled
+    os_notifications_enabled: bool,
+    terminal_focused: bool,
     key_confirmation: Option<KeyConfirmation>, // Add this field for key confirmation popup
     contact_add_dialog: Option<ContactAddDialog>, // Add this field for adding new contacts
     contact_remove_dialog: Option<ContactRemoveDialog>, // Add this field for remove confirmation
-    help_dialog: Option<HelpDialog>, // Add this field for help popup
+    help_dialog: Option<HelpDialog>,           // Add this field for help popup
     device_fingerprints_dialog: Option<DeviceFingerprintsDialog>, // Add this field for device fingerprints popup
     friend_request_notification: Option<FriendRequestNotification>, // Add this field for friend request notifications
     resources: HashMap<String, Vec<String>>, // Map of base JID -> resource JIDs
@@ -105,7 +107,9 @@ impl ChatUI {
             current_contact_index: 0,
             contact_status: HashMap::new(),
             typing_states: HashMap::new(),
-            omemo_enabled: true,                     // Default to enabled
+            omemo_enabled: true, // Default to enabled
+            os_notifications_enabled: false,
+            terminal_focused: true,
             key_confirmation: None,                  // Initialize to None
             contact_add_dialog: None,                // Initialize to None
             contact_remove_dialog: None,             // Initialize to None
@@ -331,7 +335,12 @@ impl ChatUI {
         // Handle key confirmation popup if active
         if self.key_confirmation.is_some() {
             if event::poll(Duration::from_millis(10))? {
-                if let Event::Key(key) = event::read()? {
+                let terminal_event = event::read()?;
+                if let Some(focused) = focus_state_from_event(&terminal_event) {
+                    self.terminal_focused = focused;
+                    return Ok(None);
+                }
+                if let Event::Key(key) = terminal_event {
                     if key.kind == KeyEventKind::Press {
                         match key.code {
                             KeyCode::Char('y') | KeyCode::Char('Y') => {
@@ -373,7 +382,12 @@ impl ChatUI {
         // Handle contact remove confirmation dialog if active
         if let Some(dialog) = &self.contact_remove_dialog {
             if event::poll(Duration::from_millis(10))? {
-                if let Event::Key(key) = event::read()? {
+                let terminal_event = event::read()?;
+                if let Some(focused) = focus_state_from_event(&terminal_event) {
+                    self.terminal_focused = focused;
+                    return Ok(None);
+                }
+                if let Event::Key(key) = terminal_event {
                     if key.kind == KeyEventKind::Press {
                         match key.code {
                             KeyCode::Char('y') | KeyCode::Char('Y') => {
@@ -415,7 +429,12 @@ impl ChatUI {
         // Handle contact add dialog if active
         if let Some(dialog) = &self.contact_add_dialog {
             if event::poll(Duration::from_millis(10))? {
-                if let Event::Key(key) = event::read()? {
+                let terminal_event = event::read()?;
+                if let Some(focused) = focus_state_from_event(&terminal_event) {
+                    self.terminal_focused = focused;
+                    return Ok(None);
+                }
+                if let Event::Key(key) = terminal_event {
                     if key.kind == KeyEventKind::Press {
                         match key.code {
                             KeyCode::Esc => {
@@ -464,7 +483,12 @@ impl ChatUI {
         // Handle help dialog if active
         if self.help_dialog.is_some() {
             if event::poll(Duration::from_millis(10))? {
-                if let Event::Key(key) = event::read()? {
+                let terminal_event = event::read()?;
+                if let Some(focused) = focus_state_from_event(&terminal_event) {
+                    self.terminal_focused = focused;
+                    return Ok(None);
+                }
+                if let Event::Key(key) = terminal_event {
                     if key.kind == KeyEventKind::Press {
                         // Any key press will close the help dialog
                         self.help_dialog = None;
@@ -477,7 +501,12 @@ impl ChatUI {
         // Handle device fingerprints dialog if active
         if let Some(ref mut dialog) = self.device_fingerprints_dialog {
             if event::poll(Duration::from_millis(10))? {
-                if let Event::Key(key) = event::read()? {
+                let terminal_event = event::read()?;
+                if let Some(focused) = focus_state_from_event(&terminal_event) {
+                    self.terminal_focused = focused;
+                    return Ok(None);
+                }
+                if let Event::Key(key) = terminal_event {
                     if key.kind == KeyEventKind::Press {
                         match key.code {
                             KeyCode::Up => {
@@ -511,7 +540,12 @@ impl ChatUI {
 
         // Original input handling code
         if event::poll(Duration::from_millis(10))? {
-            if let Event::Key(key) = event::read()? {
+            let terminal_event = event::read()?;
+            if let Some(focused) = focus_state_from_event(&terminal_event) {
+                self.terminal_focused = focused;
+                return Ok(None);
+            }
+            if let Event::Key(key) = terminal_event {
                 if key.kind == KeyEventKind::Press {
                     match key.code {
                         KeyCode::Esc => return Ok(Some((String::new(), String::new()))), // Signal to quit
@@ -576,6 +610,22 @@ impl ChatUI {
                             };
 
                             self.add_message(Message::system("me", status_msg));
+                        }
+                        KeyCode::Char('p') | KeyCode::Char('P')
+                            if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
+                        {
+                            self.os_notifications_enabled = !self.os_notifications_enabled;
+                            let status_msg = if self.os_notifications_enabled {
+                                "OS notifications enabled"
+                            } else {
+                                "OS notifications disabled"
+                            };
+
+                            self.add_message(Message::system("me", status_msg));
+                            return Ok(Some((
+                                String::new(),
+                                String::from("__TOGGLE_OS_NOTIFICATIONS__"),
+                            )));
                         }
                         KeyCode::Char('t')
                             if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
@@ -889,13 +939,28 @@ impl ChatUI {
         } else {
             Style::default().fg(Color::Red)
         };
+        let notification_status_text = if self.os_notifications_enabled {
+            "on"
+        } else {
+            "off"
+        };
+        let notification_status_style = if self.os_notifications_enabled {
+            Style::default().fg(Color::Green)
+        } else {
+            Style::default().fg(Color::Red)
+        };
 
         let help_spans = vec![
             Span::styled(
-                " ESC quit | TAB switch | Ctrl+H help | Ctrl+A add | Ctrl+O toggle OMEMO [",
+                " ESC quit | TAB switch | Ctrl+H help | Ctrl+A add | Ctrl+O OMEMO [",
                 Style::default().fg(Color::Gray),
             ),
             Span::styled(omemo_status_text, omemo_status_style),
+            Span::styled(
+                "] | Ctrl+P notifications [",
+                Style::default().fg(Color::Gray),
+            ),
+            Span::styled(notification_status_text, notification_status_style),
             Span::styled(
                 "] | Ctrl+T trust | Fn+↑/↓ scroll",
                 Style::default().fg(Color::Gray),
@@ -1020,6 +1085,20 @@ impl ChatUI {
     /// This setting can be toggled by the user with Ctrl+O
     pub fn is_omemo_enabled(&self) -> bool {
         self.omemo_enabled
+    }
+
+    /// Returns whether OS notifications are currently enabled.
+    pub fn os_notifications_enabled(&self) -> bool {
+        self.os_notifications_enabled
+    }
+
+    pub fn set_os_notifications_enabled(&mut self, enabled: bool) {
+        self.os_notifications_enabled = enabled;
+    }
+
+    /// Returns whether the terminal currently reports keyboard focus.
+    pub fn is_terminal_focused(&self) -> bool {
+        self.terminal_focused
     }
 
     /// Set the connection status to the XMPP server
@@ -1421,6 +1500,7 @@ fn draw_help_dialog<B: Backend>(f: &mut Frame<B>, area: Rect) {
             "Ctrl+R",
             "Force OMEMO device list re-fetch for active contact",
         ),
+        ("Ctrl+P", "Toggle OS notifications"),
         ("", ""),
         ("Debug", ""),
         (
@@ -1701,7 +1781,7 @@ fn draw_friend_request_notification<B: Backend>(
 pub fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableFocusChange)?;
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
     Ok(terminal)
@@ -1709,7 +1789,19 @@ pub fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
 
 pub fn restore_terminal(mut terminal: Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        DisableFocusChange,
+        LeaveAlternateScreen
+    )?;
     terminal.show_cursor()?;
     Ok(())
+}
+
+fn focus_state_from_event(event: &Event) -> Option<bool> {
+    match event {
+        Event::FocusGained => Some(true),
+        Event::FocusLost => Some(false),
+        _ => None,
+    }
 }

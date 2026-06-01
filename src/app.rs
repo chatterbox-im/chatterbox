@@ -3,10 +3,14 @@
 //! Extracted from main.rs to keep the entry point minimal.
 
 use anyhow::Result;
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
+use notify_rust::Notification;
 use std::io;
 
-use crate::{credentials::load_credentials, ui::ChatUI};
+use crate::{
+    credentials::{load_app_settings, load_credentials, save_app_settings, AppSettings},
+    ui::ChatUI,
+};
 use chatterbox::{
     models::Message,
     storage::MessageStore,
@@ -30,6 +34,14 @@ pub async fn run_app(
     // Setup terminal UI
     let mut terminal = crate::ui::setup_terminal()?;
     let mut chat_ui = ChatUI::new();
+    let mut app_settings = match load_app_settings() {
+        Ok(settings) => settings,
+        Err(e) => {
+            warn!("Failed to load app settings: {}. Using defaults.", e);
+            AppSettings::default()
+        }
+    };
+    chat_ui.set_os_notifications_enabled(app_settings.os_notifications_enabled);
 
     // Draw UI early
     terminal.draw(|f| chat_ui.draw(f))?;
@@ -100,6 +112,7 @@ pub async fn run_app(
         disable_mam,
         typing_rx,
         store.as_ref(),
+        &mut app_settings,
     )
     .await?;
 
@@ -548,6 +561,7 @@ async fn run_main_loop(
     disable_mam: bool,
     mut typing_rx: tokio::sync::mpsc::Receiver<(String, TypingStatus)>,
     store: Option<&MessageStore>,
+    app_settings: &mut AppSettings,
 ) -> Result<()> {
     let mut presence_rx = xmpp_client.subscribe_to_presence();
     let mut friend_req_rx = xmpp_client.subscribe_to_friend_requests();
@@ -615,6 +629,9 @@ async fn run_main_loop(
                 }
                 if message.sender_id != "me" && message.sender_id != "system" {
                     chat_ui.message_received_from(&message.sender_id);
+                    if chat_ui.os_notifications_enabled() && !chat_ui.is_terminal_focused() {
+                        notify_incoming_message(&message);
+                    }
                 }
                 if !chat_ui.contacts.contains(&message.sender_id)
                     && message.sender_id != "me"
@@ -756,6 +773,7 @@ async fn run_main_loop(
                     disable_mam,
                     &mut last_state_sent,
                     store,
+                    app_settings,
                 )
                 .await?;
 
@@ -771,6 +789,18 @@ async fn run_main_loop(
     Ok(())
 }
 
+fn notify_incoming_message(message: &Message) {
+    let summary = format!("New message from {}", message.sender_id);
+    if let Err(e) = Notification::new()
+        .summary(&summary)
+        .body(&message.content)
+        .appname("Chatterbox")
+        .show()
+    {
+        debug!("Failed to show OS notification: {}", e);
+    }
+}
+
 /// Dispatch a user command/message from the input handler.
 async fn handle_user_command(
     chat_ui: &mut ChatUI,
@@ -781,6 +811,7 @@ async fn handle_user_command(
     disable_mam: bool,
     last_state_sent: &mut Option<TypingStatus>,
     store: Option<&MessageStore>,
+    app_settings: &mut AppSettings,
 ) -> Result<()> {
     if content.starts_with("/plain ") {
         let plain_content = content.trim_start_matches("/plain ");
@@ -933,6 +964,18 @@ async fn handle_user_command(
     if content == "__TEST_FRIEND_REQUEST__" {
         info!("Testing friend request notification UI");
         chat_ui.test_friend_request_notification();
+        return Ok(());
+    }
+
+    if content == "__TOGGLE_OS_NOTIFICATIONS__" {
+        app_settings.os_notifications_enabled = chat_ui.os_notifications_enabled();
+        if let Err(e) = save_app_settings(app_settings) {
+            error!("Failed to save app settings: {}", e);
+            chat_ui.add_message(create_system_message(
+                "me",
+                &format!("Failed to save notification setting: {}", e),
+            ));
+        }
         return Ok(());
     }
 
