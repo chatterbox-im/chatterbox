@@ -20,12 +20,12 @@ use std::collections::HashMap;
 use tokio::sync::{mpsc, oneshot};
 use xmpp_parsers::Element;
 
-use crate::models::{Message, DeliveryStatus, PendingMessage};
-use crate::omemo::OmemoManager;
 use super::custom_ns;
-use super::{chat_states, delivery_receipts, discovery, presence};
 use super::iq_registry::IqResponseRegistry;
 use super::transport::StanzaTx;
+use super::{chat_states, delivery_receipts, discovery, presence};
+use crate::models::{DeliveryStatus, Message, PendingMessage};
+use crate::omemo::OmemoManager;
 
 /// Commands sent from the app layer to the coordinator.
 #[derive(Debug)]
@@ -70,9 +70,7 @@ pub enum CoordinatorCommand {
         reply: oneshot::Sender<Result<()>>,
     },
     /// Check if OMEMO is enabled.
-    IsOmemoEnabled {
-        reply: oneshot::Sender<bool>,
-    },
+    IsOmemoEnabled { reply: oneshot::Sender<bool> },
     /// Store a message ID for receipt tracking.
     StoreMessageId {
         recipient: String,
@@ -97,81 +95,121 @@ impl CoordinatorHandle {
     /// Send an encrypted message. Returns the message ID on success.
     pub async fn send_message(&self, recipient: &str, content: &str) -> Result<String> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        self.cmd_tx.send(CoordinatorCommand::SendMessage {
-            recipient: recipient.to_string(),
-            content: content.to_string(),
-            reply: reply_tx,
-        }).await.map_err(|_| anyhow!("Coordinator shut down"))?;
-        reply_rx.await.map_err(|_| anyhow!("Coordinator dropped reply"))?
+        self.cmd_tx
+            .send(CoordinatorCommand::SendMessage {
+                recipient: recipient.to_string(),
+                content: content.to_string(),
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| anyhow!("Coordinator shut down"))?;
+        reply_rx
+            .await
+            .map_err(|_| anyhow!("Coordinator dropped reply"))?
     }
 
     /// Send a plaintext message. Returns the message ID on success.
     pub async fn send_plaintext(&self, recipient: &str, content: &str) -> Result<String> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        self.cmd_tx.send(CoordinatorCommand::SendPlaintext {
-            recipient: recipient.to_string(),
-            content: content.to_string(),
-            reply: reply_tx,
-        }).await.map_err(|_| anyhow!("Coordinator shut down"))?;
-        reply_rx.await.map_err(|_| anyhow!("Coordinator dropped reply"))?
+        self.cmd_tx
+            .send(CoordinatorCommand::SendPlaintext {
+                recipient: recipient.to_string(),
+                content: content.to_string(),
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| anyhow!("Coordinator shut down"))?;
+        reply_rx
+            .await
+            .map_err(|_| anyhow!("Coordinator dropped reply"))?
     }
 
     /// Get device IDs for a JID.
     pub async fn get_device_ids(&self, jid: &str) -> Result<Vec<u32>> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        self.cmd_tx.send(CoordinatorCommand::GetDeviceIds {
-            jid: jid.to_string(),
-            reply: reply_tx,
-        }).await.map_err(|_| anyhow!("Coordinator shut down"))?;
-        reply_rx.await.map_err(|_| anyhow!("Coordinator dropped reply"))?
+        self.cmd_tx
+            .send(CoordinatorCommand::GetDeviceIds {
+                jid: jid.to_string(),
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| anyhow!("Coordinator shut down"))?;
+        reply_rx
+            .await
+            .map_err(|_| anyhow!("Coordinator dropped reply"))?
     }
 
     /// Get fingerprint for a device.
     pub async fn get_fingerprint(&self, jid: &str, device_id: u32) -> Result<String> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        self.cmd_tx.send(CoordinatorCommand::GetFingerprint {
-            jid: jid.to_string(),
-            device_id,
-            reply: reply_tx,
-        }).await.map_err(|_| anyhow!("Coordinator shut down"))?;
-        reply_rx.await.map_err(|_| anyhow!("Coordinator dropped reply"))?
+        self.cmd_tx
+            .send(CoordinatorCommand::GetFingerprint {
+                jid: jid.to_string(),
+                device_id,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| anyhow!("Coordinator shut down"))?;
+        reply_rx
+            .await
+            .map_err(|_| anyhow!("Coordinator dropped reply"))?
     }
 
     /// Check OMEMO keys for a contact.
     pub async fn check_omemo_keys(&self, contact: &str) -> Result<()> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        self.cmd_tx.send(CoordinatorCommand::CheckOmemoKeys {
-            contact: contact.to_string(),
-            reply: reply_tx,
-        }).await.map_err(|_| anyhow!("Coordinator shut down"))?;
-        reply_rx.await.map_err(|_| anyhow!("Coordinator dropped reply"))?
+        self.cmd_tx
+            .send(CoordinatorCommand::CheckOmemoKeys {
+                contact: contact.to_string(),
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| anyhow!("Coordinator shut down"))?;
+        reply_rx
+            .await
+            .map_err(|_| anyhow!("Coordinator dropped reply"))?
     }
 
     /// Toggle trust for a contact's devices.
     pub async fn toggle_trust(&self, contact: &str) -> Result<bool> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        self.cmd_tx.send(CoordinatorCommand::ToggleTrust {
-            contact: contact.to_string(),
-            reply: reply_tx,
-        }).await.map_err(|_| anyhow!("Coordinator shut down"))?;
-        reply_rx.await.map_err(|_| anyhow!("Coordinator dropped reply"))?
+        self.cmd_tx
+            .send(CoordinatorCommand::ToggleTrust {
+                contact: contact.to_string(),
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| anyhow!("Coordinator shut down"))?;
+        reply_rx
+            .await
+            .map_err(|_| anyhow!("Coordinator dropped reply"))?
     }
 
     /// Process key verification response.
     pub async fn key_verification_response(&self, contact: &str, response: &str) -> Result<()> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        self.cmd_tx.send(CoordinatorCommand::KeyVerificationResponse {
-            contact: contact.to_string(),
-            response: response.to_string(),
-            reply: reply_tx,
-        }).await.map_err(|_| anyhow!("Coordinator shut down"))?;
-        reply_rx.await.map_err(|_| anyhow!("Coordinator dropped reply"))?
+        self.cmd_tx
+            .send(CoordinatorCommand::KeyVerificationResponse {
+                contact: contact.to_string(),
+                response: response.to_string(),
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| anyhow!("Coordinator shut down"))?;
+        reply_rx
+            .await
+            .map_err(|_| anyhow!("Coordinator dropped reply"))?
     }
 
     /// Check if OMEMO is enabled.
     pub async fn is_omemo_enabled(&self) -> bool {
         let (reply_tx, reply_rx) = oneshot::channel();
-        if self.cmd_tx.send(CoordinatorCommand::IsOmemoEnabled { reply: reply_tx }).await.is_err() {
+        if self
+            .cmd_tx
+            .send(CoordinatorCommand::IsOmemoEnabled { reply: reply_tx })
+            .await
+            .is_err()
+        {
             return false;
         }
         reply_rx.await.unwrap_or(false)
@@ -219,7 +257,10 @@ fn send_to_ui(msg_tx: &mpsc::Sender<Message>, message: Message) {
     match msg_tx.try_send(message) {
         Ok(()) => {}
         Err(mpsc::error::TrySendError::Full(msg)) => {
-            warn!("UI message channel full, dropping message id={} (UI is not draining fast enough)", msg.id);
+            warn!(
+                "UI message channel full, dropping message id={} (UI is not draining fast enough)",
+                msg.id
+            );
         }
         Err(mpsc::error::TrySendError::Closed(_)) => {
             debug!("UI message channel closed (app shutting down)");
@@ -305,13 +346,19 @@ async fn coordinator_loop(
             }
         };
         for cap_info in pending_caps {
-            if let Err(e) = state.service_discovery.send_disco_info_request(&cap_info.jid).await {
+            if let Err(e) = state
+                .service_discovery
+                .send_disco_info_request(&cap_info.jid)
+                .await
+            {
                 warn!("Failed to send disco request to {}: {}", cap_info.jid, e);
             }
         }
 
         // Periodic eviction of stale IQ entries
-        state.iq_registry.evict_stale(std::time::Duration::from_secs(60));
+        state
+            .iq_registry
+            .evict_stale(std::time::Duration::from_secs(60));
     }
 
     info!("Coordinator loop exited");
@@ -336,11 +383,19 @@ async fn handle_transport_event(
                 handle_iq(state, &stanza).await;
             }
         }
-        XMPPEvent::Online { bound_jid, resumed: _ } => {
+        XMPPEvent::Online {
+            bound_jid,
+            resumed: _,
+        } => {
             if !*seen_online {
                 info!("Connected to XMPP server as {}", bound_jid);
                 *seen_online = true;
-                state.our_bare_jid = bound_jid.to_string().split('/').next().unwrap_or("").to_string();
+                state.our_bare_jid = bound_jid
+                    .to_string()
+                    .split('/')
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
                 state.our_jid = bound_jid.to_string();
 
                 if let Some(tx) = online_tx.take() {
@@ -361,7 +416,11 @@ async fn handle_presence(state: &mut CoordinatorState, stanza: &Element) {
         error!("Error processing presence: {}", e);
     }
 
-    if let Err(e) = state.service_discovery.process_caps_in_presence(stanza).await {
+    if let Err(e) = state
+        .service_discovery
+        .process_caps_in_presence(stanza)
+        .await
+    {
         warn!("Error processing entity capabilities: {}", e);
     }
 
@@ -423,15 +482,22 @@ async fn handle_message(state: &mut CoordinatorState, stanza: &Element) {
             state.our_bare_jid == their_bare
         };
 
-        if carbon_from_is_valid && (stanza.has_child("received", custom_ns::CARBONS) ||
-            stanza.has_child("sent", custom_ns::CARBONS)) {
+        if carbon_from_is_valid
+            && (stanza.has_child("received", custom_ns::CARBONS)
+                || stanza.has_child("sent", custom_ns::CARBONS))
+        {
             handle_carbon_inline(state, stanza).await;
         }
 
         // Process regular chat messages
-        if let Some(body) = stanza.get_child("body", "jabber:client").or_else(|| stanza.get_child("body", "")) {
+        if let Some(body) = stanza
+            .get_child("body", "jabber:client")
+            .or_else(|| stanza.get_child("body", ""))
+        {
             let from = stanza.attr("from").unwrap_or("unknown@server.example");
-            let id: String = stanza.attr("id").map(|s| s.to_string())
+            let id: String = stanza
+                .attr("id")
+                .map(|s| s.to_string())
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
             let content = body.text();
 
@@ -471,16 +537,25 @@ async fn handle_iq(state: &mut CoordinatorState, stanza: &Element) {
         } else if let Err(e) = state.service_discovery.handle_disco_response(stanza).await {
             warn!("Failed to process service discovery info response: {}", e);
         }
-    } else if stanza.get_child("query", "http://jabber.org/protocol/disco#items").is_some() {
+    } else if stanza
+        .get_child("query", "http://jabber.org/protocol/disco#items")
+        .is_some()
+    {
         if let Err(e) = state.service_discovery.handle_disco_response(stanza).await {
             warn!("Failed to process service discovery items response: {}", e);
         }
-    } else if stanza.get_child("pubsub", "http://jabber.org/protocol/pubsub").is_some() {
+    } else if stanza
+        .get_child("pubsub", "http://jabber.org/protocol/pubsub")
+        .is_some()
+    {
         // PubSub responses are routed via the IQ registry (registered before sending)
         // If we get here, it wasn't matched — log it
         if stanza.attr("type") == Some("result") || stanza.attr("type") == Some("error") {
             if let Some(stanza_id) = stanza.attr("id") {
-                debug!("Unmatched pubsub response with ID: {} (may be late)", stanza_id);
+                debug!(
+                    "Unmatched pubsub response with ID: {} (may be late)",
+                    stanza_id
+                );
             }
         }
     }
@@ -509,19 +584,25 @@ async fn handle_omemo_message(state: &mut CoordinatorState, stanza: &Element) {
     };
 
     if sender_device_id == omemo_manager.get_device_id() {
-        debug!("Skipping decryption of our own sent message (device {})", sender_device_id);
+        debug!(
+            "Skipping decryption of our own sent message (device {})",
+            sender_device_id
+        );
         let to = stanza.attr("to").unwrap_or("unknown");
         let recipient_jid = to.split('/').next().unwrap_or(to).to_string();
-        let mut message = Message::outgoing_encrypted(id.to_string(), recipient_jid, "[Sent encrypted message]");
+        let mut message =
+            Message::outgoing_encrypted(id.to_string(), recipient_jid, "[Sent encrypted message]");
         message.delivery_status = DeliveryStatus::Delivered;
         send_to_ui(&state.msg_tx, message);
         return;
     }
 
     // Extract encrypted element
-    let encrypted = match stanza.get_child("encrypted", "")
+    let encrypted = match stanza
+        .get_child("encrypted", "")
         .or_else(|| stanza.get_child("encrypted", custom_ns::OMEMO))
-        .or_else(|| stanza.get_child("encrypted", custom_ns::OMEMO_V1)) {
+        .or_else(|| stanza.get_child("encrypted", custom_ns::OMEMO_V1))
+    {
         Some(e) => e,
         None => {
             error!("Could not find encrypted element in OMEMO message");
@@ -529,8 +610,10 @@ async fn handle_omemo_message(state: &mut CoordinatorState, stanza: &Element) {
         }
     };
 
-    let header = match encrypted.get_child("header", "")
-        .or_else(|| encrypted.get_child("header", custom_ns::OMEMO)) {
+    let header = match encrypted
+        .get_child("header", "")
+        .or_else(|| encrypted.get_child("header", custom_ns::OMEMO))
+    {
         Some(h) => h,
         None => {
             error!("Missing header in OMEMO message");
@@ -557,7 +640,8 @@ async fn handle_omemo_message(state: &mut CoordinatorState, stanza: &Element) {
             }
             if let Ok(recipient_id) = rid_str.parse::<u32>() {
                 let key_base64 = key_elem.text();
-                if let Ok(key_bytes) = base64::engine::general_purpose::STANDARD.decode(&key_base64) {
+                if let Ok(key_bytes) = base64::engine::general_purpose::STANDARD.decode(&key_base64)
+                {
                     encrypted_keys.insert(recipient_id, key_bytes);
                 }
             }
@@ -565,7 +649,8 @@ async fn handle_omemo_message(state: &mut CoordinatorState, stanza: &Element) {
     }
 
     // Extract payload (optional for key-transport messages)
-    let payload = encrypted.get_child("payload", "")
+    let payload = encrypted
+        .get_child("payload", "")
         .or_else(|| encrypted.get_child("payload", custom_ns::OMEMO))
         .and_then(|p| {
             let text = p.text();
@@ -574,11 +659,20 @@ async fn handle_omemo_message(state: &mut CoordinatorState, stanza: &Element) {
 
     // Key-transport message (no payload)
     if payload.is_none() {
-        debug!("Key-transport OMEMO message from {}:{}", from, sender_device_id);
+        debug!(
+            "Key-transport OMEMO message from {}:{}",
+            from, sender_device_id
+        );
         if let Some(our_key) = encrypted_keys.get(&omemo_manager.get_device_id()) {
-            match omemo_manager.decrypt_message_key(from.to_string(), sender_device_id, our_key).await {
+            match omemo_manager
+                .decrypt_message_key(from.to_string(), sender_device_id, our_key)
+                .await
+            {
                 Ok(_) => debug!("Key-transport processed from {}:{}", from, sender_device_id),
-                Err(e) => warn!("Failed to process key-transport from {}:{}: {}", from, sender_device_id, e),
+                Err(e) => warn!(
+                    "Failed to process key-transport from {}:{}: {}",
+                    from, sender_device_id, e
+                ),
             }
         }
         return;
@@ -600,7 +694,10 @@ async fn handle_omemo_message(state: &mut CoordinatorState, stanza: &Element) {
     };
 
     // Decrypt the message — this is the key operation that happens inline
-    match omemo_manager.decrypt_message(from, sender_device_id, &omemo_message).await {
+    match omemo_manager
+        .decrypt_message(from, sender_device_id, &omemo_message)
+        .await
+    {
         Ok(plaintext) => {
             let sender_bare_jid = from.split('/').next().unwrap_or(from).to_string();
             let message = Message::incoming_encrypted(id.to_string(), sender_bare_jid, plaintext);
@@ -615,7 +712,7 @@ async fn handle_omemo_message(state: &mut CoordinatorState, stanza: &Element) {
                     .append(
                         Element::builder("received", custom_ns::RECEIPTS)
                             .attr("id", id)
-                            .build()
+                            .build(),
                     )
                     .build();
                 if let Err(e) = super::transport::send_stanza(&state.stanza_tx, receipt) {
@@ -624,8 +721,15 @@ async fn handle_omemo_message(state: &mut CoordinatorState, stanza: &Element) {
             }
         }
         Err(e) => {
-            error!("Failed to decrypt message from {} (device {}): {}", from, sender_device_id, e);
-            let message = Message::incoming_encrypted(id.to_string(), from.to_string(), format!("[Encrypted message could not be decrypted: {}]", e));
+            error!(
+                "Failed to decrypt message from {} (device {}): {}",
+                from, sender_device_id, e
+            );
+            let message = Message::incoming_encrypted(
+                id.to_string(),
+                from.to_string(),
+                format!("[Encrypted message could not be decrypted: {}]", e),
+            );
             send_to_ui(&state.msg_tx, message);
         }
     }
@@ -634,26 +738,42 @@ async fn handle_omemo_message(state: &mut CoordinatorState, stanza: &Element) {
 /// Handle a command from the app layer.
 async fn handle_command(state: &mut CoordinatorState, cmd: CoordinatorCommand) {
     match cmd {
-        CoordinatorCommand::SendMessage { recipient, content, reply } => {
+        CoordinatorCommand::SendMessage {
+            recipient,
+            content,
+            reply,
+        } => {
             let result = send_encrypted(state, &recipient, &content).await;
             let _ = reply.send(result);
         }
-        CoordinatorCommand::SendPlaintext { recipient, content, reply } => {
+        CoordinatorCommand::SendPlaintext {
+            recipient,
+            content,
+            reply,
+        } => {
             let result = send_plaintext(state, &recipient, &content).await;
             let _ = reply.send(result);
         }
         CoordinatorCommand::GetDeviceIds { jid, reply } => {
             let result = match state.omemo_manager.as_ref() {
-                Some(m) => m.get_device_ids_for_test(&jid).await
+                Some(m) => m
+                    .get_device_ids_for_test(&jid)
+                    .await
                     .map(|ids| ids.iter().map(|d| *d).collect())
                     .map_err(|e| anyhow!("{}", e)),
                 None => Err(anyhow!("OMEMO not initialized")),
             };
             let _ = reply.send(result);
         }
-        CoordinatorCommand::GetFingerprint { jid, device_id, reply } => {
+        CoordinatorCommand::GetFingerprint {
+            jid,
+            device_id,
+            reply,
+        } => {
             let result = match state.omemo_manager.as_ref() {
-                Some(m) => m.get_device_fingerprint(&jid, device_id).await
+                Some(m) => m
+                    .get_device_fingerprint(&jid, device_id)
+                    .await
                     .map_err(|e| anyhow!("{}", e)),
                 None => Err(anyhow!("OMEMO not initialized")),
             };
@@ -667,23 +787,36 @@ async fn handle_command(state: &mut CoordinatorState, cmd: CoordinatorCommand) {
             let result = toggle_trust_inline(state, &contact).await;
             let _ = reply.send(result);
         }
-        CoordinatorCommand::KeyVerificationResponse { contact, response, reply } => {
+        CoordinatorCommand::KeyVerificationResponse {
+            contact,
+            response,
+            reply,
+        } => {
             let result = handle_key_verification_inline(state, &contact, &response).await;
             let _ = reply.send(result);
         }
         CoordinatorCommand::IsOmemoEnabled { reply } => {
             let _ = reply.send(state.omemo_manager.is_some());
         }
-        CoordinatorCommand::StoreMessageId { recipient, message_id } => {
-            state.pending_receipts.insert(message_id.clone(), PendingMessage {
-                id: message_id,
-                to: recipient,
-                content: String::new(),
-                timestamp: chrono::Utc::now().timestamp() as u64,
-                status: DeliveryStatus::Sent,
-            });
+        CoordinatorCommand::StoreMessageId {
+            recipient,
+            message_id,
+        } => {
+            state.pending_receipts.insert(
+                message_id.clone(),
+                PendingMessage {
+                    id: message_id,
+                    to: recipient,
+                    content: String::new(),
+                    timestamp: chrono::Utc::now().timestamp() as u64,
+                    status: DeliveryStatus::Sent,
+                },
+            );
         }
-        CoordinatorCommand::SendChatState { recipient, state: typing_state } => {
+        CoordinatorCommand::SendChatState {
+            recipient,
+            state: typing_state,
+        } => {
             if let Err(e) = send_chat_state_inline(&state.stanza_tx, &recipient, &typing_state) {
                 debug!("Failed to send chat state: {}", e);
             }
@@ -694,10 +827,14 @@ async fn handle_command(state: &mut CoordinatorState, cmd: CoordinatorCommand) {
 
 /// Encrypt and send a message. Returns the message ID.
 async fn send_encrypted(state: &mut CoordinatorState, to: &str, content: &str) -> Result<String> {
-    let omemo_manager = state.omemo_manager.as_mut()
+    let omemo_manager = state
+        .omemo_manager
+        .as_mut()
         .ok_or_else(|| anyhow!("OMEMO not initialized"))?;
 
-    let encrypted_message = omemo_manager.encrypt_message(to, content).await
+    let encrypted_message = omemo_manager
+        .encrypt_message(to, content)
+        .await
         .map_err(|e| anyhow!("Failed to encrypt message: {}", e))?;
 
     let id = uuid::Uuid::new_v4().to_string();
@@ -709,13 +846,16 @@ async fn send_encrypted(state: &mut CoordinatorState, to: &str, content: &str) -
         .map_err(|e| anyhow!("Failed to send encrypted message: {}", e))?;
 
     // Track for receipt
-    state.pending_receipts.insert(id.clone(), PendingMessage {
-        id: id.clone(),
-        to: to.to_string(),
-        content: content.to_string(),
-        timestamp: chrono::Utc::now().timestamp() as u64,
-        status: DeliveryStatus::Sent,
-    });
+    state.pending_receipts.insert(
+        id.clone(),
+        PendingMessage {
+            id: id.clone(),
+            to: to.to_string(),
+            content: content.to_string(),
+            timestamp: chrono::Utc::now().timestamp() as u64,
+            status: DeliveryStatus::Sent,
+        },
+    );
 
     // Notify UI of sent message
     let message = Message::outgoing_encrypted(id.clone(), to.to_string(), content.to_string());
@@ -732,7 +872,11 @@ async fn send_plaintext(state: &mut CoordinatorState, to: &str, content: &str) -
         .attr("id", &id)
         .attr("to", to)
         .attr("type", "chat")
-        .append(Element::builder("body", "jabber:client").append(content).build())
+        .append(
+            Element::builder("body", "jabber:client")
+                .append(content)
+                .build(),
+        )
         .append(Element::builder("request", custom_ns::RECEIPTS).build())
         .append(Element::builder("active", custom_ns::CHATSTATES).build())
         .build();
@@ -740,13 +884,16 @@ async fn send_plaintext(state: &mut CoordinatorState, to: &str, content: &str) -
     super::transport::send_stanza(&state.stanza_tx, message_element)
         .map_err(|e| anyhow!("Failed to send message: {}", e))?;
 
-    state.pending_receipts.insert(id.clone(), PendingMessage {
-        id: id.clone(),
-        to: to.to_string(),
-        content: content.to_string(),
-        timestamp: chrono::Utc::now().timestamp() as u64,
-        status: DeliveryStatus::Sent,
-    });
+    state.pending_receipts.insert(
+        id.clone(),
+        PendingMessage {
+            id: id.clone(),
+            to: to.to_string(),
+            content: content.to_string(),
+            timestamp: chrono::Utc::now().timestamp() as u64,
+            status: DeliveryStatus::Sent,
+        },
+    );
 
     let message = Message::outgoing_plaintext(id.clone(), to.to_string(), content.to_string());
     send_to_ui(&state.msg_tx, message);
@@ -755,7 +902,11 @@ async fn send_plaintext(state: &mut CoordinatorState, to: &str, content: &str) -
 }
 
 /// Build the OMEMO encrypted message stanza.
-fn build_omemo_stanza(id: &str, to: &str, encrypted_message: &crate::omemo::protocol::OmemoMessage) -> Element {
+fn build_omemo_stanza(
+    id: &str,
+    to: &str,
+    encrypted_message: &crate::omemo::protocol::OmemoMessage,
+) -> Element {
     let mut message_element = Element::builder("message", "jabber:client").build();
     message_element.set_attr("id", id);
     message_element.set_attr("to", to);
@@ -777,16 +928,20 @@ fn build_omemo_stanza(id: &str, to: &str, encrypted_message: &crate::omemo::prot
         if encrypted_message.prekey_devices.contains(device_id) {
             key_element.set_attr("prekey", "true");
         }
-        key_element.append_text_node(&base64::engine::general_purpose::STANDARD.encode(encrypted_key));
+        key_element
+            .append_text_node(&base64::engine::general_purpose::STANDARD.encode(encrypted_key));
         header_element.append_child(key_element);
     }
 
     let mut iv_element = Element::builder("iv", custom_ns::OMEMO_V1).build();
-    iv_element.append_text_node(&base64::engine::general_purpose::STANDARD.encode(&encrypted_message.iv));
+    iv_element
+        .append_text_node(&base64::engine::general_purpose::STANDARD.encode(&encrypted_message.iv));
     header_element.append_child(iv_element);
 
     let mut payload_element = Element::builder("payload", custom_ns::OMEMO_V1).build();
-    payload_element.append_text_node(&base64::engine::general_purpose::STANDARD.encode(&encrypted_message.ciphertext));
+    payload_element.append_text_node(
+        &base64::engine::general_purpose::STANDARD.encode(&encrypted_message.ciphertext),
+    );
 
     encrypted_element.append_child(header_element);
     encrypted_element.append_child(payload_element);
@@ -831,18 +986,23 @@ fn extract_mam_omemo<'a>(stanza: &'a Element) -> (Option<&'a Element>, bool) {
 }
 
 fn extract_sender_device_id(stanza: &Element) -> Option<u32> {
-    let encrypted = stanza.get_child("encrypted", "")
+    let encrypted = stanza
+        .get_child("encrypted", "")
         .or_else(|| stanza.get_child("encrypted", custom_ns::OMEMO))
         .or_else(|| stanza.get_child("encrypted", custom_ns::OMEMO_V1))?;
-    let header = encrypted.get_child("header", "")
+    let header = encrypted
+        .get_child("header", "")
         .or_else(|| encrypted.get_child("header", custom_ns::OMEMO))?;
     header.attr("sid")?.parse::<u32>().ok()
 }
 
 fn extract_iv(header: &Element) -> Option<Vec<u8>> {
-    let iv_elem = header.get_child("iv", "")
+    let iv_elem = header
+        .get_child("iv", "")
         .or_else(|| header.get_child("iv", custom_ns::OMEMO))?;
-    base64::engine::general_purpose::STANDARD.decode(iv_elem.text()).ok()
+    base64::engine::general_purpose::STANDARD
+        .decode(iv_elem.text())
+        .ok()
 }
 
 /// Handle delivery receipt inline (no spawn).
@@ -853,7 +1013,13 @@ async fn handle_receipt_inline(state: &mut CoordinatorState, stanza: &Element) -
                 info!("Received delivery receipt for message {}", receipt_id);
                 pending.status = DeliveryStatus::Delivered;
 
-                let ui_message = Message::delivery_update(pending.id.clone(), pending.to.clone(), pending.content.clone(), DeliveryStatus::Delivered, false);
+                let ui_message = Message::delivery_update(
+                    pending.id.clone(),
+                    pending.to.clone(),
+                    pending.content.clone(),
+                    DeliveryStatus::Delivered,
+                    false,
+                );
                 send_to_ui(&state.msg_tx, ui_message);
             }
         }
@@ -901,7 +1067,8 @@ async fn handle_carbon_inline(state: &mut CoordinatorState, stanza: &Element) {
         None => return,
     };
 
-    let body_text = message.get_child("body", "jabber:client")
+    let body_text = message
+        .get_child("body", "jabber:client")
         .or_else(|| message.get_child("body", ""))
         .map(|b| b.text())
         .unwrap_or_default();
@@ -910,7 +1077,9 @@ async fn handle_carbon_inline(state: &mut CoordinatorState, stanza: &Element) {
         return;
     }
 
-    let msg_id = message.attr("id").map(|s| s.to_string())
+    let msg_id = message
+        .attr("id")
+        .map(|s| s.to_string())
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     let (sender_id, recipient_id) = if is_sent {
@@ -934,13 +1103,17 @@ async fn check_omemo_keys_inline(state: &mut CoordinatorState, contact: &str) ->
         return Ok(());
     }
 
-    let omemo_manager = state.omemo_manager.as_ref()
+    let omemo_manager = state
+        .omemo_manager
+        .as_ref()
         .ok_or_else(|| anyhow!("OMEMO not initialized"))?;
 
     let device_ids = match tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        omemo_manager.get_device_ids_for_test(contact)
-    ).await {
+        omemo_manager.get_device_ids_for_test(contact),
+    )
+    .await
+    {
         Ok(Ok(ids)) => ids,
         Ok(Err(e)) => {
             warn!("Failed to get device IDs for {}: {}", contact, e);
@@ -964,8 +1137,10 @@ async fn check_omemo_keys_inline(state: &mut CoordinatorState, contact: &str) ->
     for device_id in device_ids {
         let trusted = match tokio::time::timeout(
             std::time::Duration::from_secs(8),
-            omemo_manager.is_device_identity_trusted(contact, device_id)
-        ).await {
+            omemo_manager.is_device_identity_trusted(contact, device_id),
+        )
+        .await
+        {
             Ok(Ok(t)) => t,
             _ => false,
         };
@@ -973,8 +1148,10 @@ async fn check_omemo_keys_inline(state: &mut CoordinatorState, contact: &str) ->
         if !trusted {
             let fingerprint = match tokio::time::timeout(
                 std::time::Duration::from_secs(8),
-                omemo_manager.get_device_fingerprint(contact, device_id)
-            ).await {
+                omemo_manager.get_device_fingerprint(contact, device_id),
+            )
+            .await
+            {
                 Ok(Ok(fp)) => fp,
                 _ => continue,
             };
@@ -983,8 +1160,9 @@ async fn check_omemo_keys_inline(state: &mut CoordinatorState, contact: &str) ->
                 if let Some(m) = state.omemo_manager.as_ref() {
                     let _ = tokio::time::timeout(
                         std::time::Duration::from_secs(5),
-                        m.trust_device_identity(contact, device_id)
-                    ).await;
+                        m.trust_device_identity(contact, device_id),
+                    )
+                    .await;
                 }
                 continue;
             }
@@ -992,8 +1170,13 @@ async fn check_omemo_keys_inline(state: &mut CoordinatorState, contact: &str) ->
             let _ = storage.store_pending_device_verification(contact, device_id, &fingerprint);
 
             // Send verification request to UI
-            let special_message = Message::system("me", format!("__OMEMO_KEY_VERIFY__:{}:{}:{}",
-                    contact, fingerprint, device_id));
+            let special_message = Message::system(
+                "me",
+                format!(
+                    "__OMEMO_KEY_VERIFY__:{}:{}:{}",
+                    contact, fingerprint, device_id
+                ),
+            );
             send_to_ui(&state.msg_tx, special_message);
             break;
         }
@@ -1004,10 +1187,14 @@ async fn check_omemo_keys_inline(state: &mut CoordinatorState, contact: &str) ->
 
 /// Toggle trust for a contact's devices (inline).
 async fn toggle_trust_inline(state: &mut CoordinatorState, contact: &str) -> Result<bool> {
-    let omemo_manager = state.omemo_manager.as_ref()
+    let omemo_manager = state
+        .omemo_manager
+        .as_ref()
         .ok_or_else(|| anyhow!("OMEMO not initialized"))?;
 
-    let device_ids = omemo_manager.get_device_ids_for_test(contact).await
+    let device_ids = omemo_manager
+        .get_device_ids_for_test(contact)
+        .await
         .map_err(|e| anyhow!("{}", e))?;
 
     if device_ids.is_empty() {
@@ -1018,7 +1205,9 @@ async fn toggle_trust_inline(state: &mut CoordinatorState, contact: &str) -> Res
     let mut statuses = Vec::new();
 
     for &device_id in &device_ids {
-        let trusted = omemo_manager.is_device_identity_trusted(contact, device_id).await
+        let trusted = omemo_manager
+            .is_device_identity_trusted(contact, device_id)
+            .await
             .unwrap_or(false);
         statuses.push((device_id, trusted));
         if !trusted {
@@ -1031,10 +1220,14 @@ async fn toggle_trust_inline(state: &mut CoordinatorState, contact: &str) -> Res
     for (device_id, current_trusted) in statuses {
         if current_trusted != set_trusted {
             if set_trusted {
-                omemo_manager.trust_device_identity(contact, device_id).await
+                omemo_manager
+                    .trust_device_identity(contact, device_id)
+                    .await
                     .map_err(|e| anyhow!("{}", e))?;
             } else {
-                omemo_manager.untrust_device_identity(contact, device_id).await
+                omemo_manager
+                    .untrust_device_identity(contact, device_id)
+                    .await
                     .map_err(|e| anyhow!("{}", e))?;
             }
         }
@@ -1044,11 +1237,21 @@ async fn toggle_trust_inline(state: &mut CoordinatorState, contact: &str) -> Res
 }
 
 /// Handle key verification response inline.
-async fn handle_key_verification_inline(state: &mut CoordinatorState, contact: &str, response: &str) -> Result<()> {
+async fn handle_key_verification_inline(
+    state: &mut CoordinatorState,
+    contact: &str,
+    response: &str,
+) -> Result<()> {
     match response {
         "__KEY_ACCEPTED__" => {
             info!("OMEMO key for {} accepted", contact);
-            let msg = Message::system("me", format!("OMEMO key for {} has been accepted and marked as trusted", contact));
+            let msg = Message::system(
+                "me",
+                format!(
+                    "OMEMO key for {} has been accepted and marked as trusted",
+                    contact
+                ),
+            );
             send_to_ui(&state.msg_tx, msg);
         }
         "__KEY_REJECTED__" => {
@@ -1064,7 +1267,11 @@ async fn handle_key_verification_inline(state: &mut CoordinatorState, contact: &
 }
 
 /// Send a chat state notification via the transport channel.
-fn send_chat_state_inline(stanza_tx: &StanzaTx, recipient: &str, typing_state: &chat_states::TypingStatus) -> Result<()> {
+fn send_chat_state_inline(
+    stanza_tx: &StanzaTx,
+    recipient: &str,
+    typing_state: &chat_states::TypingStatus,
+) -> Result<()> {
     let state_name = match typing_state {
         chat_states::TypingStatus::Active => "active",
         chat_states::TypingStatus::Composing => "composing",
@@ -1098,20 +1305,32 @@ mod tests {
         let (msg_tx, _msg_rx) = mpsc::channel(16);
 
         let handle = spawn_coordinator(
-            stanza_tx, event_rx, msg_tx, None,
-            "test@example.org".to_string(), None, None,
+            stanza_tx,
+            event_rx,
+            msg_tx,
+            None,
+            "test@example.org".to_string(),
+            None,
+            None,
         );
 
         // Send shutdown
-        handle.cmd_tx.send(CoordinatorCommand::Shutdown).await.unwrap();
+        handle
+            .cmd_tx
+            .send(CoordinatorCommand::Shutdown)
+            .await
+            .unwrap();
 
         // Coordinator should exit (channel closes)
         drop(event_tx);
         // Subsequent sends should fail once the coordinator processes shutdown
         tokio::time::sleep(Duration::from_millis(50)).await;
-        let result = handle.cmd_tx.send(CoordinatorCommand::IsOmemoEnabled {
-            reply: tokio::sync::oneshot::channel().0,
-        }).await;
+        let result = handle
+            .cmd_tx
+            .send(CoordinatorCommand::IsOmemoEnabled {
+                reply: tokio::sync::oneshot::channel().0,
+            })
+            .await;
         // Either fails immediately or the reply is dropped
         // Just ensure no hang
         assert!(result.is_ok() || result.is_err());
@@ -1124,8 +1343,13 @@ mod tests {
         let (msg_tx, _msg_rx) = mpsc::channel(16);
 
         let handle = spawn_coordinator(
-            stanza_tx, event_rx, msg_tx, None,
-            "test@example.org".to_string(), None, None,
+            stanza_tx,
+            event_rx,
+            msg_tx,
+            None,
+            "test@example.org".to_string(),
+            None,
+            None,
         );
 
         // Drop event_tx to simulate transport close
@@ -1149,14 +1373,23 @@ mod tests {
         let (msg_tx, _msg_rx) = mpsc::channel(16);
 
         let handle = spawn_coordinator(
-            stanza_tx, event_rx, msg_tx, None,
-            "test@example.org".to_string(), None, None,
+            stanza_tx,
+            event_rx,
+            msg_tx,
+            None,
+            "test@example.org".to_string(),
+            None,
+            None,
         );
 
         let result = handle.is_omemo_enabled().await;
         assert!(!result);
 
-        handle.cmd_tx.send(CoordinatorCommand::Shutdown).await.unwrap();
+        handle
+            .cmd_tx
+            .send(CoordinatorCommand::Shutdown)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1166,15 +1399,27 @@ mod tests {
         let (msg_tx, _msg_rx) = mpsc::channel(16);
 
         let handle = spawn_coordinator(
-            stanza_tx, event_rx, msg_tx, None,
-            "test@example.org".to_string(), None, None,
+            stanza_tx,
+            event_rx,
+            msg_tx,
+            None,
+            "test@example.org".to_string(),
+            None,
+            None,
         );
 
         let result = handle.send_message("bob@example.org", "hello").await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("OMEMO not initialized"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("OMEMO not initialized"));
 
-        handle.cmd_tx.send(CoordinatorCommand::Shutdown).await.unwrap();
+        handle
+            .cmd_tx
+            .send(CoordinatorCommand::Shutdown)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1184,14 +1429,23 @@ mod tests {
         let (msg_tx, _msg_rx) = mpsc::channel(16);
 
         let handle = spawn_coordinator(
-            stanza_tx, event_rx, msg_tx, None,
-            "test@example.org".to_string(), None, None,
+            stanza_tx,
+            event_rx,
+            msg_tx,
+            None,
+            "test@example.org".to_string(),
+            None,
+            None,
         );
 
         let result = handle.get_device_ids("bob@example.org").await;
         assert!(result.is_err());
 
-        handle.cmd_tx.send(CoordinatorCommand::Shutdown).await.unwrap();
+        handle
+            .cmd_tx
+            .send(CoordinatorCommand::Shutdown)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1201,14 +1455,23 @@ mod tests {
         let (msg_tx, _msg_rx) = mpsc::channel(16);
 
         let handle = spawn_coordinator(
-            stanza_tx, event_rx, msg_tx, None,
-            "test@example.org".to_string(), None, None,
+            stanza_tx,
+            event_rx,
+            msg_tx,
+            None,
+            "test@example.org".to_string(),
+            None,
+            None,
         );
 
         let result = handle.get_fingerprint("bob@example.org", 12345).await;
         assert!(result.is_err());
 
-        handle.cmd_tx.send(CoordinatorCommand::Shutdown).await.unwrap();
+        handle
+            .cmd_tx
+            .send(CoordinatorCommand::Shutdown)
+            .await
+            .unwrap();
     }
 
     // ─── Plaintext message handling tests ─────────────────────────────────
@@ -1220,17 +1483,26 @@ mod tests {
         let (msg_tx, mut msg_rx) = mpsc::channel(16);
 
         let handle = spawn_coordinator(
-            stanza_tx, event_rx, msg_tx, None,
-            "test@example.org".to_string(), None, None,
+            stanza_tx,
+            event_rx,
+            msg_tx,
+            None,
+            "test@example.org".to_string(),
+            None,
+            None,
         );
 
-        let result = handle.send_plaintext("bob@example.org", "hello world").await;
+        let result = handle
+            .send_plaintext("bob@example.org", "hello world")
+            .await;
         assert!(result.is_ok());
         let msg_id = result.unwrap();
 
         // Check that a stanza was sent to transport
-        let stanza = timeout(Duration::from_millis(100), stanza_rx.recv()).await
-            .expect("timeout").expect("channel closed");
+        let stanza = timeout(Duration::from_millis(100), stanza_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("channel closed");
         assert_eq!(stanza.attr("to"), Some("bob@example.org"));
         assert_eq!(stanza.attr("type"), Some("chat"));
         assert_eq!(stanza.attr("id"), Some(msg_id.as_str()));
@@ -1243,15 +1515,21 @@ mod tests {
         assert!(stanza.has_child("request", custom_ns::RECEIPTS));
 
         // Check that a UI message was sent
-        let ui_msg = timeout(Duration::from_millis(100), msg_rx.recv()).await
-            .expect("timeout").expect("channel closed");
+        let ui_msg = timeout(Duration::from_millis(100), msg_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("channel closed");
         assert_eq!(ui_msg.sender_id, "me");
         assert_eq!(ui_msg.recipient_id, "bob@example.org");
         assert_eq!(ui_msg.content, "hello world");
         assert!(!ui_msg.encrypted);
         assert_eq!(ui_msg.delivery_status, DeliveryStatus::Sent);
 
-        handle.cmd_tx.send(CoordinatorCommand::Shutdown).await.unwrap();
+        handle
+            .cmd_tx
+            .send(CoordinatorCommand::Shutdown)
+            .await
+            .unwrap();
     }
 
     // ─── Inbound message routing tests ────────────────────────────────────
@@ -1263,8 +1541,13 @@ mod tests {
         let (msg_tx, mut msg_rx) = mpsc::channel(16);
 
         let _handle = spawn_coordinator(
-            stanza_tx, event_rx, msg_tx, None,
-            "test@example.org".to_string(), None, None,
+            stanza_tx,
+            event_rx,
+            msg_tx,
+            None,
+            "test@example.org".to_string(),
+            None,
+            None,
         );
 
         // Simulate an inbound message from the transport
@@ -1276,21 +1559,27 @@ mod tests {
             .append(
                 Element::builder("body", "jabber:client")
                     .append("Hey there!")
-                    .build()
+                    .build(),
             )
             .build();
 
         event_tx.send(tokio_xmpp::Event::Stanza(inbound)).unwrap();
 
         // Wait for coordinator to process and deliver to UI
-        let ui_msg = timeout(Duration::from_millis(200), msg_rx.recv()).await
-            .expect("timeout").expect("channel closed");
+        let ui_msg = timeout(Duration::from_millis(200), msg_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("channel closed");
         assert_eq!(ui_msg.sender_id, "alice@example.org");
         assert_eq!(ui_msg.content, "Hey there!");
         assert!(!ui_msg.encrypted);
         assert_eq!(ui_msg.id, "msg-001");
 
-        _handle.cmd_tx.send(CoordinatorCommand::Shutdown).await.unwrap();
+        _handle
+            .cmd_tx
+            .send(CoordinatorCommand::Shutdown)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1300,17 +1589,20 @@ mod tests {
         let (msg_tx, mut msg_rx) = mpsc::channel(16);
 
         let _handle = spawn_coordinator(
-            stanza_tx, event_rx, msg_tx, None,
-            "test@example.org".to_string(), None, None,
+            stanza_tx,
+            event_rx,
+            msg_tx,
+            None,
+            "test@example.org".to_string(),
+            None,
+            None,
         );
 
         // Message with no body (e.g., just a chat state)
         let inbound = Element::builder("message", "jabber:client")
             .attr("from", "alice@example.org/phone")
             .attr("type", "chat")
-            .append(
-                Element::builder("composing", custom_ns::CHATSTATES).build()
-            )
+            .append(Element::builder("composing", custom_ns::CHATSTATES).build())
             .build();
 
         event_tx.send(tokio_xmpp::Event::Stanza(inbound)).unwrap();
@@ -1319,7 +1611,11 @@ mod tests {
         let result = timeout(Duration::from_millis(100), msg_rx.recv()).await;
         assert!(result.is_err(), "Should not have received a message");
 
-        _handle.cmd_tx.send(CoordinatorCommand::Shutdown).await.unwrap();
+        _handle
+            .cmd_tx
+            .send(CoordinatorCommand::Shutdown)
+            .await
+            .unwrap();
     }
 
     // ─── Receipt tracking tests ───────────────────────────────────────────
@@ -1331,12 +1627,20 @@ mod tests {
         let (msg_tx, mut msg_rx) = mpsc::channel(16);
 
         let handle = spawn_coordinator(
-            stanza_tx, event_rx, msg_tx, None,
-            "test@example.org".to_string(), None, None,
+            stanza_tx,
+            event_rx,
+            msg_tx,
+            None,
+            "test@example.org".to_string(),
+            None,
+            None,
         );
 
         // First send a message to create a pending receipt entry
-        let msg_id = handle.send_plaintext("bob@example.org", "test msg").await.unwrap();
+        let msg_id = handle
+            .send_plaintext("bob@example.org", "test msg")
+            .await
+            .unwrap();
 
         // Drain the UI message for the sent message
         let _ = timeout(Duration::from_millis(100), msg_rx.recv()).await;
@@ -1348,19 +1652,27 @@ mod tests {
             .append(
                 Element::builder("received", custom_ns::RECEIPTS)
                     .attr("id", msg_id.as_str())
-                    .build()
+                    .build(),
             )
             .build();
 
-        event_tx.send(tokio_xmpp::Event::Stanza(receipt_stanza)).unwrap();
+        event_tx
+            .send(tokio_xmpp::Event::Stanza(receipt_stanza))
+            .unwrap();
 
         // Should receive a UI update with Delivered status
-        let ui_msg = timeout(Duration::from_millis(200), msg_rx.recv()).await
-            .expect("timeout").expect("channel closed");
+        let ui_msg = timeout(Duration::from_millis(200), msg_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("channel closed");
         assert_eq!(ui_msg.delivery_status, DeliveryStatus::Delivered);
         assert_eq!(ui_msg.id, msg_id);
 
-        handle.cmd_tx.send(CoordinatorCommand::Shutdown).await.unwrap();
+        handle
+            .cmd_tx
+            .send(CoordinatorCommand::Shutdown)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1370,8 +1682,13 @@ mod tests {
         let (msg_tx, mut msg_rx) = mpsc::channel(16);
 
         let _handle = spawn_coordinator(
-            stanza_tx, event_rx, msg_tx, None,
-            "test@example.org".to_string(), None, None,
+            stanza_tx,
+            event_rx,
+            msg_tx,
+            None,
+            "test@example.org".to_string(),
+            None,
+            None,
         );
 
         // Receipt for a message we never sent
@@ -1380,17 +1697,26 @@ mod tests {
             .append(
                 Element::builder("received", custom_ns::RECEIPTS)
                     .attr("id", "nonexistent-msg-id")
-                    .build()
+                    .build(),
             )
             .build();
 
-        event_tx.send(tokio_xmpp::Event::Stanza(receipt_stanza)).unwrap();
+        event_tx
+            .send(tokio_xmpp::Event::Stanza(receipt_stanza))
+            .unwrap();
 
         // Should NOT produce a UI message
         let result = timeout(Duration::from_millis(100), msg_rx.recv()).await;
-        assert!(result.is_err(), "Should not have received a message for unknown receipt");
+        assert!(
+            result.is_err(),
+            "Should not have received a message for unknown receipt"
+        );
 
-        _handle.cmd_tx.send(CoordinatorCommand::Shutdown).await.unwrap();
+        _handle
+            .cmd_tx
+            .send(CoordinatorCommand::Shutdown)
+            .await
+            .unwrap();
     }
 
     // ─── Store message ID (fire-and-forget) tests ─────────────────────────
@@ -1402,8 +1728,13 @@ mod tests {
         let (msg_tx, mut msg_rx) = mpsc::channel(16);
 
         let handle = spawn_coordinator(
-            stanza_tx, event_rx, msg_tx, None,
-            "test@example.org".to_string(), None, None,
+            stanza_tx,
+            event_rx,
+            msg_tx,
+            None,
+            "test@example.org".to_string(),
+            None,
+            None,
         );
 
         // Store a message ID
@@ -1418,18 +1749,26 @@ mod tests {
             .append(
                 Element::builder("received", custom_ns::RECEIPTS)
                     .attr("id", "manual-msg-123")
-                    .build()
+                    .build(),
             )
             .build();
 
-        event_tx.send(tokio_xmpp::Event::Stanza(receipt_stanza)).unwrap();
+        event_tx
+            .send(tokio_xmpp::Event::Stanza(receipt_stanza))
+            .unwrap();
 
-        let ui_msg = timeout(Duration::from_millis(200), msg_rx.recv()).await
-            .expect("timeout").expect("channel closed");
+        let ui_msg = timeout(Duration::from_millis(200), msg_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("channel closed");
         assert_eq!(ui_msg.delivery_status, DeliveryStatus::Delivered);
         assert_eq!(ui_msg.id, "manual-msg-123");
 
-        handle.cmd_tx.send(CoordinatorCommand::Shutdown).await.unwrap();
+        handle
+            .cmd_tx
+            .send(CoordinatorCommand::Shutdown)
+            .await
+            .unwrap();
     }
 
     // ─── Chat state tests ─────────────────────────────────────────────────
@@ -1441,8 +1780,13 @@ mod tests {
         let (msg_tx, _msg_rx) = mpsc::channel(16);
 
         let handle = spawn_coordinator(
-            stanza_tx, event_rx, msg_tx, None,
-            "test@example.org".to_string(), None, None,
+            stanza_tx,
+            event_rx,
+            msg_tx,
+            None,
+            "test@example.org".to_string(),
+            None,
+            None,
         );
 
         handle.send_chat_state("bob@example.org", &chat_states::TypingStatus::Composing);
@@ -1450,12 +1794,18 @@ mod tests {
         // Give coordinator time to process
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        let stanza = timeout(Duration::from_millis(100), stanza_rx.recv()).await
-            .expect("timeout").expect("channel closed");
+        let stanza = timeout(Duration::from_millis(100), stanza_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("channel closed");
         assert_eq!(stanza.attr("to"), Some("bob@example.org"));
         assert!(stanza.has_child("composing", custom_ns::CHATSTATES));
 
-        handle.cmd_tx.send(CoordinatorCommand::Shutdown).await.unwrap();
+        handle
+            .cmd_tx
+            .send(CoordinatorCommand::Shutdown)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1466,27 +1816,36 @@ mod tests {
         let (typing_tx, mut typing_rx) = mpsc::channel(16);
 
         let _handle = spawn_coordinator(
-            stanza_tx, event_rx, msg_tx, Some(typing_tx),
-            "test@example.org".to_string(), None, None,
+            stanza_tx,
+            event_rx,
+            msg_tx,
+            Some(typing_tx),
+            "test@example.org".to_string(),
+            None,
+            None,
         );
 
         let inbound = Element::builder("message", "jabber:client")
             .attr("from", "alice@example.org/phone")
             .attr("type", "chat")
-            .append(
-                Element::builder("composing", custom_ns::CHATSTATES).build()
-            )
+            .append(Element::builder("composing", custom_ns::CHATSTATES).build())
             .build();
 
         event_tx.send(tokio_xmpp::Event::Stanza(inbound)).unwrap();
 
-        let (jid, status) = timeout(Duration::from_millis(200), typing_rx.recv()).await
-            .expect("timeout").expect("channel closed");
+        let (jid, status) = timeout(Duration::from_millis(200), typing_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("channel closed");
         // chat_states::handle_chat_state strips the resource
         assert!(jid.starts_with("alice@example.org"), "got jid={}", jid);
         assert_eq!(status, chat_states::TypingStatus::Composing);
 
-        _handle.cmd_tx.send(CoordinatorCommand::Shutdown).await.unwrap();
+        _handle
+            .cmd_tx
+            .send(CoordinatorCommand::Shutdown)
+            .await
+            .unwrap();
     }
 
     // ─── Online event tests ───────────────────────────────────────────────
@@ -1499,16 +1858,23 @@ mod tests {
         let (online_tx, online_rx) = oneshot::channel();
 
         let _handle = spawn_coordinator(
-            stanza_tx, event_rx, msg_tx, None,
-            "test@example.org".to_string(), None, Some(online_tx),
+            stanza_tx,
+            event_rx,
+            msg_tx,
+            None,
+            "test@example.org".to_string(),
+            None,
+            Some(online_tx),
         );
 
         // Simulate Online event
         let bound_jid: tokio_xmpp::Jid = "test@example.org/resource123".parse().unwrap();
-        event_tx.send(tokio_xmpp::Event::Online {
-            bound_jid,
-            resumed: false,
-        }).unwrap();
+        event_tx
+            .send(tokio_xmpp::Event::Online {
+                bound_jid,
+                resumed: false,
+            })
+            .unwrap();
 
         // online_rx should fire
         let result = timeout(Duration::from_millis(200), online_rx).await;
@@ -1523,29 +1889,42 @@ mod tests {
         let (online_tx, online_rx) = oneshot::channel();
 
         let _handle = spawn_coordinator(
-            stanza_tx, event_rx, msg_tx, None,
-            "test@example.org".to_string(), None, Some(online_tx),
+            stanza_tx,
+            event_rx,
+            msg_tx,
+            None,
+            "test@example.org".to_string(),
+            None,
+            Some(online_tx),
         );
 
         let bound_jid: tokio_xmpp::Jid = "test@example.org/res1".parse().unwrap();
-        event_tx.send(tokio_xmpp::Event::Online {
-            bound_jid: bound_jid.clone(),
-            resumed: false,
-        }).unwrap();
+        event_tx
+            .send(tokio_xmpp::Event::Online {
+                bound_jid: bound_jid.clone(),
+                resumed: false,
+            })
+            .unwrap();
 
         // Wait for first online
         let _ = timeout(Duration::from_millis(100), online_rx).await;
 
         // Send another Online — should not panic or error
-        event_tx.send(tokio_xmpp::Event::Online {
-            bound_jid,
-            resumed: true,
-        }).unwrap();
+        event_tx
+            .send(tokio_xmpp::Event::Online {
+                bound_jid,
+                resumed: true,
+            })
+            .unwrap();
 
         // Give it time to process without panic
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        _handle.cmd_tx.send(CoordinatorCommand::Shutdown).await.unwrap();
+        _handle
+            .cmd_tx
+            .send(CoordinatorCommand::Shutdown)
+            .await
+            .unwrap();
     }
 
     // ─── IQ routing tests ─────────────────────────────────────────────────
@@ -1557,8 +1936,13 @@ mod tests {
         let (msg_tx, _msg_rx) = mpsc::channel(16);
 
         let handle = spawn_coordinator(
-            stanza_tx.clone(), event_rx, msg_tx, None,
-            "test@example.org".to_string(), None, None,
+            stanza_tx.clone(),
+            event_rx,
+            msg_tx,
+            None,
+            "test@example.org".to_string(),
+            None,
+            None,
         );
 
         // We can't easily test IQ routing directly without accessing the internal
@@ -1574,7 +1958,11 @@ mod tests {
         // Give coordinator time to process without panic
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        handle.cmd_tx.send(CoordinatorCommand::Shutdown).await.unwrap();
+        handle
+            .cmd_tx
+            .send(CoordinatorCommand::Shutdown)
+            .await
+            .unwrap();
     }
 
     // ─── Carbon message tests ─────────────────────────────────────────────
@@ -1586,8 +1974,13 @@ mod tests {
         let (msg_tx, mut msg_rx) = mpsc::channel(16);
 
         let _handle = spawn_coordinator(
-            stanza_tx, event_rx, msg_tx, None,
-            "test@example.org".to_string(), None, None,
+            stanza_tx,
+            event_rx,
+            msg_tx,
+            None,
+            "test@example.org".to_string(),
+            None,
+            None,
         );
 
         // Build a received carbon
@@ -1596,7 +1989,11 @@ mod tests {
             .attr("to", "test@example.org/res")
             .attr("type", "chat")
             .attr("id", "carbon-msg-001")
-            .append(Element::builder("body", "jabber:client").append("Carbon message!").build())
+            .append(
+                Element::builder("body", "jabber:client")
+                    .append("Carbon message!")
+                    .build(),
+            )
             .build();
 
         let forwarded = Element::builder("forwarded", custom_ns::FORWARD)
@@ -1613,14 +2010,22 @@ mod tests {
             .append(received)
             .build();
 
-        event_tx.send(tokio_xmpp::Event::Stanza(carbon_wrapper)).unwrap();
+        event_tx
+            .send(tokio_xmpp::Event::Stanza(carbon_wrapper))
+            .unwrap();
 
-        let ui_msg = timeout(Duration::from_millis(200), msg_rx.recv()).await
-            .expect("timeout").expect("channel closed");
+        let ui_msg = timeout(Duration::from_millis(200), msg_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("channel closed");
         assert_eq!(ui_msg.sender_id, "alice@example.org/phone");
         assert_eq!(ui_msg.content, "Carbon message!");
 
-        _handle.cmd_tx.send(CoordinatorCommand::Shutdown).await.unwrap();
+        _handle
+            .cmd_tx
+            .send(CoordinatorCommand::Shutdown)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1630,8 +2035,13 @@ mod tests {
         let (msg_tx, mut msg_rx) = mpsc::channel(16);
 
         let _handle = spawn_coordinator(
-            stanza_tx, event_rx, msg_tx, None,
-            "test@example.org".to_string(), None, None,
+            stanza_tx,
+            event_rx,
+            msg_tx,
+            None,
+            "test@example.org".to_string(),
+            None,
+            None,
         );
 
         // Build a sent carbon
@@ -1640,7 +2050,11 @@ mod tests {
             .attr("to", "bob@example.org")
             .attr("type", "chat")
             .attr("id", "sent-carbon-001")
-            .append(Element::builder("body", "jabber:client").append("Sent from other device").build())
+            .append(
+                Element::builder("body", "jabber:client")
+                    .append("Sent from other device")
+                    .build(),
+            )
             .build();
 
         let forwarded = Element::builder("forwarded", custom_ns::FORWARD)
@@ -1657,15 +2071,23 @@ mod tests {
             .append(sent)
             .build();
 
-        event_tx.send(tokio_xmpp::Event::Stanza(carbon_wrapper)).unwrap();
+        event_tx
+            .send(tokio_xmpp::Event::Stanza(carbon_wrapper))
+            .unwrap();
 
-        let ui_msg = timeout(Duration::from_millis(200), msg_rx.recv()).await
-            .expect("timeout").expect("channel closed");
+        let ui_msg = timeout(Duration::from_millis(200), msg_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("channel closed");
         assert_eq!(ui_msg.sender_id, "me");
         assert_eq!(ui_msg.recipient_id, "bob@example.org");
         assert_eq!(ui_msg.content, "Sent from other device");
 
-        _handle.cmd_tx.send(CoordinatorCommand::Shutdown).await.unwrap();
+        _handle
+            .cmd_tx
+            .send(CoordinatorCommand::Shutdown)
+            .await
+            .unwrap();
     }
 
     // ─── Handle dropped coordinator gracefully ────────────────────────────
@@ -1677,12 +2099,21 @@ mod tests {
         let (msg_tx, _msg_rx) = mpsc::channel(16);
 
         let handle = spawn_coordinator(
-            stanza_tx, event_rx, msg_tx, None,
-            "test@example.org".to_string(), None, None,
+            stanza_tx,
+            event_rx,
+            msg_tx,
+            None,
+            "test@example.org".to_string(),
+            None,
+            None,
         );
 
         // Shut it down
-        handle.cmd_tx.send(CoordinatorCommand::Shutdown).await.unwrap();
+        handle
+            .cmd_tx
+            .send(CoordinatorCommand::Shutdown)
+            .await
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         // Now all operations should fail cleanly
@@ -1699,8 +2130,13 @@ mod tests {
         let (msg_tx, mut msg_rx) = mpsc::channel(16);
 
         let _handle = spawn_coordinator(
-            stanza_tx, event_rx, msg_tx, None,
-            "test@example.org".to_string(), None, None,
+            stanza_tx,
+            event_rx,
+            msg_tx,
+            None,
+            "test@example.org".to_string(),
+            None,
+            None,
         );
 
         let inbound = Element::builder("message", "jabber:client")
@@ -1708,7 +2144,11 @@ mod tests {
             .attr("to", "test@example.org/res")
             .attr("type", "chat")
             .attr("id", "msg-with-receipt")
-            .append(Element::builder("body", "jabber:client").append("Please receipt me").build())
+            .append(
+                Element::builder("body", "jabber:client")
+                    .append("Please receipt me")
+                    .build(),
+            )
             .append(Element::builder("request", custom_ns::RECEIPTS).build())
             .build();
 
@@ -1718,15 +2158,22 @@ mod tests {
         let _ = timeout(Duration::from_millis(100), msg_rx.recv()).await;
 
         // Should have sent a receipt stanza
-        let receipt = timeout(Duration::from_millis(100), stanza_rx.recv()).await
-            .expect("timeout").expect("no receipt stanza");
+        let receipt = timeout(Duration::from_millis(100), stanza_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("no receipt stanza");
         assert_eq!(receipt.attr("to"), Some("alice@example.org/phone"));
 
-        let received_elem = receipt.get_child("received", custom_ns::RECEIPTS)
+        let received_elem = receipt
+            .get_child("received", custom_ns::RECEIPTS)
             .expect("no received element");
         assert_eq!(received_elem.attr("id"), Some("msg-with-receipt"));
 
-        _handle.cmd_tx.send(CoordinatorCommand::Shutdown).await.unwrap();
+        _handle
+            .cmd_tx
+            .send(CoordinatorCommand::Shutdown)
+            .await
+            .unwrap();
     }
 
     // ─── Key verification response tests ──────────────────────────────────
@@ -1738,15 +2185,29 @@ mod tests {
         let (msg_tx, _msg_rx) = mpsc::channel(16);
 
         let handle = spawn_coordinator(
-            stanza_tx, event_rx, msg_tx, None,
-            "test@example.org".to_string(), None, None,
+            stanza_tx,
+            event_rx,
+            msg_tx,
+            None,
+            "test@example.org".to_string(),
+            None,
+            None,
         );
 
-        let result = handle.key_verification_response("bob@example.org", "invalid-response").await;
+        let result = handle
+            .key_verification_response("bob@example.org", "invalid-response")
+            .await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Unknown key verification response"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Unknown key verification response"));
 
-        handle.cmd_tx.send(CoordinatorCommand::Shutdown).await.unwrap();
+        handle
+            .cmd_tx
+            .send(CoordinatorCommand::Shutdown)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1756,20 +2217,33 @@ mod tests {
         let (msg_tx, mut msg_rx) = mpsc::channel(16);
 
         let handle = spawn_coordinator(
-            stanza_tx, event_rx, msg_tx, None,
-            "test@example.org".to_string(), None, None,
+            stanza_tx,
+            event_rx,
+            msg_tx,
+            None,
+            "test@example.org".to_string(),
+            None,
+            None,
         );
 
-        let result = handle.key_verification_response("bob@example.org", "__KEY_ACCEPTED__").await;
+        let result = handle
+            .key_verification_response("bob@example.org", "__KEY_ACCEPTED__")
+            .await;
         assert!(result.is_ok());
 
-        let ui_msg = timeout(Duration::from_millis(200), msg_rx.recv()).await
-            .expect("timeout").expect("channel closed");
+        let ui_msg = timeout(Duration::from_millis(200), msg_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("channel closed");
         assert!(ui_msg.content.contains("accepted"));
         assert!(ui_msg.content.contains("bob@example.org"));
         assert_eq!(ui_msg.sender_id, "system");
 
-        handle.cmd_tx.send(CoordinatorCommand::Shutdown).await.unwrap();
+        handle
+            .cmd_tx
+            .send(CoordinatorCommand::Shutdown)
+            .await
+            .unwrap();
     }
 
     // ─── Disconnected event doesn't crash coordinator ─────────────────────
@@ -1781,20 +2255,31 @@ mod tests {
         let (msg_tx, _msg_rx) = mpsc::channel(16);
 
         let handle = spawn_coordinator(
-            stanza_tx, event_rx, msg_tx, None,
-            "test@example.org".to_string(), None, None,
+            stanza_tx,
+            event_rx,
+            msg_tx,
+            None,
+            "test@example.org".to_string(),
+            None,
+            None,
         );
 
-        event_tx.send(tokio_xmpp::Event::Disconnected(
-            tokio_xmpp::Error::Disconnected
-        )).unwrap();
+        event_tx
+            .send(tokio_xmpp::Event::Disconnected(
+                tokio_xmpp::Error::Disconnected,
+            ))
+            .unwrap();
 
         // Coordinator should still be alive
         tokio::time::sleep(Duration::from_millis(50)).await;
         let result = handle.is_omemo_enabled().await;
         assert!(!result);
 
-        handle.cmd_tx.send(CoordinatorCommand::Shutdown).await.unwrap();
+        handle
+            .cmd_tx
+            .send(CoordinatorCommand::Shutdown)
+            .await
+            .unwrap();
     }
 
     // ─── Presence stanza doesn't crash coordinator ────────────────────────
@@ -1806,8 +2291,13 @@ mod tests {
         let (msg_tx, _msg_rx) = mpsc::channel(16);
 
         let _handle = spawn_coordinator(
-            stanza_tx, event_rx, msg_tx, None,
-            "test@example.org".to_string(), None, None,
+            stanza_tx,
+            event_rx,
+            msg_tx,
+            None,
+            "test@example.org".to_string(),
+            None,
+            None,
         );
 
         let presence = Element::builder("presence", "jabber:client")
@@ -1822,7 +2312,11 @@ mod tests {
 
         // Still alive
         assert!(!_handle.is_omemo_enabled().await);
-        _handle.cmd_tx.send(CoordinatorCommand::Shutdown).await.unwrap();
+        _handle
+            .cmd_tx
+            .send(CoordinatorCommand::Shutdown)
+            .await
+            .unwrap();
     }
 
     // ─── Backpressure: coordinator does NOT deadlock when UI is slow ──────
@@ -1835,8 +2329,13 @@ mod tests {
         let (msg_tx, msg_rx) = mpsc::channel(1); // capacity=1
 
         let handle = spawn_coordinator(
-            stanza_tx, event_rx, msg_tx, None,
-            "test@example.org".to_string(), None, None,
+            stanza_tx,
+            event_rx,
+            msg_tx,
+            None,
+            "test@example.org".to_string(),
+            None,
+            None,
         );
 
         // Send 5 messages to the coordinator — only 1 can fit in msg_rx
@@ -1848,7 +2347,7 @@ mod tests {
                 .append(
                     Element::builder("body", "jabber:client")
                         .append(format!("Message {}", i))
-                        .build()
+                        .build(),
                 )
                 .build();
             event_tx.send(tokio_xmpp::Event::Stanza(inbound)).unwrap();
@@ -1860,21 +2359,26 @@ mod tests {
         // The coordinator should still be responsive (not deadlocked).
         // If it were using .await on msg_tx.send(), it would be stuck after
         // the first message fills the channel, and this would timeout.
-        let responsive = timeout(
-            Duration::from_millis(200),
-            handle.is_omemo_enabled()
-        ).await;
+        let responsive = timeout(Duration::from_millis(200), handle.is_omemo_enabled()).await;
         assert!(responsive.is_ok(), "Coordinator is deadlocked!");
         assert!(!responsive.unwrap());
 
         // We can also send a command and get a reply back
         let send_result = timeout(
             Duration::from_millis(200),
-            handle.send_plaintext("bob@example.org", "still alive")
-        ).await;
-        assert!(send_result.is_ok(), "Coordinator deadlocked on command processing");
+            handle.send_plaintext("bob@example.org", "still alive"),
+        )
+        .await;
+        assert!(
+            send_result.is_ok(),
+            "Coordinator deadlocked on command processing"
+        );
 
-        handle.cmd_tx.send(CoordinatorCommand::Shutdown).await.unwrap();
+        handle
+            .cmd_tx
+            .send(CoordinatorCommand::Shutdown)
+            .await
+            .unwrap();
 
         // Clean up — drain what we can
         drop(msg_rx);
@@ -1888,8 +2392,13 @@ mod tests {
         let (msg_tx, mut msg_rx) = mpsc::channel(2);
 
         let _handle = spawn_coordinator(
-            stanza_tx, event_rx, msg_tx, None,
-            "test@example.org".to_string(), None, None,
+            stanza_tx,
+            event_rx,
+            msg_tx,
+            None,
+            "test@example.org".to_string(),
+            None,
+            None,
         );
 
         // Send 4 messages
@@ -1901,7 +2410,7 @@ mod tests {
                 .append(
                     Element::builder("body", "jabber:client")
                         .append(format!("Hello {}", i))
-                        .build()
+                        .build(),
                 )
                 .build();
             event_tx.send(tokio_xmpp::Event::Stanza(inbound)).unwrap();
@@ -1917,9 +2426,20 @@ mod tests {
         }
 
         // At least 1 delivered, at most 2 (capacity). The rest were dropped.
-        assert!(!received.is_empty(), "Should have received at least 1 message");
-        assert!(received.len() <= 2, "Should not exceed channel capacity, got {}", received.len());
+        assert!(
+            !received.is_empty(),
+            "Should have received at least 1 message"
+        );
+        assert!(
+            received.len() <= 2,
+            "Should not exceed channel capacity, got {}",
+            received.len()
+        );
 
-        _handle.cmd_tx.send(CoordinatorCommand::Shutdown).await.unwrap();
+        _handle
+            .cmd_tx
+            .send(CoordinatorCommand::Shutdown)
+            .await
+            .unwrap();
     }
 }

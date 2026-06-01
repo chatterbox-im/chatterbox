@@ -8,13 +8,13 @@
 //! Supports automatic reconnection with exponential backoff when the stream
 //! disconnects unexpectedly.
 
+use futures_util::Stream;
+use log::{debug, error, info, warn};
 use std::pin::Pin;
 use std::task::Poll;
 use std::time::Duration;
-use futures_util::Stream;
-use log::{debug, error, info, warn};
 use tokio::sync::mpsc;
-use tokio_xmpp::{AsyncClient as XMPPAsyncClient, Event as XMPPEvent, BareJid};
+use tokio_xmpp::{AsyncClient as XMPPAsyncClient, BareJid, Event as XMPPEvent};
 use xmpp_parsers::Element;
 
 /// A cheaply-cloneable handle for sending stanzas to the transport task.
@@ -68,7 +68,10 @@ pub fn spawn_transport(client: XMPPAsyncClient) -> TransportHandle {
 
     tokio::spawn(transport_loop(client, event_tx, stanza_rx, None));
 
-    TransportHandle { stanza_tx, event_rx }
+    TransportHandle {
+        stanza_tx,
+        event_rx,
+    }
 }
 
 /// Spawn the transport actor with automatic reconnection support.
@@ -76,13 +79,19 @@ pub fn spawn_transport(client: XMPPAsyncClient) -> TransportHandle {
 /// On disconnect, the transport will attempt to reconnect using the provided
 /// credentials with exponential backoff. The coordinator sees Disconnected
 /// followed by Online events transparently.
-pub fn spawn_transport_with_reconnect(client: XMPPAsyncClient, config: ReconnectConfig) -> TransportHandle {
+pub fn spawn_transport_with_reconnect(
+    client: XMPPAsyncClient,
+    config: ReconnectConfig,
+) -> TransportHandle {
     let (stanza_tx, stanza_rx) = mpsc::unbounded_channel();
     let (event_tx, event_rx) = mpsc::unbounded_channel();
 
     tokio::spawn(transport_loop(client, event_tx, stanza_rx, Some(config)));
 
-    TransportHandle { stanza_tx, event_rx }
+    TransportHandle {
+        stanza_tx,
+        event_rx,
+    }
 }
 
 /// Spawn the transport actor with bounded channels and reconnection.
@@ -90,13 +99,19 @@ pub fn spawn_transport_with_reconnect(client: XMPPAsyncClient, config: Reconnect
 /// Provides natural backpressure: if the coordinator is slow to process events,
 /// the transport will pause reading from the XMPP stream. If the coordinator
 /// sends stanzas faster than the network can deliver, the send will await.
-pub fn spawn_transport_bounded(client: XMPPAsyncClient, config: Option<ReconnectConfig>) -> BoundedTransportHandle {
+pub fn spawn_transport_bounded(
+    client: XMPPAsyncClient,
+    config: Option<ReconnectConfig>,
+) -> BoundedTransportHandle {
     let (stanza_tx, stanza_rx) = mpsc::channel(STANZA_CHANNEL_CAPACITY);
     let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
 
     tokio::spawn(transport_loop_bounded(client, event_tx, stanza_rx, config));
 
-    BoundedTransportHandle { stanza_tx, event_rx }
+    BoundedTransportHandle {
+        stanza_tx,
+        event_rx,
+    }
 }
 
 /// Internal action produced by the poll loop.
@@ -148,9 +163,8 @@ async fn transport_loop(
                     if let Err(e) = client.send_stanza(s).await {
                         error!("Transport: send failed: {}", e);
                         // Notify coordinator of disconnect
-                        let _ = event_tx.send(XMPPEvent::Disconnected(
-                            tokio_xmpp::Error::Disconnected
-                        ));
+                        let _ =
+                            event_tx.send(XMPPEvent::Disconnected(tokio_xmpp::Error::Disconnected));
                         // Attempt reconnection
                         if let Some(ref config) = reconnect_config {
                             match try_reconnect(config, &mut reconnect_attempts, &event_tx).await {
@@ -195,9 +209,7 @@ async fn transport_loop(
                 info!("Transport: shutting down (stream ended or senders dropped)");
                 // Attempt reconnection if configured
                 if let Some(ref config) = reconnect_config {
-                    let _ = event_tx.send(XMPPEvent::Disconnected(
-                        tokio_xmpp::Error::Disconnected
-                    ));
+                    let _ = event_tx.send(XMPPEvent::Disconnected(tokio_xmpp::Error::Disconnected));
                     match try_reconnect(config, &mut reconnect_attempts, &event_tx).await {
                         Some(new_client) => {
                             client = new_client;
@@ -225,7 +237,10 @@ async fn try_reconnect(
     *attempts += 1;
 
     if config.max_attempts > 0 && *attempts > config.max_attempts {
-        error!("Transport: max reconnection attempts ({}) exceeded", config.max_attempts);
+        error!(
+            "Transport: max reconnection attempts ({}) exceeded",
+            config.max_attempts
+        );
         return None;
     }
 
@@ -234,7 +249,10 @@ async fn try_reconnect(
         config.max_backoff,
     );
 
-    warn!("Transport: reconnecting in {:?} (attempt {})", backoff, attempts);
+    warn!(
+        "Transport: reconnecting in {:?} (attempt {})",
+        backoff, attempts
+    );
     tokio::time::sleep(backoff).await;
 
     let new_client = XMPPAsyncClient::new(config.jid.clone(), &config.password);
@@ -280,12 +298,15 @@ async fn transport_loop_bounded(
                 for s in batch {
                     if let Err(e) = client.send_stanza(s).await {
                         error!("Transport (bounded): send failed: {}", e);
-                        let _ = event_tx.send(XMPPEvent::Disconnected(
-                            tokio_xmpp::Error::Disconnected
-                        )).await;
+                        let _ = event_tx
+                            .send(XMPPEvent::Disconnected(tokio_xmpp::Error::Disconnected))
+                            .await;
                         if let Some(ref config) = reconnect_config {
                             match try_reconnect_bounded(config, &mut reconnect_attempts).await {
-                                Some(new_client) => { client = new_client; continue 'outer; }
+                                Some(new_client) => {
+                                    client = new_client;
+                                    continue 'outer;
+                                }
                                 None => break 'outer,
                             }
                         } else {
@@ -305,7 +326,10 @@ async fn transport_loop_bounded(
                 if is_disconnect {
                     if let Some(ref config) = reconnect_config {
                         match try_reconnect_bounded(config, &mut reconnect_attempts).await {
-                            Some(new_client) => { client = new_client; continue 'outer; }
+                            Some(new_client) => {
+                                client = new_client;
+                                continue 'outer;
+                            }
                             None => break 'outer,
                         }
                     } else {
@@ -317,11 +341,14 @@ async fn transport_loop_bounded(
             Action::Shutdown => {
                 info!("Transport (bounded): shutting down");
                 if let Some(ref config) = reconnect_config {
-                    let _ = event_tx.send(XMPPEvent::Disconnected(
-                        tokio_xmpp::Error::Disconnected
-                    )).await;
+                    let _ = event_tx
+                        .send(XMPPEvent::Disconnected(tokio_xmpp::Error::Disconnected))
+                        .await;
                     match try_reconnect_bounded(config, &mut reconnect_attempts).await {
-                        Some(new_client) => { client = new_client; continue 'outer; }
+                        Some(new_client) => {
+                            client = new_client;
+                            continue 'outer;
+                        }
                         None => break 'outer,
                     }
                 } else {
@@ -342,7 +369,10 @@ async fn try_reconnect_bounded(
     *attempts += 1;
 
     if config.max_attempts > 0 && *attempts > config.max_attempts {
-        error!("Transport: max reconnection attempts ({}) exceeded", config.max_attempts);
+        error!(
+            "Transport: max reconnection attempts ({}) exceeded",
+            config.max_attempts
+        );
         return None;
     }
 
@@ -351,7 +381,10 @@ async fn try_reconnect_bounded(
         config.max_backoff,
     );
 
-    warn!("Transport: reconnecting in {:?} (attempt {})", backoff, attempts);
+    warn!(
+        "Transport: reconnecting in {:?} (attempt {})",
+        backoff, attempts
+    );
     tokio::time::sleep(backoff).await;
 
     let new_client = XMPPAsyncClient::new(config.jid.clone(), &config.password);
@@ -451,7 +484,11 @@ mod tests {
         // Next send should fail (channel full)
         let stanza = Element::builder("message", "jabber:client").build();
         let result = tx.try_send(stanza);
-        assert!(result.is_err(), "channel should be full at capacity {}", STANZA_CHANNEL_CAPACITY);
+        assert!(
+            result.is_err(),
+            "channel should be full at capacity {}",
+            STANZA_CHANNEL_CAPACITY
+        );
     }
 
     #[tokio::test]
@@ -465,7 +502,11 @@ mod tests {
 
         // Next send should fail
         let result = tx.try_send(());
-        assert!(result.is_err(), "channel should be full at capacity {}", EVENT_CHANNEL_CAPACITY);
+        assert!(
+            result.is_err(),
+            "channel should be full at capacity {}",
+            EVENT_CHANNEL_CAPACITY
+        );
     }
 
     #[tokio::test]
@@ -493,8 +534,11 @@ mod tests {
 
         let elapsed = send_task.await.unwrap();
         // The sender should have been blocked for at least ~50ms
-        assert!(elapsed >= Duration::from_millis(40),
-            "sender should have been blocked, but elapsed was {:?}", elapsed);
+        assert!(
+            elapsed >= Duration::from_millis(40),
+            "sender should have been blocked, but elapsed was {:?}",
+            elapsed
+        );
     }
 
     // ─── Transport handle channel semantics ───────────────────────────────
@@ -504,7 +548,10 @@ mod tests {
         let (stanza_tx, _stanza_rx) = mpsc::unbounded_channel::<Element>();
         let (_event_tx, event_rx) = mpsc::unbounded_channel::<tokio_xmpp::Event>();
 
-        let handle = TransportHandle { stanza_tx, event_rx };
+        let handle = TransportHandle {
+            stanza_tx,
+            event_rx,
+        };
 
         // Can send without blocking
         let stanza = Element::builder("message", "jabber:client").build();
@@ -516,7 +563,10 @@ mod tests {
         let (stanza_tx, _stanza_rx) = mpsc::channel::<Element>(STANZA_CHANNEL_CAPACITY);
         let (_event_tx, event_rx) = mpsc::channel::<tokio_xmpp::Event>(EVENT_CHANNEL_CAPACITY);
 
-        let handle = BoundedTransportHandle { stanza_tx, event_rx };
+        let handle = BoundedTransportHandle {
+            stanza_tx,
+            event_rx,
+        };
 
         // Can send (channel not full)
         let stanza = Element::builder("message", "jabber:client").build();
@@ -614,8 +664,11 @@ mod tests {
         let elapsed = start.elapsed();
 
         // Should have waited approximately 50ms (first attempt: 50 * 2^0 = 50ms)
-        assert!(elapsed >= Duration::from_millis(40),
-            "should wait at least ~50ms, got {:?}", elapsed);
+        assert!(
+            elapsed >= Duration::from_millis(40),
+            "should wait at least ~50ms, got {:?}",
+            elapsed
+        );
     }
 
     #[tokio::test]
@@ -639,7 +692,11 @@ mod tests {
         let elapsed2 = start2.elapsed();
 
         // Second attempt should take longer than first
-        assert!(elapsed2 > elapsed1,
-            "backoff should grow: first={:?}, second={:?}", elapsed1, elapsed2);
+        assert!(
+            elapsed2 > elapsed1,
+            "backoff should grow: first={:?}, second={:?}",
+            elapsed1,
+            elapsed2
+        );
     }
 }

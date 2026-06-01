@@ -6,15 +6,12 @@ use anyhow::Result;
 use log::{error, info, warn};
 use std::io;
 
-use crate::{
-    ui::ChatUI,
-    credentials::load_credentials,
-};
+use crate::{credentials::load_credentials, ui::ChatUI};
 use chatterbox::{
-    xmpp::{XMPPClient, chat_states::TypingStatus},
     models::Message,
-    xmpp::message_archive::MAMQueryOptions,
     storage::MessageStore,
+    xmpp::message_archive::MAMQueryOptions,
+    xmpp::{chat_states::TypingStatus, XMPPClient},
 };
 
 /// Creates a system message for display in the UI
@@ -42,14 +39,22 @@ pub async fn run_app(
     info!("Waiting for OMEMO initialization to complete...");
 
     // Open local message store
-    let bare_jid = xmpp_client.get_jid().split('/').next().unwrap_or(xmpp_client.get_jid()).to_string();
+    let bare_jid = xmpp_client
+        .get_jid()
+        .split('/')
+        .next()
+        .unwrap_or(xmpp_client.get_jid())
+        .to_string();
     let store = match MessageStore::open(&bare_jid) {
         Ok(s) => {
             info!("Local message store opened for {}", bare_jid);
             Some(s)
         }
         Err(e) => {
-            error!("Failed to open message store: {}. Messages won't be persisted locally.", e);
+            error!(
+                "Failed to open message store: {}. Messages won't be persisted locally.",
+                e
+            );
             None
         }
     };
@@ -142,7 +147,10 @@ async fn show_omemo_fingerprints(chat_ui: &mut ChatUI, xmpp_client: &XMPPClient)
 
         if !device_ids.is_empty() {
             for device_id in device_ids {
-                match xmpp_client.get_device_fingerprint(bare_jid, device_id).await {
+                match xmpp_client
+                    .get_device_fingerprint(bare_jid, device_id)
+                    .await
+                {
                     Ok(fingerprint) => {
                         let msg = create_system_message(
                             &contact,
@@ -216,7 +224,10 @@ async fn start_initial_history_load(
             }
             Ok(_) => None,
             Err(e) => {
-                error!("Failed to load local messages for {}: {}", active_contact, e);
+                error!(
+                    "Failed to load local messages for {}: {}",
+                    active_contact, e
+                );
                 None
             }
         }
@@ -225,13 +236,24 @@ async fn start_initial_history_load(
     };
 
     // MAM catch-up for messages newer than what we have locally
-    load_message_history_with_catchup(chat_ui, xmpp_client, &active_contact, disable_mam, newest_ts);
+    load_message_history_with_catchup(
+        chat_ui,
+        xmpp_client,
+        &active_contact,
+        disable_mam,
+        newest_ts,
+    );
 }
 
 /// Set up the contacts list from the XMPP server
 async fn setup_contacts(chat_ui: &mut ChatUI, xmpp_client: &mut XMPPClient, _disable_mam: bool) {
     // Always add own JID as a contact (for messaging other devices on same account)
-    let our_bare_jid = xmpp_client.get_jid().split('/').next().unwrap_or("").to_string();
+    let our_bare_jid = xmpp_client
+        .get_jid()
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .to_string();
     if !our_bare_jid.is_empty() {
         chat_ui.add_contact(&our_bare_jid);
     }
@@ -302,7 +324,10 @@ fn load_message_history_async(
             Ok(exists) => {
                 if !exists {
                     if let Err(e) = msg_tx
-                        .send(create_system_message(&contact_clone, "No message history found"))
+                        .send(create_system_message(
+                            &contact_clone,
+                            "No message history found",
+                        ))
                         .await
                     {
                         error!("Failed to send 'no history' message: {}", e);
@@ -338,13 +363,21 @@ fn load_message_history_async(
             }
         }
 
-        let options = MAMQueryOptions::new().with_jid(&contact_clone).with_limit(50);
+        let options = MAMQueryOptions::new()
+            .with_jid(&contact_clone)
+            .with_limit(50);
 
-        match client_clone.get_message_history_with_pagination(options).await {
+        match client_clone
+            .get_message_history_with_pagination(options)
+            .await
+        {
             Ok(result) => {
                 if result.messages.is_empty() {
                     if let Err(e) = msg_tx
-                        .send(create_system_message(&contact_clone, "No message history found"))
+                        .send(create_system_message(
+                            &contact_clone,
+                            "No message history found",
+                        ))
                         .await
                     {
                         error!("Failed to send 'no history' message: {}", e);
@@ -430,7 +463,9 @@ fn load_message_history_with_catchup(
     ));
 
     tokio::spawn(async move {
-        let mut options = MAMQueryOptions::new().with_jid(&contact_clone).with_limit(50);
+        let mut options = MAMQueryOptions::new()
+            .with_jid(&contact_clone)
+            .with_limit(50);
 
         // If we have local history, only fetch messages newer than what we have
         if let Some(ts) = since {
@@ -439,11 +474,17 @@ fn load_message_history_with_catchup(
             options = options.with_start(start_time);
         }
 
-        match client_clone.get_message_history_with_pagination(options).await {
+        match client_clone
+            .get_message_history_with_pagination(options)
+            .await
+        {
             Ok(result) => {
                 if result.messages.is_empty() {
                     if let Err(e) = msg_tx
-                        .send(create_system_message(&contact_clone, "No new messages on server"))
+                        .send(create_system_message(
+                            &contact_clone,
+                            "No new messages on server",
+                        ))
                         .await
                     {
                         error!("Failed to send catchup status: {}", e);
@@ -537,7 +578,9 @@ async fn run_main_loop(
                 let client_clone = xmpp_client.clone();
                 let contact_clone = active_contact.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = client_clone.check_omemo_keys_for_contact(&contact_clone).await
+                    if let Err(e) = client_clone
+                        .check_omemo_keys_for_contact(&contact_clone)
+                        .await
                     {
                         error!("Failed to check OMEMO keys for {}: {}", contact_clone, e);
                     }
@@ -547,14 +590,17 @@ async fn run_main_loop(
 
         // Process incoming messages
         if let Ok(message) = msg_rx.try_recv() {
-            if message.sender_id == "system"
-                && message.content.starts_with("__OMEMO_KEY_VERIFY__:")
+            if message.sender_id == "system" && message.content.starts_with("__OMEMO_KEY_VERIFY__:")
             {
                 let parts: Vec<&str> = message.content.splitn(4, ':').collect();
                 if parts.len() >= 3 {
                     let contact = parts[1];
                     let fingerprint = parts[2];
-                    let device_id = if parts.len() > 3 { Some(parts[3]) } else { None };
+                    let device_id = if parts.len() > 3 {
+                        Some(parts[3])
+                    } else {
+                        None
+                    };
                     handle_new_omemo_key(chat_ui, contact, fingerprint, device_id.as_deref());
                 }
             } else {
@@ -654,9 +700,7 @@ async fn run_main_loop(
                     if last_state_sent != Some(TypingStatus::Composing)
                         || elapsed > std::time::Duration::from_secs(10)
                     {
-                        match xmpp_client
-                            .send_chat_state(&contact, &TypingStatus::Composing)
-                        {
+                        match xmpp_client.send_chat_state(&contact, &TypingStatus::Composing) {
                             Ok(_) => {
                                 last_state_sent = Some(TypingStatus::Composing);
                                 typing_failures = 0;
@@ -671,9 +715,7 @@ async fn run_main_loop(
                     && elapsed < std::time::Duration::from_secs(30)
                     && last_state_sent != Some(TypingStatus::Paused)
                 {
-                    match xmpp_client
-                        .send_chat_state(&contact, &TypingStatus::Paused)
-                    {
+                    match xmpp_client.send_chat_state(&contact, &TypingStatus::Paused) {
                         Ok(_) => {
                             last_state_sent = Some(TypingStatus::Paused);
                             typing_failures = 0;
@@ -686,9 +728,7 @@ async fn run_main_loop(
                 } else if elapsed >= std::time::Duration::from_secs(30)
                     && last_state_sent != Some(TypingStatus::Active)
                 {
-                    match xmpp_client
-                        .send_chat_state(&contact, &TypingStatus::Active)
-                    {
+                    match xmpp_client.send_chat_state(&contact, &TypingStatus::Active) {
                         Ok(_) => {
                             last_state_sent = Some(TypingStatus::Active);
                             typing_failures = 0;
@@ -798,8 +838,15 @@ async fn handle_user_command(
     }
 
     if content == "__REMOVE_CONTACT__" || content == "__REMOVE_CONTACT_CONFIRMED__" {
-        handle_remove_contact(chat_ui, terminal, xmpp_client, recipient, content, disable_mam)
-            .await;
+        handle_remove_contact(
+            chat_ui,
+            terminal,
+            xmpp_client,
+            recipient,
+            content,
+            disable_mam,
+        )
+        .await;
         return Ok(());
     }
 
@@ -841,9 +888,17 @@ async fn handle_user_command(
 
             // MAM catch-up for messages newer than what we have locally
             let newest_ts = store.and_then(|s| s.newest_timestamp(recipient).ok().flatten());
-            load_message_history_with_catchup(chat_ui, xmpp_client, recipient, disable_mam, newest_ts);
+            load_message_history_with_catchup(
+                chat_ui,
+                xmpp_client,
+                recipient,
+                disable_mam,
+                newest_ts,
+            );
 
-            chat_ui.history_loaded_contacts.insert(recipient.to_string());
+            chat_ui
+                .history_loaded_contacts
+                .insert(recipient.to_string());
         }
 
         terminal.draw(|f| chat_ui.draw(f))?;
@@ -888,8 +943,16 @@ async fn handle_user_command(
 
     // Regular message send
     if !content.is_empty() {
-        handle_send_message(chat_ui, terminal, xmpp_client, recipient, content, last_state_sent, store)
-            .await?;
+        handle_send_message(
+            chat_ui,
+            terminal,
+            xmpp_client,
+            recipient,
+            content,
+            last_state_sent,
+            store,
+        )
+        .await?;
     }
 
     Ok(())
@@ -1065,9 +1128,7 @@ async fn handle_verify_keys_send(
     ));
     *last_state_sent = None;
 
-    if let Err(e) = xmpp_client
-        .send_chat_state(actual_recipient, &TypingStatus::Active)
-    {
+    if let Err(e) = xmpp_client.send_chat_state(actual_recipient, &TypingStatus::Active) {
         error!("Failed to send active state after message: {}", e);
     }
     terminal.draw(|f| chat_ui.draw(f))?;
@@ -1240,7 +1301,10 @@ async fn handle_add_contact(
             // If it's our own JID, add locally anyway (server rejects self-roster adds)
             let our_bare_jid = xmpp_client.get_jid().split('/').next().unwrap_or("");
             if recipient == our_bare_jid || recipient.eq_ignore_ascii_case(our_bare_jid) {
-                info!("Adding own JID {} as local contact (server rejected roster add)", recipient);
+                info!(
+                    "Adding own JID {} as local contact (server rejected roster add)",
+                    recipient
+                );
                 chat_ui.remove_last_message();
                 chat_ui.add_contact(recipient);
                 chat_ui.set_active_contact(recipient);
@@ -1403,7 +1467,12 @@ async fn handle_refetch_omemo(chat_ui: &mut ChatUI, xmpp_client: &mut XMPPClient
     );
 
     if let Some(omemo_manager) = xmpp_client.get_omemo_manager() {
-        match omemo_manager.lock().await.get_device_ids_for_test(jid).await {
+        match omemo_manager
+            .lock()
+            .await
+            .get_device_ids_for_test(jid)
+            .await
+        {
             Ok(device_ids) if !device_ids.is_empty() => {
                 chat_ui.add_message(create_system_message(
                     jid,
@@ -1470,9 +1539,7 @@ async fn handle_send_message(
     chat_ui.add_message(create_system_message(recipient, "Sending message..."));
     *last_state_sent = None;
 
-    if let Err(e) = xmpp_client
-        .send_chat_state(recipient, &TypingStatus::Active)
-    {
+    if let Err(e) = xmpp_client.send_chat_state(recipient, &TypingStatus::Active) {
         error!("Failed to send active state after message: {}", e);
     }
     terminal.draw(|f| chat_ui.draw(f))?;
@@ -1491,7 +1558,11 @@ async fn handle_send_message(
         Ok(_) => {
             chat_ui.remove_last_message();
             let message_id = uuid::Uuid::new_v4().to_string();
-            let message = Message::outgoing_encrypted(message_id.clone(), recipient.to_string(), content.to_string());
+            let message = Message::outgoing_encrypted(
+                message_id.clone(),
+                recipient.to_string(),
+                content.to_string(),
+            );
             chat_ui.add_message(message.clone());
             // Persist outgoing message locally
             if let Some(s) = store {
@@ -1561,15 +1632,17 @@ async fn check_pending_key_verifications(
                     "Found pending key verification for {}:{} with fingerprint {}",
                     contact, device_id, fingerprint
                 );
-                handle_new_omemo_key(chat_ui, &contact, &fingerprint, Some(&device_id.to_string()));
+                handle_new_omemo_key(
+                    chat_ui,
+                    &contact,
+                    &fingerprint,
+                    Some(&device_id.to_string()),
+                );
                 break;
             }
             Ok(None) => {}
             Err(e) => {
-                warn!(
-                    "Error checking pending verification for {}: {}",
-                    contact, e
-                );
+                warn!("Error checking pending verification for {}: {}", contact, e);
             }
         }
     }

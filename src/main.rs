@@ -1,16 +1,19 @@
 #![deny(dead_code)] // DO NOT REMOVE THIS EVER
 use anyhow::Result;
-use log::{info, error, LevelFilter};
-use std::{env, io::{self, Write}};
 use clap::Parser;
+use log::{error, info, LevelFilter};
 use std::path::PathBuf;
+use std::{
+    env,
+    io::{self, Write},
+};
 
 mod app;
+mod credentials;
 mod ui;
 mod utils;
-mod credentials;
 
-use crate::credentials::{Credentials, load_credentials, save_credentials};
+use crate::credentials::{load_credentials, save_credentials, Credentials};
 use chatterbox::xmpp::XMPPClient;
 
 /// Command line arguments for Sermo
@@ -27,11 +30,18 @@ use chatterbox::xmpp::XMPPClient;
 )]
 struct Args {
     /// Directory for OMEMO device_id, identity_key, and multi-device info files
-    #[arg(long, value_name = "PATH", help = "Override the directory for OMEMO device_id, identity_key, and multi-device info files")]
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Override the directory for OMEMO device_id, identity_key, and multi-device info files"
+    )]
     omemo_dir: Option<PathBuf>,
-    
+
     /// Disable Message Archive Management (MAM) - no historical messages will be loaded
-    #[arg(long, help = "Disable Message Archive Management (MAM) - no historical messages will be loaded")]
+    #[arg(
+        long,
+        help = "Disable Message Archive Management (MAM) - no historical messages will be loaded"
+    )]
     disable_mam: bool,
 }
 
@@ -51,7 +61,7 @@ fn prompt_credentials() -> (String, String, String) {
         eprintln!("Enter password (input will not be shown):");
         utils::read_line().unwrap_or_default()
     });
-    
+
     (server, username, password)
 }
 
@@ -77,23 +87,21 @@ async fn main() -> Result<()> {
                     dir.join("chatterbox.log")
                 }
             }
-            None => {
-                match dirs::data_dir() {
-                    Some(mut data_dir) => {
-                        data_dir.push("chatterbox");
-                        if let Err(e) = std::fs::create_dir_all(&data_dir) {
-                            eprintln!("Warning: Failed to create log directory {}: {}. Falling back to current directory.", data_dir.display(), e);
-                            PathBuf::from("chatterbox.log")
-                        } else {
-                            data_dir.join("chatterbox.log")
-                        }
-                    }
-                    None => {
-                        eprintln!("Warning: Could not determine XDG data directory. Falling back to current directory for logging.");
+            None => match dirs::data_dir() {
+                Some(mut data_dir) => {
+                    data_dir.push("chatterbox");
+                    if let Err(e) = std::fs::create_dir_all(&data_dir) {
+                        eprintln!("Warning: Failed to create log directory {}: {}. Falling back to current directory.", data_dir.display(), e);
                         PathBuf::from("chatterbox.log")
+                    } else {
+                        data_dir.join("chatterbox.log")
                     }
                 }
-            }
+                None => {
+                    eprintln!("Warning: Could not determine XDG data directory. Falling back to current directory for logging.");
+                    PathBuf::from("chatterbox.log")
+                }
+            },
         })
     } else {
         None
@@ -101,11 +109,19 @@ async fn main() -> Result<()> {
 
     // Setup logging with the determined path
     // In release builds, disable logging entirely (no file, no stdout)
-    let log_level = if cfg!(debug_assertions) { LevelFilter::Debug } else { LevelFilter::Off };
+    let log_level = if cfg!(debug_assertions) {
+        LevelFilter::Debug
+    } else {
+        LevelFilter::Off
+    };
     utils::setup_logging(log_file_path.as_deref().and_then(|p| p.to_str()), log_level)?;
-    
+
     info!("Chatterbox XMPP Chat client starting up");
-    info!("System information: {} {}", std::env::consts::OS, std::env::consts::ARCH);
+    info!(
+        "System information: {} {}",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    );
     if let Some(ref path) = log_file_path {
         info!("Logging to file: {}", path.display());
     }
@@ -119,25 +135,26 @@ async fn main() -> Result<()> {
     }
 
     // Get credentials: prefer environment variables, then file, then prompt
-    let (server, username, password, credentials_from_env) = if let (Ok(server), Ok(username), Ok(password)) = (
-        env::var("XMPP_SERVER"),
-        env::var("XMPP_USERNAME"),
-        env::var("XMPP_PASSWORD")
-    ) {
-        (server, username, password, true)
-    } else if let Some(creds) = load_credentials()? {
-        info!("Using cached credentials for {}", creds.username);
-        if let Some(password) = creds.get_password() {
-            (creds.server, creds.username, password, false)
+    let (server, username, password, credentials_from_env) =
+        if let (Ok(server), Ok(username), Ok(password)) = (
+            env::var("XMPP_SERVER"),
+            env::var("XMPP_USERNAME"),
+            env::var("XMPP_PASSWORD"),
+        ) {
+            (server, username, password, true)
+        } else if let Some(creds) = load_credentials()? {
+            info!("Using cached credentials for {}", creds.username);
+            if let Some(password) = creds.get_password() {
+                (creds.server, creds.username, password, false)
+            } else {
+                eprintln!("Enter password for {}@{}:", creds.username, creds.server);
+                let password = utils::read_line().unwrap_or_default();
+                (creds.server, creds.username, password, false)
+            }
         } else {
-            eprintln!("Enter password for {}@{}:", creds.username, creds.server);
-            let password = utils::read_line().unwrap_or_default();
-            (creds.server, creds.username, password, false)
-        }
-    } else {
-        let (server, username, password) = prompt_credentials();
-        (server, username, password, false)
-    };
+            let (server, username, password) = prompt_credentials();
+            (server, username, password, false)
+        };
 
     // Print initial connection message
     print!("Connecting to {}@{}... please wait", username, server);
@@ -178,21 +195,21 @@ async fn main() -> Result<()> {
     });
 
     let connection_result = xmpp_client.connect(&server, &username, &password).await;
-    
+
     // Stop the dots animation
     let _ = dots_stop_tx.send(()).await;
     dots_task.abort(); // Ensure the task is stopped
-    
+
     // Clear the connection line and move to next line
     let connection_msg = format!("Connecting to {}@{}... please wait......", username, server);
     print!("\r{}\r", " ".repeat(connection_msg.len()));
     io::stdout().flush().unwrap();
-    
+
     let typing_rx_holder;
     match connection_result {
         Ok(_) => {
             println!("Connected successfully!");
-            
+
             // Save credentials on successful connection, but only if not from env vars
             if !credentials_from_env {
                 let credentials = Credentials::new(&server, &username, &password);
@@ -200,24 +217,25 @@ async fn main() -> Result<()> {
                     eprintln!("Warning: Failed to save credentials: {}", e);
                 }
             }
-            
+
             // Initialize OMEMO encryption first
             info!("Initializing OMEMO encryption...");
             match xmpp_client.initialize_client().await {
                 Ok(_) => {
                     info!("OMEMO encryption initialized successfully");
-                },
+                }
                 Err(e) => {
                     error!("Failed to initialize OMEMO encryption: {}. Continuing without E2E encryption.", e);
                     eprintln!("Warning: OMEMO encryption unavailable: {}", e);
                 }
             }
-            
+
             // Create typing notification channel and store in client BEFORE publishing state
-            let (typing_tx, typing_rx_inner) = tokio::sync::mpsc::channel::<(String, chatterbox::xmpp::TypingStatus)>(100);
+            let (typing_tx, typing_rx_inner) =
+                tokio::sync::mpsc::channel::<(String, chatterbox::xmpp::TypingStatus)>(100);
             xmpp_client.typing_tx = Some(typing_tx);
             typing_rx_holder = Some(typing_rx_inner);
-            
+
             // Publish late-bound state to the event loop via watch channel.
             // This makes OMEMO manager, pubsub_responses, typing_tx available
             // to the event loop without any mutex locks.
@@ -231,11 +249,10 @@ async fn main() -> Result<()> {
             //         warn!("Failed to advertise service discovery features: {}", e);
             //     }
             // }
-
-        },
+        }
         Err(e) => {
             println!("Connection failed!");
-            
+
             // Get detailed error information - break it into multiple lines for better readability
             let error_details = format!("Connection to XMPP server failed: {}", e);
             let error_display = format!(
@@ -248,13 +265,13 @@ async fn main() -> Result<()> {
                  - Server is running and accepting connections",
                 username, server, error_details
             );
-            
+
             // Log the error
             error!("{}", error_details);
-            
+
             // Display error to user
             eprintln!("{}", error_display);
-            
+
             return Err(anyhow::anyhow!(error_details));
         }
     }

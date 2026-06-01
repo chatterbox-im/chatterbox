@@ -1,9 +1,9 @@
 use anyhow::Result;
 use log::{info, warn};
-use xmpp_parsers::Element;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
-use std::collections::HashSet;
+use xmpp_parsers::Element;
 
 use super::transport::{self, StanzaTx};
 
@@ -32,8 +32,8 @@ pub struct ServiceDiscovery {
 impl ServiceDiscovery {
     /// Creates a new ServiceDiscovery instance
     pub fn new(stanza_tx: StanzaTx) -> Self {
-        Self { 
-            stanza_tx, 
+        Self {
+            stanza_tx,
             discovered_features: Arc::new(TokioMutex::new(std::collections::HashMap::new())),
             discovered_identities: Arc::new(TokioMutex::new(std::collections::HashMap::new())),
         }
@@ -91,26 +91,29 @@ impl ServiceDiscovery {
         // Handle disco#info responses
         if let Some(query) = stanza.get_child("query", "http://jabber.org/protocol/disco#info") {
             //debug!("Received service discovery info response from {}", from);
-            
+
             // Process the response to extract features
             let features = self.extract_features(query);
             let identities = self.extract_identities(query);
-            
+
             // Store discovered features
             self.store_features(from, features.clone()).await;
-            
+
             // Store discovered identities
             self.store_identities(from, identities.clone()).await;
-            
+
             // Log capabilities
             self.log_capabilities(from, &features, &identities);
-        } 
+        }
         // Handle disco#items responses
-        else if let Some(query) = stanza.get_child("query", "http://jabber.org/protocol/disco#items") {
+        else if let Some(query) =
+            stanza.get_child("query", "http://jabber.org/protocol/disco#items")
+        {
             //debug!("Received service discovery items response from {}", from);
-            
+
             // Extract items (other entities that can be queried)
-            let items = query.children()
+            let items = query
+                .children()
                 .filter(|child| child.name() == "item")
                 .filter_map(|item| {
                     let jid = item.attr("jid")?;
@@ -118,9 +121,9 @@ impl ServiceDiscovery {
                     Some((jid, name))
                 })
                 .collect::<Vec<_>>();
-            
+
             info!("Discovered {} items from {}", items.len(), from);
-            
+
             // Log discovered items
             for (jid, name) in &items {
                 if let Some(item_name) = name {
@@ -129,7 +132,7 @@ impl ServiceDiscovery {
                     info!("Discovered item: {}", jid);
                 }
             }
-            
+
             // For servers, automatically query each discovered service
             if from.contains('.') && !from.contains('@') {
                 //debug!("Auto-querying discovered services from server {}", from);
@@ -138,7 +141,7 @@ impl ServiceDiscovery {
                     if jid.contains("@") {
                         continue;
                     }
-                    
+
                     // Send a disco#info query to this item
                     if let Err(e) = self.send_disco_info_request(jid).await {
                         warn!("Failed to send disco query to service {}: {}", jid, e);
@@ -152,33 +155,37 @@ impl ServiceDiscovery {
 
     /// Extract features from a disco#info response
     fn extract_features(&self, query: &Element) -> HashSet<Feature> {
-        let features = query.children()
+        let features = query
+            .children()
             .filter(|child| child.name() == "feature")
             .filter_map(|feature| {
-                feature.attr("var").map(|var| Feature { namespace: var.to_string() })
+                feature.attr("var").map(|var| Feature {
+                    namespace: var.to_string(),
+                })
             })
             .collect();
-        
+
         features
     }
 
     /// Extract identities from a disco#info response
     fn extract_identities(&self, query: &Element) -> HashSet<Identity> {
-        let identities = query.children()
+        let identities = query
+            .children()
             .filter(|child| child.name() == "identity")
             .filter_map(|identity| {
                 let category = identity.attr("category")?;
                 let type_ = identity.attr("type")?;
                 let name = identity.attr("name");
-                
+
                 Some(Identity {
                     category: category.to_string(),
                     type_: type_.to_string(),
-                    name: name.map(ToString::to_string)
+                    name: name.map(ToString::to_string),
                 })
             })
             .collect();
-        
+
         identities
     }
 
@@ -195,7 +202,12 @@ impl ServiceDiscovery {
     }
 
     /// Log capabilities of an entity
-    fn log_capabilities(&self, jid: &str, features: &HashSet<Feature>, identities: &HashSet<Identity>) {
+    fn log_capabilities(
+        &self,
+        jid: &str,
+        features: &HashSet<Feature>,
+        identities: &HashSet<Identity>,
+    ) {
         // Determine if this is a server or a client
         let entity_type = if jid.contains('@') {
             "client"
@@ -203,9 +215,14 @@ impl ServiceDiscovery {
             "server"
         };
 
-        info!("{} {} supports {} features and advertises {} identities", 
-            entity_type, jid, features.len(), identities.len());
-        
+        info!(
+            "{} {} supports {} features and advertises {} identities",
+            entity_type,
+            jid,
+            features.len(),
+            identities.len()
+        );
+
         // Log identities
         if !identities.is_empty() {
             info!("{} {} identities:", entity_type, jid);
@@ -217,17 +234,17 @@ impl ServiceDiscovery {
                 }
             }
         }
-        
+
         // Log supported features
         if !features.is_empty() {
             info!("{} {} features:", entity_type, jid);
-            
+
             // Group features by category for cleaner logging
             let mut omemo_features = Vec::new();
             let mut xep_features = Vec::new();
             let mut pubsub_features = Vec::new();
             let mut other_features = Vec::new();
-            
+
             for feature in features {
                 let ns = &feature.namespace;
                 if ns.contains("omemo") || ns.contains("axolotl") {
@@ -240,7 +257,7 @@ impl ServiceDiscovery {
                     other_features.push(ns);
                 }
             }
-            
+
             // Log OMEMO features first (they're most important for us)
             if !omemo_features.is_empty() {
                 info!("  OMEMO features:");
@@ -251,7 +268,7 @@ impl ServiceDiscovery {
                 // Log explicitly when a server doesn't support OMEMO (important for compatibility)
                 info!("  No OMEMO features found for {}", jid);
             }
-            
+
             // Log XEP features
             if !xep_features.is_empty() {
                 info!("  XEP features:");
@@ -259,7 +276,7 @@ impl ServiceDiscovery {
                     info!("    - {}", ns);
                 }
             }
-            
+
             // Log PubSub features
             if !pubsub_features.is_empty() {
                 info!("  PubSub features:");
@@ -267,7 +284,7 @@ impl ServiceDiscovery {
                     info!("    - {}", ns);
                 }
             }
-            
+
             // Log other features
             if !other_features.is_empty() {
                 info!("  Other features:");
@@ -366,22 +383,25 @@ impl ServiceDiscovery {
                     return Ok(());
                 }
             };
-            
+
             // Extract the hash, node, and ver attributes
             let _node = caps.attr("node").unwrap_or("");
             let ver = caps.attr("ver").unwrap_or("");
             let _hash = caps.attr("hash").unwrap_or("");
-            
+
             //debug!("Received entity capabilities from {}: node={}, ver={}, hash={}", from, node, ver, hash);
-            
+
             // When we see a caps element, we should query the entity for its disco#info
             // This will help us determine what features they support
             if !ver.is_empty() {
-                info!("Detected entity capabilities in presence from {}, querying for details", from);
+                info!(
+                    "Detected entity capabilities in presence from {}, querying for details",
+                    from
+                );
                 self.send_disco_info_request(from).await?;
             }
         }
-        
+
         Ok(())
     }
 }
@@ -390,7 +410,10 @@ impl ServiceDiscovery {
 mod tests {
     use super::*;
 
-    fn make_disco_info_query(features: &[&str], identities: &[(&str, &str, Option<&str>)]) -> Element {
+    fn make_disco_info_query(
+        features: &[&str],
+        identities: &[(&str, &str, Option<&str>)],
+    ) -> Element {
         let mut query = Element::builder("query", "http://jabber.org/protocol/disco#info").build();
         for ns in features {
             let feat = Element::builder("feature", "http://jabber.org/protocol/disco#info")
@@ -413,16 +436,20 @@ mod tests {
 
     /// Test extract_features via ServiceDiscovery (needs a dummy client)
     fn extract_features_from(query: &Element) -> HashSet<Feature> {
-        query.children()
+        query
+            .children()
             .filter(|child| child.name() == "feature")
             .filter_map(|feature| {
-                feature.attr("var").map(|var| Feature { namespace: var.to_string() })
+                feature.attr("var").map(|var| Feature {
+                    namespace: var.to_string(),
+                })
             })
             .collect()
     }
 
     fn extract_identities_from(query: &Element) -> HashSet<Identity> {
-        query.children()
+        query
+            .children()
             .filter(|child| child.name() == "identity")
             .filter_map(|identity| {
                 let category = identity.attr("category")?;
@@ -440,21 +467,34 @@ mod tests {
     #[test]
     fn test_extract_features() {
         let query = make_disco_info_query(
-            &["urn:xmpp:carbons:2", "urn:xmpp:mam:2", "eu.siacs.conversations.axolotl"],
+            &[
+                "urn:xmpp:carbons:2",
+                "urn:xmpp:mam:2",
+                "eu.siacs.conversations.axolotl",
+            ],
             &[],
         );
         let features = extract_features_from(&query);
         assert_eq!(features.len(), 3);
-        assert!(features.contains(&Feature { namespace: "urn:xmpp:carbons:2".to_string() }));
-        assert!(features.contains(&Feature { namespace: "urn:xmpp:mam:2".to_string() }));
-        assert!(features.contains(&Feature { namespace: "eu.siacs.conversations.axolotl".to_string() }));
+        assert!(features.contains(&Feature {
+            namespace: "urn:xmpp:carbons:2".to_string()
+        }));
+        assert!(features.contains(&Feature {
+            namespace: "urn:xmpp:mam:2".to_string()
+        }));
+        assert!(features.contains(&Feature {
+            namespace: "eu.siacs.conversations.axolotl".to_string()
+        }));
     }
 
     #[test]
     fn test_extract_identities() {
         let query = make_disco_info_query(
             &[],
-            &[("client", "console", Some("Chatterbox")), ("server", "im", None)],
+            &[
+                ("client", "console", Some("Chatterbox")),
+                ("server", "im", None),
+            ],
         );
         let identities = extract_identities_from(&query);
         assert_eq!(identities.len(), 2);
@@ -481,18 +521,36 @@ mod tests {
 
     #[test]
     fn test_feature_equality() {
-        let f1 = Feature { namespace: "urn:xmpp:mam:2".to_string() };
-        let f2 = Feature { namespace: "urn:xmpp:mam:2".to_string() };
-        let f3 = Feature { namespace: "urn:xmpp:carbons:2".to_string() };
+        let f1 = Feature {
+            namespace: "urn:xmpp:mam:2".to_string(),
+        };
+        let f2 = Feature {
+            namespace: "urn:xmpp:mam:2".to_string(),
+        };
+        let f3 = Feature {
+            namespace: "urn:xmpp:carbons:2".to_string(),
+        };
         assert_eq!(f1, f2);
         assert_ne!(f1, f3);
     }
 
     #[test]
     fn test_identity_equality() {
-        let i1 = Identity { category: "client".to_string(), type_: "pc".to_string(), name: None };
-        let i2 = Identity { category: "client".to_string(), type_: "pc".to_string(), name: None };
-        let i3 = Identity { category: "client".to_string(), type_: "phone".to_string(), name: None };
+        let i1 = Identity {
+            category: "client".to_string(),
+            type_: "pc".to_string(),
+            name: None,
+        };
+        let i2 = Identity {
+            category: "client".to_string(),
+            type_: "pc".to_string(),
+            name: None,
+        };
+        let i3 = Identity {
+            category: "client".to_string(),
+            type_: "phone".to_string(),
+            name: None,
+        };
         assert_eq!(i1, i2);
         assert_ne!(i1, i3);
     }

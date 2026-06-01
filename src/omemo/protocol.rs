@@ -4,10 +4,10 @@
 //! This module handles the cryptographic protocol for OMEMO, including X3DH and Double Ratchet.
 
 use anyhow::Result;
+use log::debug;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use thiserror::Error;
-use log::debug;
 
 use crate::omemo::crypto;
 use crate::omemo::device_id::DeviceId;
@@ -18,19 +18,19 @@ pub enum DoubleRatchetError {
     /// Error during cryptographic operations
     #[error("Crypto error: {0}")]
     CryptoError(#[from] crate::omemo::crypto::CryptoError),
-    
+
     /// Key generation error
     #[error("Key generation error: {0}")]
     KeyGenerationError(String),
-    
+
     /// Invalid signature
     #[error("Invalid signature: {0}")]
     InvalidSignatureError(String),
-    
+
     /// Invalid message format
     #[error("Invalid message format: {0}")]
     InvalidMessageFormatError(String),
-    
+
     /// Unknown message key
     #[error("Unknown message key: {0}")]
     UnknownMessageKeyError(String),
@@ -41,7 +41,7 @@ pub enum DoubleRatchetError {
 pub struct KeyPair {
     /// The public key
     pub public_key: Vec<u8>,
-    
+
     /// The private key
     pub private_key: Vec<u8>,
 }
@@ -54,19 +54,19 @@ pub struct X3DHProtocol;
 pub struct X3DHKeyBundle {
     /// Device ID
     pub device_id: DeviceId,
-    
+
     /// Identity key pair
     pub identity_key_pair: KeyPair,
-    
+
     /// Signed pre-key ID
     pub signed_pre_key_id: u32,
-    
+
     /// Signed pre-key pair
     pub signed_pre_key_pair: KeyPair,
-    
+
     /// Signature of the signed pre-key
     pub signed_pre_key_signature: Vec<u8>,
-    
+
     /// One-time pre-key pairs
     pub one_time_pre_key_pairs: std::collections::HashMap<u32, KeyPair>,
 }
@@ -76,7 +76,7 @@ pub struct X3DHKeyBundle {
 pub struct PreKeyBundle {
     /// Pre-key ID
     pub id: u32,
-    
+
     /// Pre-key public key
     pub public_key: Vec<u8>,
 }
@@ -86,10 +86,10 @@ pub struct PreKeyBundle {
 pub struct SignedPreKeyBundle {
     /// Signed pre-key ID
     pub id: u32,
-    
+
     /// Signed pre-key public key
     pub public_key: Vec<u8>,
-    
+
     /// Signature of the signed pre-key
     pub signature: Vec<u8>,
 }
@@ -99,13 +99,13 @@ pub struct SignedPreKeyBundle {
 pub struct DeviceIdentity {
     /// Device ID
     pub id: DeviceId,
-    
+
     /// Identity key
     pub identity_key: Vec<u8>,
-    
+
     /// Signed pre-key
     pub signed_pre_key: SignedPreKeyBundle,
-    
+
     /// Pre-keys
     pub pre_keys: Vec<PreKeyBundle>,
 }
@@ -115,56 +115,56 @@ pub struct DeviceIdentity {
 pub struct RatchetState {
     /// Flag indicating if the state is initialized
     pub initialized: bool,
-    
+
     /// Flag indicating if this is the initiator
     pub is_initiator: bool,
-    
+
     /// Remote identity key
     pub remote_identity_key: Vec<u8>,
-    
+
     /// Local identity key pair
     pub local_identity_key_pair: KeyPair,
-    
+
     /// Root key
     pub root_key: Vec<u8>,
-    
+
     /// Send chain key
     pub send_chain_key: Vec<u8>,
-    
+
     /// Receive chain key
     pub receive_chain_key: Vec<u8>,
-    
+
     /// Ratchet key pair
     pub ratchet_key_pair: KeyPair,
-    
+
     /// Remote ratchet key
     pub remote_ratchet_key: Vec<u8>,
-    
+
     /// Previous remote ratchet key
     pub prev_remote_ratchet_key: Vec<u8>,
-    
+
     /// Send message number
     pub send_message_number: u32,
-    
+
     /// Receive message number
     pub receive_message_number: u32,
-    
+
     /// Previous receive message number
     pub prev_receive_message_number: u32,
-    
+
     /// Previous send message number (used as previous_counter in Signal wire format)
     #[serde(default)]
     pub prev_send_message_number: u32,
-    
+
     /// Skipped message keys
     pub skipped_message_keys: std::collections::HashMap<(Vec<u8>, u32), Vec<u8>>,
-    
+
     /// Local device ID
     pub local_device_id: DeviceId,
-    
+
     /// Remote device ID
     pub remote_device_id: DeviceId,
-    
+
     /// Remote JID
     pub remote_jid: String,
 }
@@ -174,31 +174,31 @@ pub struct RatchetState {
 pub struct OmemoMessage {
     /// Sender device ID
     pub sender_device_id: DeviceId,
-    
+
     /// Current ratchet key
     pub ratchet_key: Vec<u8>,
-    
+
     /// Previous counter value
     pub previous_counter: u32,
-    
+
     /// Counter value
     pub counter: u32,
-    
+
     /// Ciphertext
     pub ciphertext: Vec<u8>,
-    
+
     /// Message authentication code
     pub mac: Vec<u8>,
-    
+
     /// Initialization vector
     pub iv: Vec<u8>,
-    
+
     /// Encrypted keys for each recipient device
     pub encrypted_keys: HashMap<DeviceId, Vec<u8>>,
-    
+
     /// Whether this message is a PreKey message (forces new session creation)
     pub is_prekey: bool,
-    
+
     /// Ephemeral public key used for X3DH (only present in PreKey messages)
     pub ephemeral_key: Option<Vec<u8>>,
 
@@ -213,29 +213,32 @@ impl X3DHProtocol {
     /// Generate a key pair for OMEMO operations
     pub fn generate_key_pair() -> Result<KeyPair, DoubleRatchetError> {
         // generate_x25519_keypair returns (private_key, public_key)
-        let (private_key, public_key) = crypto::generate_x25519_keypair()
-            .map_err(DoubleRatchetError::CryptoError)?;
-        
+        let (private_key, public_key) =
+            crypto::generate_x25519_keypair().map_err(DoubleRatchetError::CryptoError)?;
+
         Ok(KeyPair {
             public_key,
             private_key,
         })
     }
-    
+
     /// Generate a key bundle for a device
-    pub fn generate_key_bundle(device_id: DeviceId, num_prekeys: u32) -> Result<X3DHKeyBundle, DoubleRatchetError> {
+    pub fn generate_key_bundle(
+        device_id: DeviceId,
+        num_prekeys: u32,
+    ) -> Result<X3DHKeyBundle, DoubleRatchetError> {
         // Generate identity key pair
         let identity_key_pair = Self::generate_key_pair()?;
-        
+
         // Generate signed pre-key pair
         let signed_pre_key_pair = Self::generate_key_pair()?;
-        
+
         // Sign the pre-key with the identity key
         let signed_pre_key_signature = Self::sign_pre_key(
             &identity_key_pair.private_key,
             &signed_pre_key_pair.public_key,
         )?;
-        
+
         // Generate one-time pre-key pairs
         let mut one_time_pre_key_pairs = std::collections::HashMap::new();
         for i in 0..num_prekeys {
@@ -243,7 +246,7 @@ impl X3DHProtocol {
             let pre_key_pair = Self::generate_key_pair()?;
             one_time_pre_key_pairs.insert(pre_key_id, pre_key_pair);
         }
-        
+
         // Create the bundle
         Ok(X3DHKeyBundle {
             device_id,
@@ -254,21 +257,27 @@ impl X3DHProtocol {
             one_time_pre_key_pairs,
         })
     }
-    
+
     /// Sign a pre-key with the identity key using XEdDSA.
     /// This allows signing with an X25519 identity key (as OMEMO/Signal requires).
     /// Per libsignal convention, the message signed is the 33-byte key (0x05 prefix + 32 bytes).
-    pub fn sign_pre_key(identity_private_key: &[u8], pre_key_public: &[u8]) -> Result<Vec<u8>, DoubleRatchetError> {
+    pub fn sign_pre_key(
+        identity_private_key: &[u8],
+        pre_key_public: &[u8],
+    ) -> Result<Vec<u8>, DoubleRatchetError> {
         let prefixed_key = crypto::encode_public_key_with_prefix(pre_key_public);
-        crypto::xeddsa_sign(identity_private_key, &prefixed_key)
-            .map_err(|e| DoubleRatchetError::InvalidSignatureError(
-                format!("XEdDSA signing failed: {}", e)
-            ))
+        crypto::xeddsa_sign(identity_private_key, &prefixed_key).map_err(|e| {
+            DoubleRatchetError::InvalidSignatureError(format!("XEdDSA signing failed: {}", e))
+        })
     }
-    
+
     /// Verify a pre-key signature using XEdDSA.
     /// Verifies that the signed prekey was signed by the holder of the X25519 identity key.
-    pub fn verify_pre_key(identity_public_key: &[u8], pre_key_public: &[u8], signature: &[u8]) -> Result<bool, DoubleRatchetError> {
+    pub fn verify_pre_key(
+        identity_public_key: &[u8],
+        pre_key_public: &[u8],
+        signature: &[u8],
+    ) -> Result<bool, DoubleRatchetError> {
         // Normalize identity key to 32 bytes (strip 0x05 prefix if present)
         let identity_key_32 = if identity_public_key.len() == 33 && identity_public_key[0] == 0x05 {
             &identity_public_key[1..]
@@ -279,24 +288,26 @@ impl X3DHProtocol {
         let prefixed_spk = crypto::encode_public_key_with_prefix(pre_key_public);
         match crypto::xeddsa_verify(identity_key_32, &prefixed_spk, signature) {
             Ok(true) => return Ok(true),
-            Ok(false) => {},
-            Err(e) => return Err(DoubleRatchetError::InvalidSignatureError(
-                format!("XEdDSA verification failed: {}", e)
-            )),
+            Ok(false) => {}
+            Err(e) => {
+                return Err(DoubleRatchetError::InvalidSignatureError(format!(
+                    "XEdDSA verification failed: {}",
+                    e
+                )))
+            }
         }
-        
+
         // Fallback: try verification with raw 32-byte SPK (Dino/other implementations)
         let raw_spk = if pre_key_public.len() == 33 && pre_key_public[0] == 0x05 {
             &pre_key_public[1..]
         } else {
             pre_key_public
         };
-        crypto::xeddsa_verify(identity_key_32, raw_spk, signature)
-            .map_err(|e| DoubleRatchetError::InvalidSignatureError(
-                format!("XEdDSA verification failed: {}", e)
-            ))
+        crypto::xeddsa_verify(identity_key_32, raw_spk, signature).map_err(|e| {
+            DoubleRatchetError::InvalidSignatureError(format!("XEdDSA verification failed: {}", e))
+        })
     }
-    
+
     /// Perform X3DH key agreement as the initiator with a provided ephemeral key
     pub fn key_agreement_initiator_with_ephemeral(
         identity_key_pair: &KeyPair,
@@ -306,35 +317,30 @@ impl X3DHProtocol {
         ephemeral_key: &[u8], // Use provided ephemeral key instead of generating
     ) -> Result<Vec<u8>, DoubleRatchetError> {
         debug!("X3DH initiator key agreement starting");
-        
+
         // DH1 = DH(IKa, SPKb)
-        let dh1 = crypto::x25519_diffie_hellman(
-            &identity_key_pair.private_key,
-            their_signed_pre_key,
-        ).map_err(DoubleRatchetError::CryptoError)?;
-        
+        let dh1 =
+            crypto::x25519_diffie_hellman(&identity_key_pair.private_key, their_signed_pre_key)
+                .map_err(DoubleRatchetError::CryptoError)?;
+
         // DH2 = DH(EKa, IKb)
-        let dh2 = crypto::x25519_diffie_hellman(
-            ephemeral_key,
-            their_identity_key,
-        ).map_err(DoubleRatchetError::CryptoError)?;
-        
+        let dh2 = crypto::x25519_diffie_hellman(ephemeral_key, their_identity_key)
+            .map_err(DoubleRatchetError::CryptoError)?;
+
         // DH3 = DH(EKa, SPKb)
-        let dh3 = crypto::x25519_diffie_hellman(
-            ephemeral_key,
-            their_signed_pre_key,
-        ).map_err(DoubleRatchetError::CryptoError)?;
-        
+        let dh3 = crypto::x25519_diffie_hellman(ephemeral_key, their_signed_pre_key)
+            .map_err(DoubleRatchetError::CryptoError)?;
+
         // DH4 = DH(EKa, OPKb) (if OPKb exists)
         let dh4 = if let Some(their_one_time_pre_key) = their_one_time_pre_key {
-            Some(crypto::x25519_diffie_hellman(
-                ephemeral_key,
-                their_one_time_pre_key,
-            ).map_err(DoubleRatchetError::CryptoError)?)
+            Some(
+                crypto::x25519_diffie_hellman(ephemeral_key, their_one_time_pre_key)
+                    .map_err(DoubleRatchetError::CryptoError)?,
+            )
         } else {
             None
         };
-        
+
         // Per Signal spec: IKM = F || DH1 || DH2 || DH3 [|| DH4]
         // where F = 0xFF repeated 32 times
         let mut ikm = vec![0xFFu8; 32];
@@ -344,13 +350,13 @@ impl X3DHProtocol {
         if let Some(ref dh4) = dh4 {
             ikm.extend_from_slice(dh4);
         }
-        
+
         // HKDF(salt=0x00*32, IKM, info="WhisperText", L=32)
         // info="WhisperText" matches libsignal's X3DH key derivation
         let salt = vec![0u8; 32];
         let shared_secret = crypto::hkdf_derive(&salt, &ikm, b"WhisperText", 32)
             .map_err(DoubleRatchetError::CryptoError)?;
-        
+
         debug!("X3DH initiator key agreement complete");
         Ok(shared_secret)
     }
@@ -364,7 +370,7 @@ impl X3DHProtocol {
     ) -> Result<Vec<u8>, DoubleRatchetError> {
         // Generate an ephemeral key pair
         let ephemeral_key_pair = Self::generate_key_pair()?;
-        
+
         // Use the new function with the generated ephemeral key
         Self::key_agreement_initiator_with_ephemeral(
             identity_key_pair,
@@ -374,7 +380,7 @@ impl X3DHProtocol {
             &ephemeral_key_pair.private_key,
         )
     }
-    
+
     /// Perform X3DH key agreement as the recipient
     pub fn key_agreement_recipient(
         identity_key_pair: &KeyPair,
@@ -384,35 +390,35 @@ impl X3DHProtocol {
         their_ephemeral_key: &[u8],
     ) -> Result<Vec<u8>, DoubleRatchetError> {
         debug!("X3DH recipient key agreement starting");
-        
+
         // DH1 = DH(SPKb, IKa)
-        let dh1 = crypto::x25519_diffie_hellman(
-            &signed_pre_key_pair.private_key,
-            their_identity_key,
-        ).map_err(DoubleRatchetError::CryptoError)?;
-        
+        let dh1 =
+            crypto::x25519_diffie_hellman(&signed_pre_key_pair.private_key, their_identity_key)
+                .map_err(DoubleRatchetError::CryptoError)?;
+
         // DH2 = DH(IKb, EKa)
-        let dh2 = crypto::x25519_diffie_hellman(
-            &identity_key_pair.private_key,
-            their_ephemeral_key,
-        ).map_err(DoubleRatchetError::CryptoError)?;
-        
+        let dh2 =
+            crypto::x25519_diffie_hellman(&identity_key_pair.private_key, their_ephemeral_key)
+                .map_err(DoubleRatchetError::CryptoError)?;
+
         // DH3 = DH(SPKb, EKa)
-        let dh3 = crypto::x25519_diffie_hellman(
-            &signed_pre_key_pair.private_key,
-            their_ephemeral_key,
-        ).map_err(DoubleRatchetError::CryptoError)?;
-        
+        let dh3 =
+            crypto::x25519_diffie_hellman(&signed_pre_key_pair.private_key, their_ephemeral_key)
+                .map_err(DoubleRatchetError::CryptoError)?;
+
         // DH4 = DH(OPKb, EKa) (if OPKb exists)
         let dh4 = if let Some(one_time_pre_key_pair) = one_time_pre_key_pair {
-            Some(crypto::x25519_diffie_hellman(
-                &one_time_pre_key_pair.private_key,
-                their_ephemeral_key,
-            ).map_err(DoubleRatchetError::CryptoError)?)
+            Some(
+                crypto::x25519_diffie_hellman(
+                    &one_time_pre_key_pair.private_key,
+                    their_ephemeral_key,
+                )
+                .map_err(DoubleRatchetError::CryptoError)?,
+            )
         } else {
             None
         };
-        
+
         // Per Signal spec: IKM = F || DH1 || DH2 || DH3 [|| DH4]
         // where F = 0xFF repeated 32 times
         let mut ikm = vec![0xFFu8; 32];
@@ -422,13 +428,13 @@ impl X3DHProtocol {
         if let Some(ref dh4) = dh4 {
             ikm.extend_from_slice(dh4);
         }
-        
+
         // HKDF(salt=0x00*32, IKM, info="WhisperText", L=32)
         // info="WhisperText" matches libsignal's X3DH key derivation
         let salt = vec![0u8; 32];
         let shared_key = crypto::hkdf_derive(&salt, &ikm, b"WhisperText", 32)
             .map_err(DoubleRatchetError::CryptoError)?;
-        
+
         debug!("X3DH recipient key agreement complete");
         Ok(shared_key)
     }
@@ -454,7 +460,7 @@ impl DoubleRatchet {
             remote_one_time_prekey.as_deref(),
             &ephemeral_key,
         )?;
-        
+
         // Create symmetric session state for both initiator and recipient
         Self::create_symmetric_session_state(
             shared_secret,
@@ -494,19 +500,18 @@ impl DoubleRatchet {
             // - Perform an initial sending DH ratchet step:
             //   Generate new ratchet keypair, DH(new_ratchet, SPKb) -> KDF_RK -> (new_root, send_chain)
             let ratchet_key_pair = X3DHProtocol::generate_key_pair()?;
-            
+
             // DH between our new ratchet key and their signed prekey
-            let dh_output = crypto::x25519_diffie_hellman(
-                &ratchet_key_pair.private_key,
-                &remote_signed_prekey,
-            ).map_err(DoubleRatchetError::CryptoError)?;
-            
+            let dh_output =
+                crypto::x25519_diffie_hellman(&ratchet_key_pair.private_key, &remote_signed_prekey)
+                    .map_err(DoubleRatchetError::CryptoError)?;
+
             // KDF_RK(SK, DH) -> (root_key, send_chain_key)
             let kdf_output = crypto::hkdf_derive(&shared_secret, &dh_output, b"WhisperRatchet", 64)
                 .map_err(DoubleRatchetError::CryptoError)?;
             let root_key = kdf_output[..32].to_vec();
             let send_chain_key = kdf_output[32..64].to_vec();
-            
+
             let state = RatchetState {
                 initialized: true,
                 is_initiator: true,
@@ -527,7 +532,7 @@ impl DoubleRatchet {
                 remote_device_id,
                 remote_jid: normalize_jid_to_bare(&remote_jid),
             };
-            
+
             Ok(state)
         } else {
             // Bob (recipient):
@@ -535,7 +540,7 @@ impl DoubleRatchet {
             // - ratchet_key_pair = signed prekey (SPKb) — this is what Alice will DH against
             // - Receive chain not yet set; will be established when we receive Alice's first message
             //   which triggers a DH ratchet using her ratchet key
-            
+
             // Bob's ratchet key IS the signed prekey (Alice will send her ratchet key in first message)
             // We need to find the signed prekey private key - it's passed via ephemeral_key param
             // Actually for recipient, the ratchet key pair is the signed prekey pair
@@ -547,7 +552,7 @@ impl DoubleRatchet {
                 remote_identity_key,
                 local_identity_key_pair,
                 root_key: shared_secret,
-                send_chain_key: vec![0u8; 32], // Not yet established
+                send_chain_key: vec![0u8; 32],    // Not yet established
                 receive_chain_key: vec![0u8; 32], // Not yet established
                 ratchet_key_pair: KeyPair {
                     public_key: vec![], // Will be set properly by new_session_recipient
@@ -564,7 +569,7 @@ impl DoubleRatchet {
                 remote_device_id,
                 remote_jid: normalize_jid_to_bare(&remote_jid),
             };
-            
+
             Ok(state)
         }
     }
@@ -581,7 +586,7 @@ impl DoubleRatchet {
     ) -> Result<RatchetState, DoubleRatchetError> {
         // Generate a random ephemeral key pair for this session
         let ephemeral_key_pair = X3DHProtocol::generate_key_pair()?;
-        
+
         // Use the with_ephemeral version with the generated ephemeral key
         Self::new_session_initiator_with_ephemeral(
             local_identity_key_pair,
@@ -594,7 +599,7 @@ impl DoubleRatchet {
             remote_jid,
         )
     }
-    
+
     /// Create a new Double Ratchet session as the recipient
     pub fn new_session_recipient(
         local_identity_key_pair: KeyPair,
@@ -614,11 +619,11 @@ impl DoubleRatchet {
             local_one_time_prekey_pair.as_ref(),
             &remote_ephemeral_key,
         )?;
-        
+
         // For recipient: ratchet_key_pair = signed prekey (Bob's SPK)
         // Alice's ephemeral key is the remote_ratchet_key (she DH'd against our SPK)
         let spk_pair = local_signed_prekey_pair.clone();
-        
+
         let mut state = Self::create_symmetric_session_state(
             shared_secret,
             local_identity_key_pair,
@@ -630,29 +635,33 @@ impl DoubleRatchet {
             remote_device_id,
             remote_jid,
         )?;
-        
+
         // Set ratchet key pair to signed prekey pair (Bob uses SPK as initial ratchet key)
         state.ratchet_key_pair = spk_pair;
-        
+
         Ok(state)
     }
-    
+
     /// Encrypt a message
-    pub fn encrypt(state: &mut RatchetState, plaintext: &[u8]) -> Result<OmemoMessage, DoubleRatchetError> {
+    pub fn encrypt(
+        state: &mut RatchetState,
+        plaintext: &[u8],
+    ) -> Result<OmemoMessage, DoubleRatchetError> {
         // Get the message key
         let message_key = Self::derive_next_sending_key(state);
-        
+
         // Generate a random IV
         let iv = crypto::generate_iv();
-        
+
         // Encrypt the message
         let ciphertext = crypto::encrypt(plaintext, &message_key, &iv, &[])
             .map_err(DoubleRatchetError::CryptoError)?;
-        
+
         // MAC: HMAC-SHA256(message_key, ciphertext), truncated to 16 bytes
-        let mac = crypto::hmac_sha256(&message_key, &ciphertext)
-            .expect("HMAC-SHA256 cannot fail")[..16].to_vec();
-        
+        let mac = crypto::hmac_sha256(&message_key, &ciphertext).expect("HMAC-SHA256 cannot fail")
+            [..16]
+            .to_vec();
+
         // Create the message
         let message = OmemoMessage {
             sender_device_id: state.local_device_id,
@@ -667,88 +676,96 @@ impl DoubleRatchet {
             ephemeral_key: None,
             prekey_devices: HashSet::new(),
         };
-        
+
         // Increment message counter
         state.send_message_number += 1;
-        
+
         Ok(message)
     }
-    
+
     /// Decrypt a message
-    pub fn decrypt(state: &mut RatchetState, message: &OmemoMessage) -> Result<Vec<u8>, DoubleRatchetError> {
+    pub fn decrypt(
+        state: &mut RatchetState,
+        message: &OmemoMessage,
+    ) -> Result<Vec<u8>, DoubleRatchetError> {
         // Check if we need to perform a DH ratchet step
         if !state.remote_ratchet_key.eq(&message.ratchet_key) {
             // Ratchet key has changed, perform a DH ratchet step
             Self::dh_ratchet(state, &message.ratchet_key)?;
         }
-        
+
         // Try to find a skipped message key
         let key = (message.ratchet_key.clone(), message.counter);
         if let Some(message_key) = state.skipped_message_keys.remove(&key) {
             // We have a skipped message key, use it to decrypt
             return Self::decrypt_message(message, &message_key);
         }
-        
+
         // Check if we have already received this message
         if message.counter < state.receive_message_number {
             return Err(DoubleRatchetError::InvalidMessageFormatError(
-                "Message counter is too old".to_string()
+                "Message counter is too old".to_string(),
             ));
         }
-        
+
         // Skip forward if needed
         if message.counter > state.receive_message_number {
             Self::skip_message_keys(state, message.counter)?;
         }
-        
+
         // Get the message key
         let message_key = Self::derive_next_receiving_key(state);
-        
+
         // Decrypt the message
         Self::decrypt_message(message, &message_key)
     }
-    
+
     /// Decrypt a message with a key
     fn decrypt_message(message: &OmemoMessage, key: &[u8]) -> Result<Vec<u8>, DoubleRatchetError> {
         // Verify the MAC: HMAC-SHA256(message_key, ciphertext), truncated to 16 bytes
         let calculated_mac = crypto::hmac_sha256(key, &message.ciphertext)
-            .expect("HMAC-SHA256 cannot fail")[..16].to_vec();
+            .expect("HMAC-SHA256 cannot fail")[..16]
+            .to_vec();
         if !crypto::secure_compare(&calculated_mac, &message.mac) {
             return Err(DoubleRatchetError::InvalidMessageFormatError(
-                "MAC verification failed".to_string()
+                "MAC verification failed".to_string(),
             ));
         }
-        
+
         // Decrypt the message
         let plaintext = crypto::decrypt(&message.ciphertext, key, &message.iv, &[])
             .map_err(DoubleRatchetError::CryptoError)?;
-        
+
         Ok(plaintext)
     }
-    
+
     /// Skip message keys up to a specific counter
     fn skip_message_keys(state: &mut RatchetState, target: u32) -> Result<(), DoubleRatchetError> {
         if target > state.receive_message_number + Self::MAX_SKIP {
-            return Err(DoubleRatchetError::InvalidMessageFormatError(
-                format!("Too many skipped messages: {} (max {})", target - state.receive_message_number, Self::MAX_SKIP)
-            ));
+            return Err(DoubleRatchetError::InvalidMessageFormatError(format!(
+                "Too many skipped messages: {} (max {})",
+                target - state.receive_message_number,
+                Self::MAX_SKIP
+            )));
         }
-        
+
         while state.receive_message_number < target {
             let current_counter = state.receive_message_number;
             // derive_next_receiving_key increments receive_message_number
             let message_key = Self::derive_next_receiving_key(state);
-            
+
             // Store with the counter value this key corresponds to
             let key = (state.remote_ratchet_key.clone(), current_counter);
             state.skipped_message_keys.insert(key, message_key);
         }
-        
+
         // Prune oldest skipped keys if we exceed the storage cap
         const MAX_STORED_SKIPPED_KEYS: usize = 256;
         while state.skipped_message_keys.len() > MAX_STORED_SKIPPED_KEYS {
             // Remove the entry with the lowest counter (oldest skipped key)
-            if let Some(oldest_key) = state.skipped_message_keys.keys()
+            if let Some(oldest_key) = state
+                .skipped_message_keys
+                .keys()
                 .min_by_key(|(_, counter)| *counter)
                 .cloned()
             {
@@ -757,70 +774,78 @@ impl DoubleRatchet {
                 break;
             }
         }
-        
+
         Ok(())
     }
-    
+
     /// Derive the next sending key using HMAC-based chain ratchet (Signal spec)
     /// message_key = HMAC-SHA256(chain_key, 0x01)
     /// next_chain_key = HMAC-SHA256(chain_key, 0x02)
     fn derive_next_sending_key(state: &mut RatchetState) -> Vec<u8> {
-        let message_key = crypto::hmac_sha256(&state.send_chain_key, &[0x01]).expect("HMAC-SHA256 cannot fail");
-        state.send_chain_key = crypto::hmac_sha256(&state.send_chain_key, &[0x02]).expect("HMAC-SHA256 cannot fail");
+        let message_key =
+            crypto::hmac_sha256(&state.send_chain_key, &[0x01]).expect("HMAC-SHA256 cannot fail");
+        state.send_chain_key =
+            crypto::hmac_sha256(&state.send_chain_key, &[0x02]).expect("HMAC-SHA256 cannot fail");
         message_key
     }
-    
+
     /// Derive the next receiving key using HMAC-based chain ratchet (Signal spec)
     fn derive_next_receiving_key(state: &mut RatchetState) -> Vec<u8> {
-        let message_key = crypto::hmac_sha256(&state.receive_chain_key, &[0x01]).expect("HMAC-SHA256 cannot fail");
-        state.receive_chain_key = crypto::hmac_sha256(&state.receive_chain_key, &[0x02]).expect("HMAC-SHA256 cannot fail");
+        let message_key = crypto::hmac_sha256(&state.receive_chain_key, &[0x01])
+            .expect("HMAC-SHA256 cannot fail");
+        state.receive_chain_key = crypto::hmac_sha256(&state.receive_chain_key, &[0x02])
+            .expect("HMAC-SHA256 cannot fail");
         state.receive_message_number += 1;
         message_key
     }
-    
+
     /// Perform a DH ratchet step
-    fn dh_ratchet(state: &mut RatchetState, their_ratchet_key: &[u8]) -> Result<(), DoubleRatchetError> {
+    fn dh_ratchet(
+        state: &mut RatchetState,
+        their_ratchet_key: &[u8],
+    ) -> Result<(), DoubleRatchetError> {
         // Save previous state
         state.prev_remote_ratchet_key = state.remote_ratchet_key.clone();
         state.remote_ratchet_key = their_ratchet_key.to_vec();
         state.prev_receive_message_number = state.receive_message_number;
         state.receive_message_number = 0;
-        
+
         // DH for receiving chain: DH(our_ratchet_private, their_new_ratchet_public)
-        let dh_recv = crypto::x25519_diffie_hellman(
-            &state.ratchet_key_pair.private_key,
-            their_ratchet_key,
-        ).map_err(DoubleRatchetError::CryptoError)?;
-        
+        let dh_recv =
+            crypto::x25519_diffie_hellman(&state.ratchet_key_pair.private_key, their_ratchet_key)
+                .map_err(DoubleRatchetError::CryptoError)?;
+
         // KDF_RK(root_key, dh_recv) -> (new_root_key, receive_chain_key)
         let kdf_recv = crypto::hkdf_derive(&state.root_key, &dh_recv, b"WhisperRatchet", 64)
             .map_err(DoubleRatchetError::CryptoError)?;
         state.root_key = kdf_recv[..32].to_vec();
         state.receive_chain_key = kdf_recv[32..64].to_vec();
-        
+
         // Generate a new ratchet key pair for sending
         state.ratchet_key_pair = X3DHProtocol::generate_key_pair()?;
         state.prev_send_message_number = state.send_message_number;
         state.send_message_number = 0;
-        
+
         // DH for sending chain: DH(new_ratchet_private, their_ratchet_public)
-        let dh_send = crypto::x25519_diffie_hellman(
-            &state.ratchet_key_pair.private_key,
-            their_ratchet_key,
-        ).map_err(DoubleRatchetError::CryptoError)?;
-        
+        let dh_send =
+            crypto::x25519_diffie_hellman(&state.ratchet_key_pair.private_key, their_ratchet_key)
+                .map_err(DoubleRatchetError::CryptoError)?;
+
         // KDF_RK(root_key, dh_send) -> (new_root_key, send_chain_key)
         let kdf_send = crypto::hkdf_derive(&state.root_key, &dh_send, b"WhisperRatchet", 64)
             .map_err(DoubleRatchetError::CryptoError)?;
         state.root_key = kdf_send[..32].to_vec();
         state.send_chain_key = kdf_send[32..64].to_vec();
-        
+
         Ok(())
     }
 
     /// Encrypt a message key for transport using Signal wire format.
     /// Produces a serialized SignalMessage (version || protobuf || mac).
-    pub fn encrypt_key(state: &mut RatchetState, key: &[u8]) -> Result<Vec<u8>, DoubleRatchetError> {
+    pub fn encrypt_key(
+        state: &mut RatchetState,
+        key: &[u8],
+    ) -> Result<Vec<u8>, DoubleRatchetError> {
         debug!("Double Ratchet encrypt_key: key length: {}", key.len());
 
         // Derive a message key from the sending chain
@@ -830,9 +855,9 @@ impl DoubleRatchet {
         // Per Signal spec: HKDF(message_key, salt="", info="WhisperMessageKeys", L=80)
         let expanded = crypto::hkdf_derive(&[], &message_key, b"WhisperMessageKeys", 80)
             .map_err(DoubleRatchetError::CryptoError)?;
-        let cipher_key = &expanded[..32];   // AES-256 key
-        let mac_key = &expanded[32..64];    // HMAC-SHA256 key
-        let iv = &expanded[64..80];         // CBC IV (16 bytes)
+        let cipher_key = &expanded[..32]; // AES-256 key
+        let mac_key = &expanded[32..64]; // HMAC-SHA256 key
+        let iv = &expanded[64..80]; // CBC IV (16 bytes)
 
         // Encrypt the OMEMO message key using AES-256-CBC with PKCS7 padding
         let ciphertext = crypto::aes_256_cbc_encrypt(cipher_key, iv, key)
@@ -857,34 +882,54 @@ impl DoubleRatchet {
             &state.remote_identity_key,
         );
 
-        debug!("Double Ratchet encrypt_key: result length: {} (Signal wire format)", result.len());
+        debug!(
+            "Double Ratchet encrypt_key: result length: {} (Signal wire format)",
+            result.len()
+        );
         Ok(result)
     }
 
     /// Decrypt a message key from Signal wire format (SignalMessage or PreKeySignalMessage).
-    pub fn decrypt_key(state: &mut RatchetState, encrypted_key: &[u8]) -> Result<Vec<u8>, DoubleRatchetError> {
-        debug!("Double Ratchet decrypt_key: encrypted_key length: {}", encrypted_key.len());
-        debug!("Double Ratchet decrypt_key: encrypted_key hex: {}", hex::encode(encrypted_key));
+    pub fn decrypt_key(
+        state: &mut RatchetState,
+        encrypted_key: &[u8],
+    ) -> Result<Vec<u8>, DoubleRatchetError> {
+        debug!(
+            "Double Ratchet decrypt_key: encrypted_key length: {}",
+            encrypted_key.len()
+        );
+        debug!(
+            "Double Ratchet decrypt_key: encrypted_key hex: {}",
+            hex::encode(encrypted_key)
+        );
 
         // Try parsing as PreKeySignalMessage first, then SignalMessage
-        let (signal_msg, raw_msg_bytes) = if let Some(prekey_msg) = crate::omemo::wire::PreKeySignalMessage::deserialize(encrypted_key) {
-            debug!("Double Ratchet decrypt_key: parsed as PreKeySignalMessage (reg_id={}, spk_id={})",
-                prekey_msg.registration_id, prekey_msg.signed_pre_key_id);
+        let (signal_msg, raw_msg_bytes) = if let Some(prekey_msg) =
+            crate::omemo::wire::PreKeySignalMessage::deserialize(encrypted_key)
+        {
+            debug!(
+                "Double Ratchet decrypt_key: parsed as PreKeySignalMessage (reg_id={}, spk_id={})",
+                prekey_msg.registration_id, prekey_msg.signed_pre_key_id
+            );
             // For PreKey messages, extract the inner SignalMessage raw bytes for MAC verification
             let inner_bytes = prekey_msg.raw_message_bytes.clone();
             (prekey_msg.message, inner_bytes)
         } else if let Some(msg) = crate::omemo::wire::SignalMessage::deserialize(encrypted_key) {
-            debug!("Double Ratchet decrypt_key: parsed as SignalMessage (counter={})", msg.counter);
+            debug!(
+                "Double Ratchet decrypt_key: parsed as SignalMessage (counter={})",
+                msg.counter
+            );
             // The raw bytes for MAC verification are the full encrypted_key
             (msg, encrypted_key.to_vec())
         } else {
             return Err(DoubleRatchetError::InvalidMessageFormatError(
-                "Failed to parse encrypted key as SignalMessage or PreKeySignalMessage".to_string()
+                "Failed to parse encrypted key as SignalMessage or PreKeySignalMessage".to_string(),
             ));
         };
 
         // Check if we need a DH ratchet step
-        if !signal_msg.ratchet_key.is_empty() && signal_msg.ratchet_key != state.remote_ratchet_key {
+        if !signal_msg.ratchet_key.is_empty() && signal_msg.ratchet_key != state.remote_ratchet_key
+        {
             debug!("Double Ratchet decrypt_key: performing DH ratchet step (new ratchet key)");
             Self::dh_ratchet(state, &signal_msg.ratchet_key)?;
         }
@@ -893,7 +938,7 @@ impl DoubleRatchet {
         if signal_msg.counter > state.receive_message_number {
             if signal_msg.counter - state.receive_message_number > Self::MAX_SKIP {
                 return Err(DoubleRatchetError::InvalidMessageFormatError(
-                    "Too many skipped messages in decrypt_key".to_string()
+                    "Too many skipped messages in decrypt_key".to_string(),
                 ));
             }
             while state.receive_message_number < signal_msg.counter {
@@ -909,9 +954,9 @@ impl DoubleRatchet {
         // Expand message_key via HKDF to get (cipher_key, mac_key, iv)
         let expanded = crypto::hkdf_derive(&[], &message_key, b"WhisperMessageKeys", 80)
             .map_err(DoubleRatchetError::CryptoError)?;
-        let cipher_key = &expanded[..32];   // AES-256 key
-        let mac_key = &expanded[32..64];    // HMAC-SHA256 key
-        let iv = &expanded[64..80];         // CBC IV (16 bytes)
+        let cipher_key = &expanded[..32]; // AES-256 key
+        let mac_key = &expanded[32..64]; // HMAC-SHA256 key
+        let iv = &expanded[64..80]; // CBC IV (16 bytes)
 
         // Verify MAC before decryption
         // MAC covers: sender_identity(33) || receiver_identity(33) || version || protobuf
@@ -921,11 +966,10 @@ impl DoubleRatchet {
             let received_mac = &raw_msg_bytes[raw_msg_bytes.len() - 8..];
 
             let sender_prefixed = crypto::encode_public_key_with_prefix(&state.remote_identity_key);
-            let receiver_prefixed = crypto::encode_public_key_with_prefix(&state.local_identity_key_pair.public_key);
+            let receiver_prefixed =
+                crypto::encode_public_key_with_prefix(&state.local_identity_key_pair.public_key);
             let mut mac_input = Vec::with_capacity(
-                sender_prefixed.len() +
-                receiver_prefixed.len() +
-                msg_without_mac.len()
+                sender_prefixed.len() + receiver_prefixed.len() + msg_without_mac.len(),
             );
             mac_input.extend_from_slice(&sender_prefixed);
             mac_input.extend_from_slice(&receiver_prefixed);
@@ -933,7 +977,7 @@ impl DoubleRatchet {
 
             if !crate::omemo::wire::verify_mac(mac_key, &mac_input, received_mac) {
                 return Err(DoubleRatchetError::CryptoError(
-                    crypto::CryptoError::AesGcmError("MAC verification failed".to_string())
+                    crypto::CryptoError::AesGcmError("MAC verification failed".to_string()),
                 ));
             }
             debug!("Double Ratchet decrypt_key: MAC verified successfully");
@@ -943,7 +987,10 @@ impl DoubleRatchet {
         let key = crypto::aes_256_cbc_decrypt(cipher_key, iv, &signal_msg.ciphertext)
             .map_err(DoubleRatchetError::CryptoError)?;
 
-        debug!("Double Ratchet decrypt_key: decrypted key length: {}", key.len());
+        debug!(
+            "Double Ratchet decrypt_key: decrypted key length: {}",
+            key.len()
+        );
         Ok(key)
     }
 }
@@ -958,47 +1005,49 @@ pub mod utils {
     use super::{DeviceIdentity, OmemoMessage};
     // Use the legacy OMEMO namespace that actually works
     const OMEMO_NAMESPACE: &str = "eu.siacs.conversations.axolotl";
-    
+
     /// Errors that can occur in XML processing
     #[derive(Debug, Error)]
     pub enum XmlError {
         /// Error parsing XML
         #[error("XML parsing error: {0}")]
         ParseError(String),
-        
+
         /// Error encoding/decoding data
         #[error("Encoding error: {0}")]
         EncodingError(String),
-        
+
         /// Missing required element or attribute
         #[error("Missing element or attribute: {0}")]
         MissingElementError(String),
     }
-    
+
     /// Convert a device bundle to XML for publishing
     pub fn device_bundle_to_xml(bundle: &DeviceIdentity) -> Result<String, XmlError> {
         use crate::omemo::crypto::encode_public_key_with_prefix;
         let mut xml = String::new();
-        
+
         xml.push_str(&format!("<bundle xmlns='{}'>", OMEMO_NAMESPACE));
-        
+
         // Identity key (with 0x05 prefix for libsignal interop)
         xml.push_str("<identityKey>");
         xml.push_str(&BASE64.encode(encode_public_key_with_prefix(&bundle.identity_key)));
         xml.push_str("</identityKey>");
-        
+
         // Signed pre-key (with 0x05 prefix)
         xml.push_str(&format!(
             "<signedPreKeyPublic signedPreKeyId='{}'>{}</signedPreKeyPublic>",
             bundle.signed_pre_key.id,
-            BASE64.encode(encode_public_key_with_prefix(&bundle.signed_pre_key.public_key))
+            BASE64.encode(encode_public_key_with_prefix(
+                &bundle.signed_pre_key.public_key
+            ))
         ));
-        
+
         // Signature
         xml.push_str("<signedPreKeySignature>");
         xml.push_str(&BASE64.encode(&bundle.signed_pre_key.signature));
         xml.push_str("</signedPreKeySignature>");
-        
+
         // Pre-keys (with 0x05 prefix)
         xml.push_str("<prekeys>");
         for prekey in &bundle.pre_keys {
@@ -1009,122 +1058,159 @@ pub mod utils {
             ));
         }
         xml.push_str("</prekeys>");
-        
+
         xml.push_str("</bundle>");
-        
+
         Ok(xml)
     }
-    
+
     /// Convert a device list to XML for publishing
     pub fn device_list_to_xml(device_ids: &[u32]) -> Result<String, XmlError> {
         let mut xml = String::new();
-        
+
         xml.push_str(&format!("<list xmlns='{}'>", OMEMO_NAMESPACE));
-        
+
         for device_id in device_ids {
             xml.push_str(&format!("<device id='{}' />", device_id));
         }
-        
+
         xml.push_str("</list>");
-        
+
         Ok(xml)
     }
-    
+
     /// Parse an OMEMO message from XML
     pub fn omemo_message_from_xml(xml: &str) -> Result<OmemoMessage, XmlError> {
         log::debug!("XML_PARSE_DEBUG: Parsing OMEMO message from XML: {}", xml);
-        
+
         // Parse the XML
-        let doc = Document::parse(xml)
-            .map_err(|e| XmlError::ParseError(e.to_string()))?;
-        
+        let doc = Document::parse(xml).map_err(|e| XmlError::ParseError(e.to_string()))?;
+
         // Find the encrypted element
-        let encrypted = doc.descendants()
-            .find(|n| n.has_tag_name("encrypted") && 
-                  n.has_attribute("xmlns") && 
-                  n.attribute("xmlns").unwrap() == OMEMO_NAMESPACE)
-            .ok_or(XmlError::MissingElementError("encrypted element not found".to_string()))?;
-        
+        let encrypted = doc
+            .descendants()
+            .find(|n| {
+                n.has_tag_name("encrypted")
+                    && n.has_attribute("xmlns")
+                    && n.attribute("xmlns").unwrap() == OMEMO_NAMESPACE
+            })
+            .ok_or(XmlError::MissingElementError(
+                "encrypted element not found".to_string(),
+            ))?;
+
         // Find the header element
-        let header = encrypted.children()
+        let header = encrypted
+            .children()
             .find(|n| n.has_tag_name("header"))
-            .ok_or(XmlError::MissingElementError("header element not found".to_string()))?;
-        
+            .ok_or(XmlError::MissingElementError(
+                "header element not found".to_string(),
+            ))?;
+
         // Get the sender device id
-        let sid = header.attribute("sid")
-            .ok_or(XmlError::MissingElementError("sid attribute not found".to_string()))?;
-        
-        let sender_device_id = sid.parse::<u32>()
+        let sid = header
+            .attribute("sid")
+            .ok_or(XmlError::MissingElementError(
+                "sid attribute not found".to_string(),
+            ))?;
+
+        let sender_device_id = sid
+            .parse::<u32>()
             .map_err(|e| XmlError::ParseError(format!("Invalid sid: {}", e)))?;
-        
+
         log::debug!("XML_PARSE_DEBUG: sender_device_id: {}", sender_device_id);
-        
+
         // Get the IV
-        let iv_elem = header.children()
-            .find(|n| n.has_tag_name("iv"))
-            .ok_or(XmlError::MissingElementError("iv element not found".to_string()))?;
-        
-        let iv_text = iv_elem.text()
-            .ok_or(XmlError::MissingElementError("iv text not found".to_string()))?;
-        
-        let iv = BASE64.decode(iv_text)
+        let iv_elem = header.children().find(|n| n.has_tag_name("iv")).ok_or(
+            XmlError::MissingElementError("iv element not found".to_string()),
+        )?;
+
+        let iv_text = iv_elem.text().ok_or(XmlError::MissingElementError(
+            "iv text not found".to_string(),
+        ))?;
+
+        let iv = BASE64
+            .decode(iv_text)
             .map_err(|e| XmlError::EncodingError(format!("Failed to decode iv: {}", e)))?;
-        
+
         // Parse the keys
         let mut encrypted_keys = std::collections::HashMap::new();
-        
+
         log::debug!("XML_PARSE_DEBUG: Starting to parse keys");
         for key_elem in header.children().filter(|n| n.has_tag_name("key")) {
-            let rid = key_elem.attribute("rid")
-                .ok_or(XmlError::MissingElementError("rid attribute not found".to_string()))?;
-            
-            let device_id = rid.parse::<u32>()
+            let rid = key_elem
+                .attribute("rid")
+                .ok_or(XmlError::MissingElementError(
+                    "rid attribute not found".to_string(),
+                ))?;
+
+            let device_id = rid
+                .parse::<u32>()
                 .map_err(|e| XmlError::ParseError(format!("Invalid rid: {}", e)))?;
-            
-            let key_text = key_elem.text()
-                .ok_or(XmlError::MissingElementError("key text not found".to_string()))?;
-            
-            let key = BASE64.decode(key_text)
+
+            let key_text = key_elem.text().ok_or(XmlError::MissingElementError(
+                "key text not found".to_string(),
+            ))?;
+
+            let key = BASE64
+                .decode(key_text)
                 .map_err(|e| XmlError::EncodingError(format!("Failed to decode key: {}", e)))?;
-            
-            log::debug!("XML_PARSE_DEBUG: Parsed key for device {}: {} bytes", device_id, key.len());
+
+            log::debug!(
+                "XML_PARSE_DEBUG: Parsed key for device {}: {} bytes",
+                device_id,
+                key.len()
+            );
             encrypted_keys.insert(device_id, key);
         }
-        
-        log::debug!("XML_PARSE_DEBUG: Total keys parsed: {}", encrypted_keys.len());
+
+        log::debug!(
+            "XML_PARSE_DEBUG: Total keys parsed: {}",
+            encrypted_keys.len()
+        );
         for device_id in encrypted_keys.keys() {
             log::debug!("XML_PARSE_DEBUG: Key available for device: {}", device_id);
         }
-        
+
         // Try to get the ephemeral key (for PreKey messages)
-        let ephemeral_key = if let Some(eph_elem) = header.children().find(|n| n.has_tag_name("ephemeral")) {
-            if let Some(eph_text) = eph_elem.text() {
-                Some(BASE64.decode(eph_text)
-                    .map_err(|e| XmlError::EncodingError(format!("Failed to decode ephemeral key: {}", e)))?)
+        let ephemeral_key =
+            if let Some(eph_elem) = header.children().find(|n| n.has_tag_name("ephemeral")) {
+                if let Some(eph_text) = eph_elem.text() {
+                    Some(BASE64.decode(eph_text).map_err(|e| {
+                        XmlError::EncodingError(format!("Failed to decode ephemeral key: {}", e))
+                    })?)
+                } else {
+                    None
+                }
             } else {
                 None
-            }
-        } else {
-            None
-        };
-        
-        log::debug!("XML_PARSE_DEBUG: ephemeral_key is_some: {}", ephemeral_key.is_some());
-        
+            };
+
+        log::debug!(
+            "XML_PARSE_DEBUG: ephemeral_key is_some: {}",
+            ephemeral_key.is_some()
+        );
+
         // Get the payload
-        let payload = encrypted.children()
+        let payload = encrypted
+            .children()
             .find(|n| n.has_tag_name("payload"))
-            .ok_or(XmlError::MissingElementError("payload element not found".to_string()))?;
-        
-        let payload_text = payload.text()
-            .ok_or(XmlError::MissingElementError("payload text not found".to_string()))?;
-        
-        let ciphertext = BASE64.decode(payload_text)
+            .ok_or(XmlError::MissingElementError(
+                "payload element not found".to_string(),
+            ))?;
+
+        let payload_text = payload.text().ok_or(XmlError::MissingElementError(
+            "payload text not found".to_string(),
+        ))?;
+
+        let ciphertext = BASE64
+            .decode(payload_text)
             .map_err(|e| XmlError::EncodingError(format!("Failed to decode payload: {}", e)))?;
-        
+
         // Try to get the MAC from the header (optional)
         let mac = if let Some(mac_elem) = header.children().find(|n| n.has_tag_name("mac")) {
             if let Some(mac_text) = mac_elem.text() {
-                BASE64.decode(mac_text)
+                BASE64
+                    .decode(mac_text)
                     .map_err(|e| XmlError::EncodingError(format!("Failed to decode mac: {}", e)))?
             } else {
                 vec![] // Empty MAC if no text
@@ -1132,10 +1218,10 @@ pub mod utils {
         } else {
             vec![] // Empty MAC if no element
         };
-        
+
         // For this simplified implementation, we'll use placeholder values for ratchet_key,
         // previous_counter, counter which would normally be part of the Double Ratchet message
-        
+
         // Create the OMEMO message
         let message = OmemoMessage {
             sender_device_id,
@@ -1143,62 +1229,83 @@ pub mod utils {
             previous_counter: 0,      // Placeholder
             counter: 0,               // Placeholder
             ciphertext,
-            mac,                      // Now using the actual MAC from XML
+            mac, // Now using the actual MAC from XML
             iv,
             encrypted_keys,
             is_prekey: ephemeral_key.is_some(), // This is a PreKey message if ephemeral key is present
-            ephemeral_key,            // Extracted from XML
+            ephemeral_key,                      // Extracted from XML
             prekey_devices: HashSet::new(),
         };
-        
+
         Ok(message)
     }
-    
+
     /// Convert an OMEMO message to XML for sending
     pub fn omemo_message_to_xml(message: &OmemoMessage) -> String {
         let mut xml = String::new();
-        
+
         log::debug!("XML_DEBUG: Converting OMEMO message to XML");
         log::debug!("XML_DEBUG: is_prekey: {}", message.is_prekey);
-        log::debug!("XML_DEBUG: ephemeral_key is_some: {}", message.ephemeral_key.is_some());
-        log::debug!("XML_DEBUG: encrypted_keys.len(): {}", message.encrypted_keys.len());
+        log::debug!(
+            "XML_DEBUG: ephemeral_key is_some: {}",
+            message.ephemeral_key.is_some()
+        );
+        log::debug!(
+            "XML_DEBUG: encrypted_keys.len(): {}",
+            message.encrypted_keys.len()
+        );
         for (device_id, key) in &message.encrypted_keys {
-            log::debug!("XML_DEBUG: Key for device {}: {} bytes", device_id, key.len());
+            log::debug!(
+                "XML_DEBUG: Key for device {}: {} bytes",
+                device_id,
+                key.len()
+            );
         }
         if let Some(ref eph) = message.ephemeral_key {
-            log::debug!("XML_DEBUG: ephemeral_key length: {}, first 16 bytes: {}", 
-                eph.len(), hex::encode(&eph[..16.min(eph.len())]));
+            log::debug!(
+                "XML_DEBUG: ephemeral_key length: {}, first 16 bytes: {}",
+                eph.len(),
+                hex::encode(&eph[..16.min(eph.len())])
+            );
         }
-        
+
         xml.push_str(&format!("<encrypted xmlns='{}'>", OMEMO_NAMESPACE));
-        
+
         // Header
         xml.push_str(&format!("<header sid='{}'>", message.sender_device_id));
-        
+
         // IV
         xml.push_str("<iv>");
         xml.push_str(&BASE64.encode(&message.iv));
         xml.push_str("</iv>");
-        
+
         // Keys — prekey="true" is required on keys containing PreKeySignalMessages
         for (device_id, key) in &message.encrypted_keys {
             log::debug!("XML_DEBUG: Adding key for device {} to XML", device_id);
             if message.prekey_devices.contains(device_id) {
-                xml.push_str(&format!("<key rid='{}' prekey='true'>{}</key>", device_id, BASE64.encode(key)));
+                xml.push_str(&format!(
+                    "<key rid='{}' prekey='true'>{}</key>",
+                    device_id,
+                    BASE64.encode(key)
+                ));
             } else {
-                xml.push_str(&format!("<key rid='{}'>{}</key>", device_id, BASE64.encode(key)));
+                xml.push_str(&format!(
+                    "<key rid='{}'>{}</key>",
+                    device_id,
+                    BASE64.encode(key)
+                ));
             }
         }
-        
+
         xml.push_str("</header>");
-        
+
         // Payload
         xml.push_str("<payload>");
         xml.push_str(&BASE64.encode(&message.ciphertext));
         xml.push_str("</payload>");
-        
+
         xml.push_str("</encrypted>");
-        
+
         log::debug!("XML_DEBUG: Generated XML: {}", xml);
         xml
     }
@@ -1208,7 +1315,7 @@ pub mod utils {
 /// This ensures OMEMO sessions are bound to accounts, not specific resources
 fn normalize_jid_to_bare(jid: &str) -> String {
     let clean_jid = jid.to_lowercase().trim().to_string();
-    
+
     // Strip the resource part (everything after the last '/')
     if let Some(slash_pos) = clean_jid.rfind('/') {
         clean_jid[..slash_pos].to_string()
@@ -1253,28 +1360,35 @@ mod tests {
         let wrapped = format!("<msg>{}</msg>", xml);
         let doc = roxmltree::Document::parse(&wrapped).unwrap();
 
-        let encrypted = doc.descendants()
+        let encrypted = doc
+            .descendants()
             .find(|n| n.tag_name().name() == "encrypted")
             .expect("Must have <encrypted> element");
-        assert_eq!(encrypted.tag_name().namespace(), 
-            Some("eu.siacs.conversations.axolotl"));
+        assert_eq!(
+            encrypted.tag_name().namespace(),
+            Some("eu.siacs.conversations.axolotl")
+        );
 
-        let header = encrypted.children()
+        let header = encrypted
+            .children()
             .find(|n| n.tag_name().name() == "header")
             .expect("Must have <header> element");
         assert_eq!(header.attribute("sid").unwrap(), "12345");
 
-        let iv = header.children()
+        let iv = header
+            .children()
             .find(|n| n.tag_name().name() == "iv")
             .expect("Must have <iv> element");
         assert!(!iv.text().unwrap_or("").is_empty());
 
-        let keys: Vec<_> = header.children()
+        let keys: Vec<_> = header
+            .children()
             .filter(|n| n.tag_name().name() == "key")
             .collect();
         assert_eq!(keys.len(), 2);
 
-        let payload = encrypted.children()
+        let payload = encrypted
+            .children()
             .find(|n| n.tag_name().name() == "payload")
             .expect("Must have <payload> element");
         assert!(!payload.text().unwrap_or("").is_empty());
@@ -1288,27 +1402,37 @@ mod tests {
         let xml = utils::omemo_message_to_xml(&msg);
 
         // Device 1001 should have prekey='true'
-        assert!(xml.contains("rid='1001' prekey='true'"),
-            "Expected prekey='true' on device 1001, got: {}", xml);
+        assert!(
+            xml.contains("rid='1001' prekey='true'"),
+            "Expected prekey='true' on device 1001, got: {}",
+            xml
+        );
         // Device 2002 should NOT have prekey attribute
-        assert!(xml.contains("rid='2002'>"),
-            "Device 2002 should not have prekey attribute, got: {}", xml);
+        assert!(
+            xml.contains("rid='2002'>"),
+            "Device 2002 should not have prekey attribute, got: {}",
+            xml
+        );
     }
 
     #[test]
     fn test_xml_uses_conversations_namespace() {
         let msg = sample_omemo_message(HashSet::new());
         let xml = utils::omemo_message_to_xml(&msg);
-        assert!(xml.contains("xmlns='eu.siacs.conversations.axolotl'"),
-            "Must use legacy Conversations namespace");
+        assert!(
+            xml.contains("xmlns='eu.siacs.conversations.axolotl'"),
+            "Must use legacy Conversations namespace"
+        );
     }
 
     #[test]
     fn test_xml_no_ephemeral_element_when_none() {
         let msg = sample_omemo_message(HashSet::new());
         let xml = utils::omemo_message_to_xml(&msg);
-        assert!(!xml.contains("<ephemeral"),
-            "Should not emit <ephemeral> element when ephemeral_key is None");
+        assert!(
+            !xml.contains("<ephemeral"),
+            "Should not emit <ephemeral> element when ephemeral_key is None"
+        );
     }
 
     #[test]
@@ -1340,7 +1464,9 @@ mod tests {
         assert_eq!(element.ns(), "eu.siacs.conversations.axolotl");
 
         // Header with sid
-        let header = element.get_child("header", "eu.siacs.conversations.axolotl").unwrap();
+        let header = element
+            .get_child("header", "eu.siacs.conversations.axolotl")
+            .unwrap();
         assert_eq!(header.attr("sid").unwrap(), "12345");
 
         // IV element
@@ -1354,16 +1480,24 @@ mod tests {
 
         // Find the prekey device (1001) — must have prekey="true"
         let prekey_elem = keys.iter().find(|k| k.attr("rid") == Some("1001")).unwrap();
-        assert_eq!(prekey_elem.attr("prekey"), Some("true"),
-            "Device 1001 must have prekey='true' for Conversations compatibility");
+        assert_eq!(
+            prekey_elem.attr("prekey"),
+            Some("true"),
+            "Device 1001 must have prekey='true' for Conversations compatibility"
+        );
 
         // Non-prekey device (2002) — must NOT have prekey attribute
         let regular_elem = keys.iter().find(|k| k.attr("rid") == Some("2002")).unwrap();
-        assert_eq!(regular_elem.attr("prekey"), None,
-            "Device 2002 must not have prekey attribute");
+        assert_eq!(
+            regular_elem.attr("prekey"),
+            None,
+            "Device 2002 must not have prekey attribute"
+        );
 
         // Payload
-        let payload = element.get_child("payload", "eu.siacs.conversations.axolotl").unwrap();
+        let payload = element
+            .get_child("payload", "eu.siacs.conversations.axolotl")
+            .unwrap();
         let payload_bytes = B64.decode(payload.text()).unwrap();
         assert_eq!(payload_bytes, vec![0xCC; 48]);
     }
@@ -1383,10 +1517,8 @@ mod tests {
             let spk_kp = X3DHProtocol::generate_key_pair().unwrap();
 
             // Sign: uses raw 32-byte private key and raw 32-byte SPK public
-            let signature = X3DHProtocol::sign_pre_key(
-                &identity_kp.private_key,
-                &spk_kp.public_key,
-            ).unwrap();
+            let signature =
+                X3DHProtocol::sign_pre_key(&identity_kp.private_key, &spk_kp.public_key).unwrap();
             assert_eq!(signature.len(), 64, "Signature should be 64 bytes");
 
             // Simulate bundle encoding: identity public and SPK public get 0x05 prefix
@@ -1396,11 +1528,9 @@ mod tests {
             assert_eq!(spk_public_33.len(), 33);
 
             // Verify: uses 33-byte prefixed keys (as parsed from bundle XML)
-            let valid = X3DHProtocol::verify_pre_key(
-                &identity_public_33,
-                &spk_public_33,
-                &signature,
-            ).unwrap();
+            let valid =
+                X3DHProtocol::verify_pre_key(&identity_public_33, &spk_public_33, &signature)
+                    .unwrap();
             assert!(valid, "SPK signature verification failed on iteration {} (key format mismatch between sign and verify)", i);
         }
     }

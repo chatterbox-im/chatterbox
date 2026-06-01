@@ -10,10 +10,10 @@
 // - Message carbons to own devices
 
 mod common;
-use common::{setup_logging, get_test_credentials, get_test_recipient};
+use common::{get_test_credentials, get_test_recipient, setup_logging};
 
 use anyhow::Result;
-use log::{info, warn, error};
+use log::{error, info, warn};
 use tokio::time::{timeout, Duration as TokioDuration};
 
 use chatterbox::xmpp::XMPPClient;
@@ -29,20 +29,28 @@ async fn test_conversations_compat_roundtrip() -> Result<()> {
     // --- Setup Client A ---
     let ca_credentials = get_test_credentials().await?;
     let cb_jid = get_test_recipient().await?;
-    info!("Client A: {}@{}", ca_credentials.username, ca_credentials.server);
+    info!(
+        "Client A: {}@{}",
+        ca_credentials.username, ca_credentials.server
+    );
     info!("Client B (recipient): {}", cb_jid);
 
     let (mut ca_client, mut _ca_msg_rx) = XMPPClient::new();
-    ca_client.connect(
-        &ca_credentials.server,
-        &ca_credentials.username,
-        &ca_credentials.get_password().unwrap_or_default(),
-    ).await.map_err(|e| anyhow::anyhow!("Client A connect failed: {}", e))?;
+    ca_client
+        .connect(
+            &ca_credentials.server,
+            &ca_credentials.username,
+            &ca_credentials.get_password().unwrap_or_default(),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("Client A connect failed: {}", e))?;
     info!("Client A connected");
 
     tokio::time::sleep(TokioDuration::from_secs(1)).await;
 
-    ca_client.initialize_client().await
+    ca_client
+        .initialize_client()
+        .await
         .map_err(|e| anyhow::anyhow!("Client A OMEMO init failed: {}", e))?;
     info!("Client A OMEMO initialized");
 
@@ -50,7 +58,9 @@ async fn test_conversations_compat_roundtrip() -> Result<()> {
     let test_msg = format!("compat-test-{}", chrono::Utc::now().timestamp_millis());
     info!("Sending OMEMO message: {}", test_msg);
 
-    ca_client.send_encrypted_message(&cb_jid, &test_msg).await
+    ca_client
+        .send_encrypted_message(&cb_jid, &test_msg)
+        .await
         .map_err(|e| anyhow::anyhow!("Client A send failed: {}", e))?;
     info!("Client A sent OMEMO encrypted message successfully");
 
@@ -71,16 +81,21 @@ async fn test_conversations_compat_roundtrip() -> Result<()> {
     );
 
     let (mut cb_client, mut cb_msg_rx) = XMPPClient::new();
-    cb_client.connect(
-        &cb_credentials.server,
-        &cb_credentials.username,
-        &cb_credentials.get_password().unwrap_or_default(),
-    ).await.map_err(|e| anyhow::anyhow!("Client B connect failed: {}", e))?;
+    cb_client
+        .connect(
+            &cb_credentials.server,
+            &cb_credentials.username,
+            &cb_credentials.get_password().unwrap_or_default(),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("Client B connect failed: {}", e))?;
     info!("Client B connected");
 
     tokio::time::sleep(TokioDuration::from_secs(1)).await;
 
-    cb_client.initialize_client().await
+    cb_client
+        .initialize_client()
+        .await
         .map_err(|e| anyhow::anyhow!("Client B OMEMO init failed: {}", e))?;
     info!("Client B OMEMO initialized");
 
@@ -97,7 +112,9 @@ async fn test_conversations_compat_roundtrip() -> Result<()> {
             }
         }
         false
-    }).await {
+    })
+    .await
+    {
         Ok(true) => {
             info!("SUCCESS: Client B received and decrypted the OMEMO message");
             received_message = true;
@@ -116,7 +133,10 @@ async fn test_conversations_compat_roundtrip() -> Result<()> {
 
     // The test passes if we successfully sent an OMEMO message.
     // Receiving depends on server configuration (MAM, offline storage).
-    info!("=== Test complete: OMEMO send succeeded, receive={} ===", received_message);
+    info!(
+        "=== Test complete: OMEMO send succeeded, receive={} ===",
+        received_message
+    );
     Ok(())
 }
 
@@ -131,15 +151,20 @@ async fn test_btbv_trust_auto_applied() -> Result<()> {
     let cb_jid = get_test_recipient().await?;
 
     let (mut ca_client, _) = XMPPClient::new();
-    ca_client.connect(
-        &ca_credentials.server,
-        &ca_credentials.username,
-        &ca_credentials.get_password().unwrap_or_default(),
-    ).await.map_err(|e| anyhow::anyhow!("Connect failed: {}", e))?;
+    ca_client
+        .connect(
+            &ca_credentials.server,
+            &ca_credentials.username,
+            &ca_credentials.get_password().unwrap_or_default(),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("Connect failed: {}", e))?;
 
     tokio::time::sleep(TokioDuration::from_secs(1)).await;
 
-    ca_client.initialize_client().await
+    ca_client
+        .initialize_client()
+        .await
         .map_err(|e| anyhow::anyhow!("OMEMO init failed: {}", e))?;
 
     // Sending a message implicitly fetches the recipient's bundle and stores their identity.
@@ -165,9 +190,9 @@ async fn test_btbv_trust_auto_applied() -> Result<()> {
 
 /// Helper to load Client B password from test credentials
 async fn get_client_b_password() -> Result<String> {
-    use std::path::Path;
     use std::fs::File;
     use std::io::Read;
+    use std::path::Path;
 
     let credentials_path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join(".github")
@@ -185,5 +210,7 @@ async fn get_client_b_password() -> Result<String> {
         }
     }
 
-    Err(anyhow::anyhow!("Could not find clientB password in credentials"))
+    Err(anyhow::anyhow!(
+        "Could not find clientB password in credentials"
+    ))
 }

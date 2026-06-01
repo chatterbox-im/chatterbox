@@ -3,9 +3,9 @@
 
 use anyhow::{anyhow, Result};
 use log::{error, info, warn};
+use std::collections::HashSet;
 use tokio::sync::broadcast;
 use xmpp_parsers::Element;
-use std::collections::HashSet;
 
 use super::transport::{self, StanzaTx};
 
@@ -21,7 +21,7 @@ lazy_static::lazy_static! {
         let (tx, _) = broadcast::channel(64);
         tx
     };
-    static ref AUTO_ACCEPTED_REQUESTS: std::sync::RwLock<HashSet<String>> = 
+    static ref AUTO_ACCEPTED_REQUESTS: std::sync::RwLock<HashSet<String>> =
         std::sync::RwLock::new(HashSet::new());
 }
 
@@ -64,16 +64,18 @@ pub fn handle_presence_stanza(stanza: &Element) -> Result<()> {
             return Ok(());
         }
     };
-    
+
     // Normalize JID by removing resource part (after the slash)
     let bare_jid = from.split('/').next().unwrap_or(from).to_string();
-    
+
     // Determine presence type
     let presence_type = stanza.attr("type").unwrap_or("available");
-    
+
     // Build a typed PresenceEvent
     let event = match presence_type {
-        "unavailable" => PresenceEvent::Unavailable { jid: bare_jid.clone() },
+        "unavailable" => PresenceEvent::Unavailable {
+            jid: bare_jid.clone(),
+        },
         "available" | "" => PresenceEvent::Available {
             jid: bare_jid.clone(),
             show: parse_show(stanza),
@@ -86,25 +88,38 @@ pub fn handle_presence_stanza(stanza: &Element) -> Result<()> {
                 "unsubscribe" => SubscriptionKind::Unsubscribe,
                 _ => SubscriptionKind::Unsubscribed,
             };
-            info!("Received subscription stanza '{}' from {}", presence_type, bare_jid);
-            PresenceEvent::Subscription { jid: bare_jid.clone(), kind }
-        },
+            info!(
+                "Received subscription stanza '{}' from {}",
+                presence_type, bare_jid
+            );
+            PresenceEvent::Subscription {
+                jid: bare_jid.clone(),
+                kind,
+            }
+        }
         "error" => {
-            let reason = stanza.get_child("error", "")
+            let reason = stanza
+                .get_child("error", "")
                 .map(|e| e.text())
                 .unwrap_or_else(|| "unknown error".to_string());
             warn!("Presence error from {}: {}", bare_jid, reason);
-            PresenceEvent::Error { jid: bare_jid.clone(), reason }
-        },
+            PresenceEvent::Error {
+                jid: bare_jid.clone(),
+                reason,
+            }
+        }
         _ => {
-            warn!("Unknown presence type '{}' from {}", presence_type, bare_jid);
+            warn!(
+                "Unknown presence type '{}' from {}",
+                presence_type, bare_jid
+            );
             PresenceEvent::Error {
                 jid: bare_jid.clone(),
                 reason: format!("unknown type: {}", presence_type),
             }
         }
     };
-    
+
     // Process entity capabilities if present (only for available presences)
     if matches!(&event, PresenceEvent::Available { .. }) {
         if let Some(caps) = stanza.get_child("c", "http://jabber.org/protocol/caps") {
@@ -115,11 +130,11 @@ pub fn handle_presence_stanza(stanza: &Element) -> Result<()> {
             }
         }
     }
-    
+
     // Broadcast the typed event — if no subscribers yet, the message is simply dropped
     // (broadcast channel handles this gracefully, no silent subscriber-list bugs)
     let _ = PRESENCE_BUS.send(event);
-    
+
     Ok(())
 }
 
@@ -131,50 +146,50 @@ pub fn subscribe_to_presence() -> broadcast::Receiver<PresenceEvent> {
 }
 
 /// Send an initial presence stanza to let contacts know we're online
-/// 
+///
 /// # Arguments
-/// 
+///
 /// * `client` - The XMPP client instance
-/// 
+///
 /// # Returns
-/// 
+///
 /// Result indicating success or failure
 pub fn send_initial_presence_via(stanza_tx: &StanzaTx) -> Result<()> {
     let mut presence = Element::builder("presence", NS_JABBER_CLIENT).build();
-    
+
     let mut show = Element::builder("show", "").build();
     show.append_text_node("chat");
     presence.append_child(show);
-    
+
     let mut status = Element::builder("status", "").build();
     status.append_text_node("Online using Chatterbox XMPP");
     presence.append_child(status);
-    
+
     let caps = Element::builder("c", "http://jabber.org/protocol/caps")
         .attr("hash", "sha-1")
         .attr("node", "https://github.com/user/sermo")
         .attr("ver", "1.0.0")
         .build();
     presence.append_child(caps);
-    
+
     transport::send_stanza(stanza_tx, presence)
         .map_err(|e| anyhow!("Failed to send initial presence: {}", e))
 }
 
 /// Send an unavailable presence to indicate going offline
-/// 
+///
 /// # Arguments
-/// 
+///
 /// * `client` - The XMPP client instance
-/// 
+///
 /// # Returns
-/// 
+///
 /// Result indicating success or failure
 pub fn send_unavailable_presence_via(stanza_tx: &StanzaTx) -> Result<()> {
     let presence = Element::builder("presence", NS_JABBER_CLIENT)
         .attr("type", "unavailable")
         .build();
-    
+
     transport::send_stanza(stanza_tx, presence)
         .map_err(|e| anyhow!("Failed to send unavailable presence: {}", e))
 }
@@ -187,25 +202,25 @@ pub async fn send_unavailable_presence_legacy(_unused: &()) -> Result<()> {
 }
 
 /// Set custom presence status with optional status message
-/// 
+///
 /// # Arguments
-/// 
+///
 /// * `client` - The XMPP client instance
 /// * `status_type` - The type of status (online, away, dnd, etc.)
 /// * `status_msg` - Optional status message text
-/// 
+///
 /// # Returns
-/// 
+///
 /// Result indicating success or failure
 pub fn set_presence_status_via(
-    stanza_tx: &StanzaTx, 
-    status_type: &str, 
-    status_msg: Option<&str>
+    stanza_tx: &StanzaTx,
+    status_type: &str,
+    status_msg: Option<&str>,
 ) -> Result<()> {
     //debug!("Setting presence status to '{}' with message: {:?}", status_type, status_msg);
-    
+
     let mut presence = Element::builder("presence", NS_JABBER_CLIENT);
-    
+
     // Add show element if not "online"
     if status_type != "online" {
         let show_value = match status_type {
@@ -213,50 +228,53 @@ pub fn set_presence_status_via(
             "dnd" => "dnd",
             "xa" => "xa",
             _ => {
-                warn!("Unknown status type '{}', defaulting to 'away'", status_type);
+                warn!(
+                    "Unknown status type '{}', defaulting to 'away'",
+                    status_type
+                );
                 "away"
             }
         };
-        
+
         let mut show = Element::builder("show", "").build();
         show.append_text_node(show_value);
-        
+
         presence = presence.append(show);
     }
-    
+
     // Add status message if provided
     if let Some(msg) = status_msg {
         let mut status = Element::builder("status", "").build();
         status.append_text_node(msg);
-        
+
         presence = presence.append(status);
     }
-    
+
     // Build and send the presence stanza
     let presence_stanza = presence.build();
-    
+
     //debug!("[JID DEBUG] set_presence_status: sending presence from our JID (client state may have JID field), status_type='{}'", status_type);
-    
+
     transport::send_stanza(stanza_tx, presence_stanza)
         .map_err(|e| anyhow!("Failed to update presence status: {}", e))
 }
 
 /// Process subscription-related presence stanzas
-/// 
+///
 /// # Arguments
-/// 
+///
 /// * `client` - The XMPP client instance
 /// * `stanza` - The presence stanza element
-/// 
+///
 /// # Returns
-/// 
+///
 /// Result indicating success or failure
 pub async fn process_subscription(stanza_tx: &StanzaTx, stanza: &Element) -> Result<()> {
     let presence_type = match stanza.attr("type") {
         Some(t) => t,
-        None => return Ok(()) // Not a subscription stanza
+        None => return Ok(()), // Not a subscription stanza
     };
-    
+
     let from = match stanza.attr("from") {
         Some(jid) => jid,
         None => {
@@ -264,85 +282,87 @@ pub async fn process_subscription(stanza_tx: &StanzaTx, stanza: &Element) -> Res
             return Ok(());
         }
     };
-    
+
     //debug!("[JID DEBUG] process_subscription: from='{}', presence_type='{}'", from, presence_type);
-    
+
     match presence_type {
         "subscribe" => {
             info!("Received subscription request from {}", from);
-            
+
             // Extract the bare JID
             let bare_jid = from.split('/').next().unwrap_or(from);
-            
+
             // Auto-accept for now
             // In a real application, this would typically ask the user
             let response = Element::builder("presence", NS_JABBER_CLIENT)
                 .attr("to", from)
                 .attr("type", "subscribed")
                 .build();
-            
+
             match transport::send_stanza(stanza_tx, response) {
                 Ok(_) => {
                     info!("Automatically accepted subscription request from {}", from);
-                    
+
                     // Subscribe back if we're not already subscribed
                     let subscribe_back = Element::builder("presence", NS_JABBER_CLIENT)
                         .attr("to", from)
                         .attr("type", "subscribe")
                         .build();
-                    
+
                     if let Err(e) = transport::send_stanza(stanza_tx, subscribe_back) {
                         warn!("Failed to subscribe back to {}: {}", from, e);
                     } else {
                         info!("Subscribed back to {}", from);
                     }
-                    
+
                     // Check if we've already sent a notification for this contact
-                    let mut auto_accepted = AUTO_ACCEPTED_REQUESTS.write().unwrap_or_else(|e| e.into_inner());
+                    let mut auto_accepted = AUTO_ACCEPTED_REQUESTS
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner());
                     let bare_jid_str = bare_jid.to_string();
-                    
+
                     if !auto_accepted.contains(&bare_jid_str) {
                         // Add to tracking set
                         auto_accepted.insert(bare_jid_str.clone());
-                        
+
                         // Broadcast notification (no receivers = silently dropped, which is fine)
                         let _ = FRIEND_REQUEST_BUS.send(bare_jid_str.clone());
                         info!("Broadcast friend request notification from {}", bare_jid);
                     }
-                },
+                }
                 Err(e) => {
                     error!("Failed to accept subscription from {}: {}", from, e);
                     return Err(anyhow!("Failed to accept subscription: {}", e));
                 }
             }
-        },
+        }
         "subscribed" => {
             info!("Our subscription to {} was accepted", from);
             // You might want to update the UI or internal state here
-        },
+        }
         "unsubscribe" => {
             info!("{} unsubscribed from our presence", from);
-            
+
             // Acknowledge the unsubscription
             let response = Element::builder("presence", NS_JABBER_CLIENT)
                 .attr("to", from)
                 .attr("type", "unsubscribed")
                 .build();
-            
+
             if let Err(e) = transport::send_stanza(stanza_tx, response) {
                 warn!("Failed to acknowledge unsubscription from {}: {}", from, e);
             }
-        },
+        }
         "unsubscribed" => {
             info!("Our subscription to {}'s presence was canceled", from);
             // You might want to update the UI or internal state here
-        },
+        }
         _ => {
             // Not a subscription-related stanza
             return Ok(());
         }
     }
-    
+
     Ok(())
 }
 
@@ -364,7 +384,7 @@ pub struct CapabilityInfo {
 
 // Global storage for entities with capabilities to be discovered
 lazy_static::lazy_static! {
-    pub(crate) static ref PENDING_CAPS_DISCOVERIES: std::sync::Mutex<Vec<CapabilityInfo>> = 
+    pub(crate) static ref PENDING_CAPS_DISCOVERIES: std::sync::Mutex<Vec<CapabilityInfo>> =
         std::sync::Mutex::new(Vec::new());
 }
 
@@ -387,8 +407,7 @@ mod tests {
     use crate::models::{PresenceEvent, ShowStatus, SubscriptionKind};
 
     fn make_presence(from: &str, type_attr: Option<&str>) -> Element {
-        let mut builder = Element::builder("presence", "jabber:client")
-            .attr("from", from);
+        let mut builder = Element::builder("presence", "jabber:client").attr("from", from);
         if let Some(t) = type_attr {
             builder = builder.attr("type", t);
         }
@@ -402,7 +421,11 @@ mod tests {
         handle_presence_stanza(&stanza).unwrap();
         let event = rx.try_recv().unwrap();
         match event {
-            PresenceEvent::Available { jid, show, idle_since } => {
+            PresenceEvent::Available {
+                jid,
+                show,
+                idle_since,
+            } => {
                 assert_eq!(jid, "alice@example.com");
                 assert!(show.is_none());
                 assert!(idle_since.is_none());
@@ -474,7 +497,7 @@ mod tests {
             .append(
                 Element::builder("idle", NS_IDLE)
                     .attr("since", "2026-01-15T10:30:00Z")
-                    .build()
+                    .build(),
             )
             .build();
         let since = idle_since(&stanza);

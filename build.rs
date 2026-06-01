@@ -8,7 +8,7 @@ fn main() {
     println!("cargo:rerun-if-changed=README.md");
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/refs");
-    
+
     // Embed git commit hash
     let git_hash = Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])
@@ -17,13 +17,13 @@ fn main() {
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .unwrap_or_else(|| "unknown".to_string());
     println!("cargo:rustc-env=GIT_COMMIT_HASH={}", git_hash.trim());
-    
+
     // Delete log file if it exists
     if Path::new("chatterbox.log").exists() {
         fs::remove_file("chatterbox.log").expect("Failed to delete log file");
         println!("cargo:warning=Deleted chatterbox.log");
     }
-    
+
     // Count lines of code
     update_readme_with_line_count();
 }
@@ -35,10 +35,10 @@ fn update_readme_with_line_count() {
         .arg("find ./src -type f -name \"*.rs\" | xargs wc -l")
         .output()
         .expect("Failed to count lines of code");
-    
+
     let output_str = String::from_utf8_lossy(&output.stdout);
     let lines: Vec<&str> = output_str.lines().collect();
-    
+
     // Parse total line count
     let mut total_lines = 0;
     if let Some(total_line) = lines.last() {
@@ -46,24 +46,26 @@ fn update_readme_with_line_count() {
             total_lines = num_str.parse::<u32>().unwrap_or(0);
         }
     }
-    
+
     // Count lines by module
     let mut omemo_lines = 0;
     let mut xmpp_lines = 0;
     let mut ui_and_other_lines = 0;
-    
+
     for line in &lines {
         let parts: Vec<&str> = line.trim().split_whitespace().collect();
-        if parts.len() < 2 { continue; }
-        
+        if parts.len() < 2 {
+            continue;
+        }
+
         // Skip the total line to avoid double counting
         if parts.last().unwrap_or(&"").contains("total") {
             continue;
         }
-        
+
         let count = parts[0].parse::<u32>().unwrap_or(0);
         let file_path = parts.last().unwrap_or(&"");
-        
+
         if file_path.contains("/omemo/") {
             omemo_lines += count;
         } else if file_path.contains("/xmpp/") {
@@ -72,12 +74,13 @@ fn update_readme_with_line_count() {
             ui_and_other_lines += count;
         }
     }
-    
+
     // Read current README
     let mut readme_content = String::new();
     let mut file = File::open("README.md").expect("Failed to open README.md");
-    file.read_to_string(&mut readme_content).expect("Failed to read README.md");
-    
+    file.read_to_string(&mut readme_content)
+        .expect("Failed to read README.md");
+
     // Prepare stats section with formatted numbers and proper indentation
     let stats_section = format!(
         "## Project Stats\n\n\
@@ -87,17 +90,17 @@ fn update_readme_with_line_count() {
           - UI and app logic: {} lines\n\n",
         total_lines, omemo_lines, xmpp_lines, ui_and_other_lines
     );
-    
+
     // Fixed XEP-0384 section - move from planned to implemented list
     // Simple approach: find and update sections
     let mut new_content = String::new();
-    
+
     // Check if Project Stats section already exists
     if readme_content.contains("## Project Stats") {
         // Replace existing Project Stats section
         let mut in_stats_section = false;
         let lines: Vec<&str> = readme_content.lines().collect();
-        
+
         for line in lines {
             if line == "## Project Stats" {
                 // Start replacing the stats section
@@ -119,7 +122,7 @@ fn update_readme_with_line_count() {
         // Insert stats section after the introduction (after title and before first ## heading)
         let mut found_intro = false;
         let lines: Vec<&str> = readme_content.lines().collect();
-        
+
         for line in lines {
             if !found_intro && line.starts_with("## ") {
                 // First heading after introduction - insert stats here
@@ -133,17 +136,21 @@ fn update_readme_with_line_count() {
                 new_content.push('\n');
             }
         }
-        
+
         // If no headings were found, append stats to the end
         if !found_intro {
             new_content.push_str("\n");
             new_content.push_str(&stats_section);
         }
     }
-    
+
     // Write updated README
     let mut file = File::create("README.md").expect("Failed to open README.md for writing");
-    file.write_all(new_content.as_bytes()).expect("Failed to write to README.md");
-    
-    println!("cargo:warning=Updated README.md with code stats: {} total lines", total_lines);
+    file.write_all(new_content.as_bytes())
+        .expect("Failed to write to README.md");
+
+    println!(
+        "cargo:warning=Updated README.md with code stats: {} total lines",
+        total_lines
+    );
 }

@@ -8,9 +8,9 @@
 //   XMPP_USERNAME_B, XMPP_PASSWORD_B (account B)
 
 use anyhow::Result;
-use log::{info, error};
-use tokio::time::{timeout, Duration};
+use log::{error, info};
 use tempfile::TempDir;
+use tokio::time::{timeout, Duration};
 
 use chatterbox::models::Message;
 use chatterbox::xmpp::XMPPClient;
@@ -27,14 +27,18 @@ async fn wait_for_msg(
 ) -> Result<Message> {
     match timeout(Duration::from_secs(timeout_secs), async {
         while let Some(msg) = rx.recv().await {
-            info!("  received msg: from={} content={:?} status={:?}",
-                  msg.sender_id, msg.content, msg.delivery_status);
+            info!(
+                "  received msg: from={} content={:?} status={:?}",
+                msg.sender_id, msg.content, msg.delivery_status
+            );
             if predicate(&msg) {
                 return Ok(msg);
             }
         }
         Err(anyhow::anyhow!("channel closed"))
-    }).await {
+    })
+    .await
+    {
         Ok(result) => result,
         Err(_) => Err(anyhow::anyhow!("timed out after {}s", timeout_secs)),
     }
@@ -131,8 +135,15 @@ async fn test_bidirectional_omemo_exchange() -> Result<()> {
         Ok(())
     } else {
         let mut failures = Vec::new();
-        if !a_to_b_ok { failures.push("A→B failed"); }
-        if !b_to_a_ok { failures.push("B→A failed"); }
-        Err(anyhow::anyhow!("OMEMO exchange failed: {}", failures.join(", ")))
+        if !a_to_b_ok {
+            failures.push("A→B failed");
+        }
+        if !b_to_a_ok {
+            failures.push("B→A failed");
+        }
+        Err(anyhow::anyhow!(
+            "OMEMO exchange failed: {}",
+            failures.join(", ")
+        ))
     }
 }

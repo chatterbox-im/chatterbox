@@ -33,18 +33,18 @@ const MAC_LENGTH: usize = 8;
 // Protobuf field tags (field_number << 3 | wire_type)
 // Wire type 0 = varint, 2 = length-delimited
 mod signal_message_tags {
-    pub const RATCHET_KEY: u8 = (1 << 3) | 2;     // field 1, length-delimited
-    pub const COUNTER: u8 = (2 << 3) | 0;          // field 2, varint
-    pub const PREV_COUNTER: u8 = (3 << 3) | 0;     // field 3, varint
-    pub const CIPHERTEXT: u8 = (4 << 3) | 2;       // field 4, length-delimited
+    pub const RATCHET_KEY: u8 = (1 << 3) | 2; // field 1, length-delimited
+    pub const COUNTER: u8 = (2 << 3) | 0; // field 2, varint
+    pub const PREV_COUNTER: u8 = (3 << 3) | 0; // field 3, varint
+    pub const CIPHERTEXT: u8 = (4 << 3) | 2; // field 4, length-delimited
 }
 
 mod prekey_message_tags {
-    pub const PRE_KEY_ID: u8 = (1 << 3) | 0;       // field 1, varint
-    pub const BASE_KEY: u8 = (2 << 3) | 2;         // field 2, length-delimited
-    pub const IDENTITY_KEY: u8 = (3 << 3) | 2;     // field 3, length-delimited
-    pub const MESSAGE: u8 = (4 << 3) | 2;          // field 4, length-delimited
-    pub const REGISTRATION_ID: u8 = (5 << 3) | 0;  // field 5, varint
+    pub const PRE_KEY_ID: u8 = (1 << 3) | 0; // field 1, varint
+    pub const BASE_KEY: u8 = (2 << 3) | 2; // field 2, length-delimited
+    pub const IDENTITY_KEY: u8 = (3 << 3) | 2; // field 3, length-delimited
+    pub const MESSAGE: u8 = (4 << 3) | 2; // field 4, length-delimited
+    pub const REGISTRATION_ID: u8 = (5 << 3) | 0; // field 5, varint
     pub const SIGNED_PRE_KEY_ID: u8 = (6 << 3) | 0; // field 6, varint
 }
 
@@ -156,7 +156,12 @@ impl SignalMessage {
     /// Serialize with MAC including identity keys per Signal spec.
     /// MAC = HMAC-SHA256(mac_key, sender_identity || receiver_identity || version || protobuf)[..8]
     /// Identity keys are encoded with 0x05 prefix (33 bytes) per libsignal convention.
-    pub fn serialize_with_identity(&self, mac_key: &[u8], sender_identity: &[u8], receiver_identity: &[u8]) -> Vec<u8> {
+    pub fn serialize_with_identity(
+        &self,
+        mac_key: &[u8],
+        sender_identity: &[u8],
+        receiver_identity: &[u8],
+    ) -> Vec<u8> {
         let proto = self.encode_proto();
         let mut buf = Vec::with_capacity(1 + proto.len() + MAC_LENGTH);
         buf.push(VERSION_BYTE);
@@ -164,8 +169,10 @@ impl SignalMessage {
 
         // MAC input: sender_identity(33) || receiver_identity(33) || version || protobuf
         let sender_prefixed = crate::omemo::crypto::encode_public_key_with_prefix(sender_identity);
-        let receiver_prefixed = crate::omemo::crypto::encode_public_key_with_prefix(receiver_identity);
-        let mut mac_input = Vec::with_capacity(sender_prefixed.len() + receiver_prefixed.len() + buf.len());
+        let receiver_prefixed =
+            crate::omemo::crypto::encode_public_key_with_prefix(receiver_identity);
+        let mut mac_input =
+            Vec::with_capacity(sender_prefixed.len() + receiver_prefixed.len() + buf.len());
         mac_input.extend_from_slice(&sender_prefixed);
         mac_input.extend_from_slice(&receiver_prefixed);
         mac_input.extend_from_slice(&buf);
@@ -190,15 +197,28 @@ impl SignalMessage {
         let mut proto = Vec::new();
         if !self.ratchet_key.is_empty() {
             // Encode ratchet_key with 0x05 prefix for libsignal interop
-            let prefixed_key = crate::omemo::crypto::encode_public_key_with_prefix(&self.ratchet_key);
-            proto.extend(encode_field_bytes(signal_message_tags::RATCHET_KEY, &prefixed_key));
+            let prefixed_key =
+                crate::omemo::crypto::encode_public_key_with_prefix(&self.ratchet_key);
+            proto.extend(encode_field_bytes(
+                signal_message_tags::RATCHET_KEY,
+                &prefixed_key,
+            ));
         }
-        proto.extend(encode_field_varint(signal_message_tags::COUNTER, self.counter));
+        proto.extend(encode_field_varint(
+            signal_message_tags::COUNTER,
+            self.counter,
+        ));
         if self.previous_counter > 0 {
-            proto.extend(encode_field_varint(signal_message_tags::PREV_COUNTER, self.previous_counter));
+            proto.extend(encode_field_varint(
+                signal_message_tags::PREV_COUNTER,
+                self.previous_counter,
+            ));
         }
         if !self.ciphertext.is_empty() {
-            proto.extend(encode_field_bytes(signal_message_tags::CIPHERTEXT, &self.ciphertext));
+            proto.extend(encode_field_bytes(
+                signal_message_tags::CIPHERTEXT,
+                &self.ciphertext,
+            ));
         }
         proto
     }
@@ -255,8 +275,12 @@ impl SignalMessage {
                     // Skip unknown fields
                     let wire_type = tag & 0x07;
                     match wire_type {
-                        0 => { decode_varint(data, &mut offset)?; } // varint
-                        2 => { decode_bytes(data, &mut offset)?; }  // length-delimited
+                        0 => {
+                            decode_varint(data, &mut offset)?;
+                        } // varint
+                        2 => {
+                            decode_bytes(data, &mut offset)?;
+                        } // length-delimited
                         _ => {
                             warn!("Unknown wire type {} in SignalMessage", wire_type);
                             return None;
@@ -284,17 +308,36 @@ impl PreKeySignalMessage {
     /// The inner SignalMessage is embedded as raw pre-serialized bytes (with its own MAC).
     pub fn serialize_with_inner_bytes(&self, inner_signal_msg_bytes: &[u8]) -> Vec<u8> {
         let mut proto = Vec::new();
-        proto.extend(encode_field_varint(prekey_message_tags::REGISTRATION_ID, self.registration_id));
+        proto.extend(encode_field_varint(
+            prekey_message_tags::REGISTRATION_ID,
+            self.registration_id,
+        ));
         if let Some(pre_key_id) = self.pre_key_id {
-            proto.extend(encode_field_varint(prekey_message_tags::PRE_KEY_ID, pre_key_id));
+            proto.extend(encode_field_varint(
+                prekey_message_tags::PRE_KEY_ID,
+                pre_key_id,
+            ));
         }
-        proto.extend(encode_field_varint(prekey_message_tags::SIGNED_PRE_KEY_ID, self.signed_pre_key_id));
+        proto.extend(encode_field_varint(
+            prekey_message_tags::SIGNED_PRE_KEY_ID,
+            self.signed_pre_key_id,
+        ));
         // Encode base_key and identity_key with 0x05 prefix for libsignal interop
         let prefixed_base_key = crate::omemo::crypto::encode_public_key_with_prefix(&self.base_key);
-        proto.extend(encode_field_bytes(prekey_message_tags::BASE_KEY, &prefixed_base_key));
-        let prefixed_identity_key = crate::omemo::crypto::encode_public_key_with_prefix(&self.identity_key);
-        proto.extend(encode_field_bytes(prekey_message_tags::IDENTITY_KEY, &prefixed_identity_key));
-        proto.extend(encode_field_bytes(prekey_message_tags::MESSAGE, inner_signal_msg_bytes));
+        proto.extend(encode_field_bytes(
+            prekey_message_tags::BASE_KEY,
+            &prefixed_base_key,
+        ));
+        let prefixed_identity_key =
+            crate::omemo::crypto::encode_public_key_with_prefix(&self.identity_key);
+        proto.extend(encode_field_bytes(
+            prekey_message_tags::IDENTITY_KEY,
+            &prefixed_identity_key,
+        ));
+        proto.extend(encode_field_bytes(
+            prekey_message_tags::MESSAGE,
+            inner_signal_msg_bytes,
+        ));
 
         let mut buf = Vec::with_capacity(1 + proto.len());
         buf.push(VERSION_BYTE);
@@ -317,7 +360,10 @@ impl PreKeySignalMessage {
 
         let version = data[0];
         if version != VERSION_BYTE {
-            debug!("PreKeySignalMessage unexpected version byte: 0x{:02x}", version);
+            debug!(
+                "PreKeySignalMessage unexpected version byte: 0x{:02x}",
+                version
+            );
         }
 
         let proto = &data[1..];
@@ -359,8 +405,12 @@ impl PreKeySignalMessage {
                 _ => {
                     let wire_type = tag & 0x07;
                     match wire_type {
-                        0 => { decode_varint(data, &mut offset)?; }
-                        2 => { decode_bytes(data, &mut offset)?; }
+                        0 => {
+                            decode_varint(data, &mut offset)?;
+                        }
+                        2 => {
+                            decode_bytes(data, &mut offset)?;
+                        }
                         _ => {
                             warn!("Unknown wire type {} in PreKeySignalMessage", wire_type);
                             return None;
@@ -394,8 +444,7 @@ fn compute_mac(key: &[u8], data: &[u8]) -> Vec<u8> {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
 
-    let mut mac = <Hmac<Sha256>>::new_from_slice(key)
-        .expect("HMAC key length is always valid");
+    let mut mac = <Hmac<Sha256>>::new_from_slice(key).expect("HMAC key length is always valid");
     mac.update(data);
     mac.finalize().into_bytes().to_vec()
 }
@@ -408,7 +457,10 @@ pub fn verify_mac(key: &[u8], data: &[u8], expected_mac: &[u8]) -> bool {
     }
     // Constant-time comparison
     let mut result = 0u8;
-    for (a, b) in computed[..expected_mac.len()].iter().zip(expected_mac.iter()) {
+    for (a, b) in computed[..expected_mac.len()]
+        .iter()
+        .zip(expected_mac.iter())
+    {
         result |= a ^ b;
     }
     result == 0

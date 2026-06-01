@@ -3,13 +3,13 @@
 //!
 //! This module handles OMEMO Double Ratchet sessions.
 
+use anyhow::Result;
+use log::debug;
 use std::collections::HashMap;
 use thiserror::Error;
-use log::debug;
-use anyhow::Result;
 
-use crate::omemo::protocol::{RatchetState, DoubleRatchet, DoubleRatchetError, KeyPair};
 use crate::omemo::device_id::DeviceId;
+use crate::omemo::protocol::{DoubleRatchet, DoubleRatchetError, KeyPair, RatchetState};
 
 /// Session manager errors
 #[derive(Debug, Error)]
@@ -17,15 +17,15 @@ pub enum SessionError {
     /// Session not found
     #[error("Session not found for {jid}:{device_id}")]
     SessionNotFound { jid: String, device_id: DeviceId },
-    
+
     /// Double ratchet error
     #[error("Double ratchet error: {0}")]
     DoubleRatchetError(#[from] DoubleRatchetError),
-    
+
     /// Serialization error
     #[error("Serialization error: {0}")]
     SerializationError(String),
-    
+
     /// Invalid session state
     #[error("Invalid session state: {0}")]
     InvalidStateError(String),
@@ -36,13 +36,13 @@ pub enum SessionError {
 pub struct PreKeyRotationConfig {
     /// Maximum age of a signed PreKey in seconds
     pub max_signed_prekey_age: u64,
-    
+
     /// Number of one-time PreKeys to maintain
     pub min_one_time_prekeys: u32,
-    
+
     /// How often to check for PreKey rotation (in seconds)
     pub check_interval: u64,
-    
+
     /// Last rotation timestamp (in seconds since epoch)
     pub last_rotation: u64,
 }
@@ -62,13 +62,13 @@ impl Default for PreKeyRotationConfig {
 pub struct OmemoSession {
     /// Remote JID
     pub remote_jid: String,
-    
+
     /// Remote device ID
     pub remote_device_id: DeviceId,
-    
-    /// Local device ID 
+
+    /// Local device ID
     pub local_device_id: DeviceId,
-    
+
     /// Ratchet state
     pub ratchet_state: RatchetState,
 }
@@ -108,7 +108,7 @@ impl OmemoSession {
             },
         }
     }
-    
+
     /// Create a new initiator session
     pub fn new_initiator(
         remote_jid: String,
@@ -128,7 +128,7 @@ impl OmemoSession {
             remote_device_id,
             remote_jid.clone(),
         )?;
-        
+
         Ok(Self {
             remote_jid,
             remote_device_id,
@@ -136,7 +136,7 @@ impl OmemoSession {
             ratchet_state,
         })
     }
-    
+
     /// Create a new initiator session with deterministic ephemeral key
     pub fn new_initiator_with_ephemeral(
         remote_jid: String,
@@ -148,8 +148,11 @@ impl OmemoSession {
         ephemeral_key: Vec<u8>,
         local_device_id: DeviceId,
     ) -> Result<Self, SessionError> {
-        debug!("Creating initiator session: remote_jid={}, remote_device_id={}", remote_jid, remote_device_id);
-        
+        debug!(
+            "Creating initiator session: remote_jid={}, remote_device_id={}",
+            remote_jid, remote_device_id
+        );
+
         let ratchet_state = DoubleRatchet::new_session_initiator_with_ephemeral(
             local_identity_key_pair,
             remote_identity_key,
@@ -160,7 +163,7 @@ impl OmemoSession {
             remote_device_id,
             remote_jid.clone(),
         )?;
-        
+
         Ok(Self {
             remote_jid,
             remote_device_id,
@@ -168,7 +171,7 @@ impl OmemoSession {
             ratchet_state,
         })
     }
-    
+
     /// Create a new recipient session
     pub fn new_recipient(
         remote_jid: String,
@@ -180,8 +183,11 @@ impl OmemoSession {
         remote_ephemeral_key: Vec<u8>,
         local_device_id: DeviceId,
     ) -> Result<Self, SessionError> {
-        debug!("Creating recipient session: remote_jid={}, remote_device_id={}", remote_jid, remote_device_id);
-        
+        debug!(
+            "Creating recipient session: remote_jid={}, remote_device_id={}",
+            remote_jid, remote_device_id
+        );
+
         let ratchet_state = DoubleRatchet::new_session_recipient(
             local_identity_key_pair,
             remote_identity_key,
@@ -192,7 +198,7 @@ impl OmemoSession {
             remote_device_id,
             remote_jid.clone(),
         )?;
-        
+
         Ok(Self {
             remote_jid,
             remote_device_id,
@@ -200,34 +206,32 @@ impl OmemoSession {
             ratchet_state,
         })
     }
-    
+
     /// Restore a session from a ratchet state
     pub fn restore_from_state(&mut self, state: RatchetState) -> Result<(), SessionError> {
         if state.remote_device_id != self.remote_device_id {
             return Err(SessionError::InvalidStateError(format!(
                 "Device ID mismatch: expected {}, got {}",
-                self.remote_device_id,
-                state.remote_device_id
+                self.remote_device_id, state.remote_device_id
             )));
         }
-        
+
         // Normalize JIDs for comparison to handle different encoding formats
         let normalized_session_jid = Self::normalize_jid(&self.remote_jid);
         let normalized_state_jid = Self::normalize_jid(&state.remote_jid);
-        
+
         if normalized_state_jid != normalized_session_jid {
             return Err(SessionError::InvalidStateError(format!(
                 "JID mismatch: expected {}, got {}",
-                self.remote_jid,
-                state.remote_jid
+                self.remote_jid, state.remote_jid
             )));
         }
-        
+
         self.ratchet_state = state;
-        
+
         Ok(())
     }
-    
+
     /// Normalize a JID for comparison purposes
     /// This ensures consistent comparison regardless of encoding differences
     /// For OMEMO sessions, we use bare JIDs (without resources) since OMEMO sessions
@@ -235,7 +239,7 @@ impl OmemoSession {
     fn normalize_jid(jid: &str) -> String {
         // Convert to lowercase and trim whitespace for consistent comparison
         let clean_jid = jid.to_lowercase().trim().to_string();
-        
+
         // Strip the resource part for OMEMO sessions (everything after the last '/')
         // OMEMO sessions should be bound to bare JIDs, not full JIDs with resources
         if let Some(slash_pos) = clean_jid.rfind('/') {
@@ -244,67 +248,67 @@ impl OmemoSession {
             clean_jid
         }
     }
-    
+
     /// Get the ratchet state
     pub fn get_state(&self) -> &RatchetState {
         &self.ratchet_state
     }
-    
+
     /// Get the remote JID
     pub fn get_remote_jid(&self) -> &str {
         &self.remote_jid
     }
-    
+
     /// Get the remote device ID
     pub fn get_remote_device_id(&self) -> DeviceId {
         self.remote_device_id
     }
-    
+
     /// Encrypt a message
     pub fn encrypt(&mut self, plaintext: &[u8]) -> Result<Vec<u8>, SessionError> {
         if !self.ratchet_state.initialized {
             return Err(SessionError::InvalidStateError(
-                "Session not initialized".to_string()
+                "Session not initialized".to_string(),
             ));
         }
-        
+
         let message = DoubleRatchet::encrypt(&mut self.ratchet_state, plaintext)?;
-        
+
         // For this example, we'll use JSON serialization
         let encoded = serde_json::to_vec(&message)
             .map_err(|e| SessionError::SerializationError(e.to_string()))?;
-        
+
         Ok(encoded)
     }
-    
+
     /// Decrypt a message
     pub fn decrypt(&mut self, ciphertext: &[u8]) -> Result<Vec<u8>, SessionError> {
         if !self.ratchet_state.initialized {
             return Err(SessionError::InvalidStateError(
-                "Session not initialized".to_string()
+                "Session not initialized".to_string(),
             ));
         }
-        
+
         // Deserialize the message
         let message = serde_json::from_slice(ciphertext)
             .map_err(|e| SessionError::SerializationError(e.to_string()))?;
-        
+
         // Decrypt it
         let plaintext = DoubleRatchet::decrypt(&mut self.ratchet_state, &message)?;
-        
+
         Ok(plaintext)
     }
-    
+
     /// Encrypt a message key for transport (produces a SignalMessage in wire format)
     pub fn encrypt_key(&mut self, key: &[u8]) -> Result<Vec<u8>, SessionError> {
         if !self.ratchet_state.initialized {
             return Err(SessionError::InvalidStateError(
-                "Session not initialized".to_string()
+                "Session not initialized".to_string(),
             ));
         }
-        
+
         let encrypted_key = DoubleRatchet::encrypt_key(&mut self.ratchet_state, key)?;
-        
+
         Ok(encrypted_key)
     }
 
@@ -321,7 +325,7 @@ impl OmemoSession {
     ) -> Result<Vec<u8>, SessionError> {
         if !self.ratchet_state.initialized {
             return Err(SessionError::InvalidStateError(
-                "Session not initialized".to_string()
+                "Session not initialized".to_string(),
             ));
         }
 
@@ -349,17 +353,17 @@ impl OmemoSession {
         let result = prekey_msg.serialize_with_inner_bytes(&inner_bytes);
         Ok(result)
     }
-    
+
     /// Decrypt a message key
     pub fn decrypt_key(&mut self, encrypted_key: &[u8]) -> Result<Vec<u8>, SessionError> {
         if !self.ratchet_state.initialized {
             return Err(SessionError::InvalidStateError(
-                "Session not initialized".to_string()
+                "Session not initialized".to_string(),
             ));
         }
-        
+
         let key = DoubleRatchet::decrypt_key(&mut self.ratchet_state, encrypted_key)?;
-        
+
         Ok(key)
     }
 
@@ -372,7 +376,7 @@ impl OmemoSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_jid_normalization() {
         // Test that JID normalization handles different cases consistently
@@ -380,30 +384,30 @@ mod tests {
             OmemoSession::normalize_jid("user@server.org"),
             OmemoSession::normalize_jid("user@server.org")
         );
-        
+
         assert_eq!(
             OmemoSession::normalize_jid("  user@domain.com  "),
             "user@domain.com"
         );
-        
+
         // Test that different JIDs still produce different normalized results
         assert_ne!(
             OmemoSession::normalize_jid("user1@domain.com"),
             OmemoSession::normalize_jid("user2@domain.com")
         );
     }
-    
+
     #[test]
     fn test_restore_from_state_with_case_mismatch() {
         use crate::omemo::protocol::RatchetState;
         use std::collections::HashMap;
-        
+
         let remote_jid = "User@Domain.Com".to_string();
         let remote_device_id = 123;
         let local_device_id = 456;
-        
+
         let mut session = OmemoSession::new(remote_jid.clone(), remote_device_id, local_device_id);
-        
+
         // Create a ratchet state with different case
         let state = RatchetState {
             initialized: true,
@@ -431,7 +435,7 @@ mod tests {
             remote_device_id,
             remote_jid: "user@domain.com".to_string(), // Different case
         };
-        
+
         // Should succeed despite case difference
         assert!(session.restore_from_state(state).is_ok());
     }

@@ -8,10 +8,10 @@
 //! Also supports MAM (Message Archive Management) queries which receive
 //! multiple `<message>` stanzas before a final IQ result.
 
-use std::collections::HashMap;
-use tokio::sync::{oneshot, mpsc};
-use tokio::time::Instant;
 use log::debug;
+use std::collections::HashMap;
+use tokio::sync::{mpsc, oneshot};
+use tokio::time::Instant;
 
 /// A pending IQ request waiting for its response.
 struct PendingRequest {
@@ -43,27 +43,42 @@ impl IqResponseRegistry {
     /// Returns a receiver that will get the response stanza.
     pub fn register(&mut self, id: String) -> oneshot::Receiver<xmpp_parsers::Element> {
         let (tx, rx) = oneshot::channel();
-        self.pending.insert(id, PendingRequest {
-            sender: tx,
-            registered_at: Instant::now(),
-        });
+        self.pending.insert(
+            id,
+            PendingRequest {
+                sender: tx,
+                registered_at: Instant::now(),
+            },
+        );
         rx
     }
 
     /// Register a MAM query. Returns:
     /// - An unbounded receiver for intermediate `<message>` stanzas
     /// - A oneshot receiver for the final IQ result
-    pub fn register_mam(&mut self, query_id: String) -> (mpsc::UnboundedReceiver<xmpp_parsers::Element>, oneshot::Receiver<xmpp_parsers::Element>) {
+    pub fn register_mam(
+        &mut self,
+        query_id: String,
+    ) -> (
+        mpsc::UnboundedReceiver<xmpp_parsers::Element>,
+        oneshot::Receiver<xmpp_parsers::Element>,
+    ) {
         let (msg_tx, msg_rx) = mpsc::unbounded_channel();
         let (iq_tx, iq_rx) = oneshot::channel();
-        self.mam_collectors.insert(query_id.clone(), MamCollector {
-            sender: msg_tx,
-            registered_at: Instant::now(),
-        });
-        self.pending.insert(query_id, PendingRequest {
-            sender: iq_tx,
-            registered_at: Instant::now(),
-        });
+        self.mam_collectors.insert(
+            query_id.clone(),
+            MamCollector {
+                sender: msg_tx,
+                registered_at: Instant::now(),
+            },
+        );
+        self.pending.insert(
+            query_id,
+            PendingRequest {
+                sender: iq_tx,
+                registered_at: Instant::now(),
+            },
+        );
         (msg_rx, iq_rx)
     }
 
@@ -159,8 +174,12 @@ mod tests {
         let (mut msg_rx, iq_rx) = registry.register_mam("mam-q1".to_string());
 
         // Route intermediate MAM messages
-        let msg1 = Element::builder("message", "jabber:client").attr("id", "m1").build();
-        let msg2 = Element::builder("message", "jabber:client").attr("id", "m2").build();
+        let msg1 = Element::builder("message", "jabber:client")
+            .attr("id", "m1")
+            .build();
+        let msg2 = Element::builder("message", "jabber:client")
+            .attr("id", "m2")
+            .build();
         assert!(registry.try_route_mam("mam-q1", msg1));
         assert!(registry.try_route_mam("mam-q1", msg2));
 

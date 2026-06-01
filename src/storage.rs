@@ -51,8 +51,8 @@ impl MessageStore {
             return Ok(dir.join("messages.db"));
         }
 
-        let mut path = dirs::data_dir()
-            .ok_or_else(|| anyhow!("Could not determine data directory"))?;
+        let mut path =
+            dirs::data_dir().ok_or_else(|| anyhow!("Could not determine data directory"))?;
         path.push("chatterbox");
         path.push(jid);
         path.push("messages.db");
@@ -80,9 +80,9 @@ impl MessageStore {
         )?;
 
         // Migration: add encrypted column to databases created before this field existed
-        let _ = self.conn.execute_batch(
-            "ALTER TABLE messages ADD COLUMN encrypted INTEGER NOT NULL DEFAULT 0;"
-        );
+        let _ = self
+            .conn
+            .execute_batch("ALTER TABLE messages ADD COLUMN encrypted INTEGER NOT NULL DEFAULT 0;");
 
         Ok(())
     }
@@ -165,9 +165,17 @@ impl MessageStore {
     /// For incoming messages, the contact is the sender (bare JID).
     fn contact_jid_for(msg: &Message) -> String {
         if msg.sender_id == "me" || msg.sender_id == "You" || msg.sender_id == "system" {
-            msg.recipient_id.split('/').next().unwrap_or(&msg.recipient_id).to_string()
+            msg.recipient_id
+                .split('/')
+                .next()
+                .unwrap_or(&msg.recipient_id)
+                .to_string()
         } else {
-            msg.sender_id.split('/').next().unwrap_or(&msg.sender_id).to_string()
+            msg.sender_id
+                .split('/')
+                .next()
+                .unwrap_or(&msg.sender_id)
+                .to_string()
         }
     }
 
@@ -206,7 +214,13 @@ mod tests {
 
         let m1 = make_msg("1", "alice@example.com", "me@example.com", "Hello", 1000);
         let m2 = make_msg("2", "me", "alice@example.com", "Hi back", 1001);
-        let m3 = make_msg("3", "alice@example.com", "me@example.com", "How are you?", 1002);
+        let m3 = make_msg(
+            "3",
+            "alice@example.com",
+            "me@example.com",
+            "How are you?",
+            1002,
+        );
 
         store.store_message(&m1).unwrap();
         store.store_message(&m2).unwrap();
@@ -253,7 +267,9 @@ mod tests {
         let m1 = make_msg("msg1", "me", "alice@example.com", "Hello", 1000);
         store.store_message(&m1).unwrap();
 
-        store.update_delivery_status("msg1", DeliveryStatus::Delivered).unwrap();
+        store
+            .update_delivery_status("msg1", DeliveryStatus::Delivered)
+            .unwrap();
 
         let loaded = store.load_messages("alice@example.com", 50).unwrap();
         assert_eq!(loaded[0].delivery_status, DeliveryStatus::Delivered);

@@ -18,23 +18,26 @@ pub enum TypingStatus {
     Composing, // User is composing a message
     Paused,    // User started composing but paused
     Inactive,  // User has not been active recently
-    Gone       // User has effectively ended their participation
+    Gone,      // User has effectively ended their participation
 }
 
 /// Handle chat state notifications in incoming messages.
 /// `typing_tx` is the channel sender for forwarding typing status to the UI.
-pub fn handle_chat_state(stanza: &Element, typing_tx: Option<&tokio::sync::mpsc::Sender<(String, TypingStatus)>>) -> Result<()> {
+pub fn handle_chat_state(
+    stanza: &Element,
+    typing_tx: Option<&tokio::sync::mpsc::Sender<(String, TypingStatus)>>,
+) -> Result<()> {
     // Check the stanza for chat state elements
     let chat_states = ["active", "composing", "paused", "inactive", "gone"];
-    
+
     // Get the from attribute
     let from = stanza.attr("from").map(|s| s.to_string());
-    
+
     // Check for each possible chat state
     for state in chat_states.iter() {
         if stanza.has_child(state, custom_ns::CHATSTATES) {
             debug!("Received {} chat state from {:?}", state, from);
-            
+
             // Since we can't use the async process_chat_state method directly in this synchronous function,
             // we'll manually convert the chat state to a typing status
             let typing_status = match *state {
@@ -45,7 +48,7 @@ pub fn handle_chat_state(stanza: &Element, typing_tx: Option<&tokio::sync::mpsc:
                 "gone" => Some(TypingStatus::Gone),
                 _ => None,
             };
-            
+
             if let (Some(jid), Some(status)) = (from.clone(), typing_status) {
                 // Try to send the typing notification to the UI
                 if let Some(tx) = typing_tx {
@@ -55,11 +58,11 @@ pub fn handle_chat_state(stanza: &Element, typing_tx: Option<&tokio::sync::mpsc:
                     }
                 }
             }
-            
+
             return Ok(());
         }
     }
-    
+
     // No chat state found
     Ok(())
 }
@@ -72,17 +75,18 @@ impl super::XMPPClient {
             error!("XMPP client not initialized when trying to send chat state");
             anyhow!("XMPP client not initialized")
         })?;
-        
-        // Parse recipient 
-        let recipient_jid: xmpp_parsers::Jid = recipient.parse()
+
+        // Parse recipient
+        let recipient_jid: xmpp_parsers::Jid = recipient
+            .parse()
             .map_err(|e| anyhow!("Invalid recipient JID '{}': {}", recipient, e))?;
-        
+
         // Create chat state message
         let mut message = XMPPMessage::new(None);
         message.id = Some(Uuid::new_v4().to_string());
         message.to = Some(recipient_jid);
         message.type_ = MessageType::Chat;
-        
+
         // Add appropriate chat state element based on the state
         let state_name = match state {
             TypingStatus::Active => "active",
@@ -91,15 +95,16 @@ impl super::XMPPClient {
             TypingStatus::Inactive => "inactive",
             TypingStatus::Gone => "gone",
         };
-        
+
         // Add the chat state element to the message
-        let state_element = xmpp_parsers::Element::builder(state_name, custom_ns::CHATSTATES).build();
+        let state_element =
+            xmpp_parsers::Element::builder(state_name, custom_ns::CHATSTATES).build();
         message.payloads.push(state_element);
-        
+
         // Send via transport channel
         transport::send_stanza(stanza_tx, message.into())
             .map_err(|e| anyhow!("Failed to send chat state: {}", e))?;
-        
+
         debug!("Sent {} chat state to {}", state_name, recipient);
         Ok(())
     }
@@ -186,7 +191,11 @@ mod tests {
     fn test_no_chat_state_in_message() {
         let stanza = Element::builder("message", "jabber:client")
             .attr("from", "alice@example.com")
-            .append(Element::builder("body", "jabber:client").append("hello").build())
+            .append(
+                Element::builder("body", "jabber:client")
+                    .append("hello")
+                    .build(),
+            )
             .build();
         let (tx, mut rx) = tokio::sync::mpsc::channel(10);
         handle_chat_state(&stanza, Some(&tx)).unwrap();

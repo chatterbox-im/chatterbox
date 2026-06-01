@@ -1,10 +1,10 @@
 // XMPP Roster management for Sermo
 // Contains all roster-related methods for XMPPClient
 
+use crate::xmpp::XMPPClient;
 use anyhow::{anyhow, Result};
 use log::{error, info, warn};
 use xmpp_parsers::Element;
-use crate::xmpp::XMPPClient;
 
 impl XMPPClient {
     /// Get the roster (contact list) from the XMPP server
@@ -59,7 +59,11 @@ impl XMPPClient {
             Err(e) => {
                 // If it's an actual IQ error (server rejection), propagate it
                 if e.to_string().contains("IQ error") {
-                    return Err(anyhow!("Server rejected roster add for {}: {}", full_jid, e));
+                    return Err(anyhow!(
+                        "Server rejected roster add for {}: {}",
+                        full_jid,
+                        e
+                    ));
                 }
                 // Timeout or channel errors are non-fatal — the server may have processed it
                 warn!("Roster add response issue for {}: {}", full_jid, e);
@@ -98,7 +102,11 @@ impl XMPPClient {
                     break;
                 }
                 let domain_added_jid = if !jid.contains('@') {
-                    format!("{}@{}", jid, self.get_server_domain().await.unwrap_or_default())
+                    format!(
+                        "{}@{}",
+                        jid,
+                        self.get_server_domain().await.unwrap_or_default()
+                    )
                 } else {
                     jid.to_string()
                 };
@@ -119,14 +127,20 @@ impl XMPPClient {
                 }
             }
             found_jid.unwrap_or_else(|| {
-                warn!("Could not find exact JID match in roster, using original: {}", jid);
+                warn!(
+                    "Could not find exact JID match in roster, using original: {}",
+                    jid
+                );
                 jid.to_string()
             })
         } else {
             warn!("Could not fetch roster, using provided JID: {}", jid);
             jid.to_string()
         };
-        info!("Removing contact from roster using exact JID: {}", exact_jid);
+        info!(
+            "Removing contact from roster using exact JID: {}",
+            exact_jid
+        );
 
         let item = Element::builder("item", "jabber:iq:roster")
             .attr("jid", &exact_jid)
@@ -143,7 +157,11 @@ impl XMPPClient {
             Err(e) => {
                 // For removal, treat timeout/channel errors as non-fatal but propagate real errors
                 if e.to_string().contains("IQ error") {
-                    return Err(anyhow!("Server rejected roster removal for {}: {}", exact_jid, e));
+                    return Err(anyhow!(
+                        "Server rejected roster removal for {}: {}",
+                        exact_jid,
+                        e
+                    ));
                 }
                 warn!("Roster removal response issue for {}: {}", exact_jid, e);
             }
@@ -172,46 +190,47 @@ impl XMPPClient {
     }
 
     /// Validate a JID format
-    /// 
+    ///
     /// This function checks if a JID is properly formatted according to the XMPP spec.
     /// A valid JID must have a local part, a domain part, and optionally a resource part.
-    /// 
+    ///
     /// Returns true if the JID is valid, false otherwise.
     pub fn validate_jid(jid: &str) -> bool {
         // Basic JID regex pattern: localpart@domainpart[/resourcepart]
         // This is a simplified version - a full implementation would be more complex
         let jid_regex = regex::Regex::new(r"^([^@/]+)@([^@/]+)(/([^@/]+))?$").unwrap();
-        
+
         if !jid_regex.is_match(jid) {
             //debug!("[JID VALIDATION] Invalid JID format: {}", jid);
             return false;
         }
-        
+
         // Additional validation for domain part
         if let Some(captures) = jid_regex.captures(jid) {
             if let Some(domain) = captures.get(2) {
                 let domain_str = domain.as_str();
-                
+
                 // Domain must contain at least one dot
                 if !domain_str.contains('.') {
                     //debug!("[JID VALIDATION] Invalid domain (missing dot): {}", domain_str);
                     return false;
                 }
-                
+
                 // Domain must not start or end with a dot
                 if domain_str.starts_with('.') || domain_str.ends_with('.') {
                     //debug!("[JID VALIDATION] Invalid domain (starts/ends with dot): {}", domain_str);
                     return false;
                 }
-                
+
                 // Domain must not contain consecutive dots
                 if domain_str.contains("..") {
                     //debug!("[JID VALIDATION] Invalid domain (consecutive dots): {}", domain_str);
                     return false;
                 }
-                
+
                 // Domain parts must be valid (letters, digits, hyphens)
-                let domain_part_regex = regex::Regex::new(r"^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$").unwrap();
+                let domain_part_regex =
+                    regex::Regex::new(r"^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$").unwrap();
                 for part in domain_str.split('.') {
                     if part.is_empty() || !domain_part_regex.is_match(part) {
                         //debug!("[JID VALIDATION] Invalid domain part: {}", part);
@@ -220,7 +239,7 @@ impl XMPPClient {
                 }
             }
         }
-        
+
         true
     }
 
@@ -229,11 +248,11 @@ impl XMPPClient {
         //debug!("[JID DEBUG] ensure_full_jid: input jid = {}", jid);
         let user_jid = self.get_jid();
         //debug!("[JID DEBUG] ensure_full_jid: user_jid = {}", user_jid);
-        
+
         // If the JID already contains @, validate it
         if jid.contains('@') {
             //debug!("[JID DEBUG] ensure_full_jid: jid already contains @, validating: {}", jid);
-            
+
             if Self::validate_jid(jid) {
                 //debug!("[JID DEBUG] ensure_full_jid: jid is valid: {}", jid);
                 return Ok(jid.to_string());
@@ -242,14 +261,14 @@ impl XMPPClient {
                 // Continue to try to fix it by adding domain
             }
         }
-        
+
         // Try to extract domain from user's JID
         if let Some(domain_start) = user_jid.find('@') {
             let domain_end = user_jid.find('/').unwrap_or(user_jid.len());
             if domain_start < domain_end {
-                let domain = &user_jid[domain_start+1..domain_end];
+                let domain = &user_jid[domain_start + 1..domain_end];
                 //debug!("[JID DEBUG] ensure_full_jid: Adding domain '{}' to bare JID '{}'", domain, jid);
-                
+
                 // Create the full JID
                 let full = if jid.contains('@') {
                     // If it already has @ but was invalid, try to extract the local part
@@ -261,21 +280,24 @@ impl XMPPClient {
                 } else {
                     format!("{}@{}", jid, domain)
                 };
-                
+
                 // Validate the constructed JID
                 if Self::validate_jid(&full) {
                     //debug!("[JID DEBUG] ensure_full_jid: returning valid JID: {}", full);
                     return Ok(full);
                 } else {
-                    warn!("[JID DEBUG] ensure_full_jid: constructed JID is invalid: {}", full);
+                    warn!(
+                        "[JID DEBUG] ensure_full_jid: constructed JID is invalid: {}",
+                        full
+                    );
                 }
             }
         }
-        
+
         // Try with server domain
         if let Some(domain) = self.get_server_domain().await {
             //debug!("[JID DEBUG] ensure_full_jid: Using server domain '{}' for bare JID '{}'", domain, jid);
-            
+
             // Create the full JID
             let full = if jid.contains('@') {
                 // If it already has @ but was invalid, try to extract the local part
@@ -287,17 +309,23 @@ impl XMPPClient {
             } else {
                 format!("{}@{}", jid, domain)
             };
-            
+
             // Validate the constructed JID
             if Self::validate_jid(&full) {
                 //debug!("[JID DEBUG] ensure_full_jid: returning valid JID: {}", full);
                 return Ok(full);
             } else {
-                warn!("[JID DEBUG] ensure_full_jid: constructed JID is invalid: {}", full);
+                warn!(
+                    "[JID DEBUG] ensure_full_jid: constructed JID is invalid: {}",
+                    full
+                );
             }
         }
-        
-        error!("[JID DEBUG] ensure_full_jid: Cannot determine valid domain for JID: {}", jid);
+
+        error!(
+            "[JID DEBUG] ensure_full_jid: Cannot determine valid domain for JID: {}",
+            jid
+        );
         Err(anyhow!("Cannot determine valid domain for JID: {}", jid))
     }
 
@@ -308,14 +336,14 @@ impl XMPPClient {
         if let Some(domain_end) = jid.find('/') {
             if let Some(domain_start) = jid.find('@') {
                 if domain_start < domain_end {
-                    let domain = jid[domain_start+1..domain_end].to_string();
+                    let domain = jid[domain_start + 1..domain_end].to_string();
                     //debug!("[JID DEBUG] get_server_domain: found domain = {}", domain);
                     return Some(domain);
                 }
             }
         }
         if let Some(domain_start) = jid.find('@') {
-            let domain = jid[domain_start+1..].to_string();
+            let domain = jid[domain_start + 1..].to_string();
             //debug!("[JID DEBUG] get_server_domain: found domain = {}", domain);
             return Some(domain);
         }

@@ -3,11 +3,11 @@
 
 // Import common test utilities
 mod common;
-use common::{setup_logging, get_test_credentials, get_test_recipient, wait_for_message};
+use common::{get_test_credentials, get_test_recipient, setup_logging, wait_for_message};
 
 // External crate imports
 use anyhow::Result;
-use log::{info, warn, error};
+use log::{error, info, warn};
 use tokio::time::Duration as TokioDuration;
 
 /// Test OMEMO multi-device encryption functionality
@@ -20,18 +20,24 @@ async fn test_omemo_multi_device_encryption() -> Result<()> {
 
     // 1. Get credentials
     let credentials = get_test_credentials().await?;
-    info!("Using credentials for {} on server {}", credentials.username, credentials.server);
+    info!(
+        "Using credentials for {} on server {}",
+        credentials.username, credentials.server
+    );
 
     // 2. Connect two clients representing different devices of the same user
     // First client
     let (mut client1, mut msg_rx1) = chatterbox::xmpp::XMPPClient::new();
     info!("Connecting first client to XMPP server...");
-    
-    match client1.connect(
-        &credentials.server,
-        &credentials.username,
-        &credentials.get_password().unwrap_or_default(),
-    ).await {
+
+    match client1
+        .connect(
+            &credentials.server,
+            &credentials.username,
+            &credentials.get_password().unwrap_or_default(),
+        )
+        .await
+    {
         Ok(_) => info!("First client connected to XMPP server successfully"),
         Err(e) => {
             error!("Failed to connect first client to XMPP server: {}", e);
@@ -42,12 +48,15 @@ async fn test_omemo_multi_device_encryption() -> Result<()> {
     // Second client - same account, different resource
     let (mut client2, mut msg_rx2) = chatterbox::xmpp::XMPPClient::new();
     info!("Connecting second client to XMPP server...");
-    
-    match client2.connect(
-        &credentials.server,
-        &credentials.username,
-        &credentials.get_password().unwrap_or_default(),
-    ).await {
+
+    match client2
+        .connect(
+            &credentials.server,
+            &credentials.username,
+            &credentials.get_password().unwrap_or_default(),
+        )
+        .await
+    {
         Ok(_) => info!("Second client connected to XMPP server successfully"),
         Err(e) => {
             error!("Failed to connect second client to XMPP server: {}", e);
@@ -62,7 +71,7 @@ async fn test_omemo_multi_device_encryption() -> Result<()> {
 
     // 3. Initialize OMEMO for both clients
     info!("Initializing both clients with OMEMO support...");
-    
+
     // Initialize first client
     match client1.initialize_client().await {
         Ok(_) => info!("First client initialized with OMEMO support"),
@@ -71,10 +80,13 @@ async fn test_omemo_multi_device_encryption() -> Result<()> {
             // Cleanup
             let _ = client1.disconnect().await;
             let _ = client2.disconnect().await;
-            return Err(anyhow::anyhow!("Failed to initialize OMEMO for first client: {}", e));
+            return Err(anyhow::anyhow!(
+                "Failed to initialize OMEMO for first client: {}",
+                e
+            ));
         }
     }
-    
+
     // Initialize second client
     match client2.initialize_client().await {
         Ok(_) => info!("Second client initialized with OMEMO support"),
@@ -83,7 +95,10 @@ async fn test_omemo_multi_device_encryption() -> Result<()> {
             // Cleanup
             let _ = client1.disconnect().await;
             let _ = client2.disconnect().await;
-            return Err(anyhow::anyhow!("Failed to initialize OMEMO for second client: {}", e));
+            return Err(anyhow::anyhow!(
+                "Failed to initialize OMEMO for second client: {}",
+                e
+            ));
         }
     }
 
@@ -105,17 +120,29 @@ async fn test_omemo_multi_device_encryption() -> Result<()> {
 
     // 5. Send encrypted message from client1 to the contact
     let timestamp1 = chrono::Utc::now().timestamp();
-    let test_message1 = format!("OMEMO multi-device test message from client1 - {}", timestamp1);
+    let test_message1 = format!(
+        "OMEMO multi-device test message from client1 - {}",
+        timestamp1
+    );
 
-    info!("Sending OMEMO encrypted message from client1 to contact {}", test_contact);
-    match client1.send_encrypted_message(test_contact, &test_message1).await {
+    info!(
+        "Sending OMEMO encrypted message from client1 to contact {}",
+        test_contact
+    );
+    match client1
+        .send_encrypted_message(test_contact, &test_message1)
+        .await
+    {
         Ok(_) => info!("OMEMO encrypted message sent successfully from client1"),
         Err(e) => {
             error!("Failed to send OMEMO encrypted message from client1: {}", e);
             // Cleanup
             let _ = client1.disconnect().await;
             let _ = client2.disconnect().await;
-            return Err(anyhow::anyhow!("Failed to send encrypted message from client1: {}", e));
+            return Err(anyhow::anyhow!(
+                "Failed to send encrypted message from client1: {}",
+                e
+            ));
         }
     }
 
@@ -124,24 +151,41 @@ async fn test_omemo_multi_device_encryption() -> Result<()> {
     let received_carbon = match wait_for_message(
         &mut msg_rx2,
         |msg| msg.content == test_message1,
-        5 // 5 second timeout
-    ).await {
+        5, // 5 second timeout
+    )
+    .await
+    {
         Ok(msg) => {
-            info!("Client2 received carbon copy of encrypted message: {}", msg.id);
+            info!(
+                "Client2 received carbon copy of encrypted message: {}",
+                msg.id
+            );
             true
-        },
+        }
         Err(e) => {
-            warn!("Client2 did not receive carbon copy of encrypted message: {}", e);
+            warn!(
+                "Client2 did not receive carbon copy of encrypted message: {}",
+                e
+            );
             false
         }
     };
 
     // 7. Send encrypted message from client2 to the contact
     let timestamp2 = chrono::Utc::now().timestamp();
-    let test_message2 = format!("OMEMO multi-device test message from client2 - {}", timestamp2);
+    let test_message2 = format!(
+        "OMEMO multi-device test message from client2 - {}",
+        timestamp2
+    );
 
-    info!("Sending OMEMO encrypted message from client2 to contact {}", test_contact);
-    match client2.send_encrypted_message(test_contact, &test_message2).await {
+    info!(
+        "Sending OMEMO encrypted message from client2 to contact {}",
+        test_contact
+    );
+    match client2
+        .send_encrypted_message(test_contact, &test_message2)
+        .await
+    {
         Ok(_) => info!("OMEMO encrypted message sent successfully from client2"),
         Err(e) => {
             error!("Failed to send OMEMO encrypted message from client2: {}", e);
@@ -154,14 +198,22 @@ async fn test_omemo_multi_device_encryption() -> Result<()> {
     let received_carbon2 = match wait_for_message(
         &mut msg_rx1,
         |msg| msg.content == test_message2,
-        5 // 5 second timeout
-    ).await {
+        5, // 5 second timeout
+    )
+    .await
+    {
         Ok(msg) => {
-            info!("Client1 received carbon copy of encrypted message: {}", msg.id);
+            info!(
+                "Client1 received carbon copy of encrypted message: {}",
+                msg.id
+            );
             true
-        },
+        }
         Err(e) => {
-            warn!("Client1 did not receive carbon copy of encrypted message: {}", e);
+            warn!(
+                "Client1 did not receive carbon copy of encrypted message: {}",
+                e
+            );
             false
         }
     };
@@ -192,18 +244,24 @@ async fn test_omemo_multi_device_encryption_enhanced() -> Result<()> {
 
     // 1. Get credentials
     let credentials = get_test_credentials().await?;
-    info!("Using credentials for {} on server {}", credentials.username, credentials.server);
+    info!(
+        "Using credentials for {} on server {}",
+        credentials.username, credentials.server
+    );
 
     // 2. Connect two clients representing different devices of the same user
     // First client
     let (mut client1, mut msg_rx1) = chatterbox::xmpp::XMPPClient::new();
     info!("Connecting first client to XMPP server...");
-    
-    match client1.connect(
-        &credentials.server,
-        &credentials.username,
-        &credentials.get_password().unwrap_or_default(),
-    ).await {
+
+    match client1
+        .connect(
+            &credentials.server,
+            &credentials.username,
+            &credentials.get_password().unwrap_or_default(),
+        )
+        .await
+    {
         Ok(_) => info!("First client connected to XMPP server successfully"),
         Err(e) => {
             error!("Failed to connect first client to XMPP server: {}", e);
@@ -214,12 +272,15 @@ async fn test_omemo_multi_device_encryption_enhanced() -> Result<()> {
     // Second client - same account, different resource
     let (mut client2, mut msg_rx2) = chatterbox::xmpp::XMPPClient::new();
     info!("Connecting second client to XMPP server...");
-    
-    match client2.connect(
-        &credentials.server,
-        &credentials.username,
-        &credentials.get_password().unwrap_or_default(),
-    ).await {
+
+    match client2
+        .connect(
+            &credentials.server,
+            &credentials.username,
+            &credentials.get_password().unwrap_or_default(),
+        )
+        .await
+    {
         Ok(_) => info!("Second client connected to XMPP server successfully"),
         Err(e) => {
             error!("Failed to connect second client to XMPP server: {}", e);
@@ -234,7 +295,7 @@ async fn test_omemo_multi_device_encryption_enhanced() -> Result<()> {
 
     // 3. Initialize OMEMO for both clients
     info!("Initializing both clients with OMEMO support...");
-    
+
     // Initialize first client
     match client1.initialize_client().await {
         Ok(_) => info!("First client initialized with OMEMO support"),
@@ -243,10 +304,13 @@ async fn test_omemo_multi_device_encryption_enhanced() -> Result<()> {
             // Cleanup
             let _ = client1.disconnect().await;
             let _ = client2.disconnect().await;
-            return Err(anyhow::anyhow!("Failed to initialize OMEMO for first client: {}", e));
+            return Err(anyhow::anyhow!(
+                "Failed to initialize OMEMO for first client: {}",
+                e
+            ));
         }
     }
-    
+
     // Initialize second client
     match client2.initialize_client().await {
         Ok(_) => info!("Second client initialized with OMEMO support"),
@@ -255,7 +319,10 @@ async fn test_omemo_multi_device_encryption_enhanced() -> Result<()> {
             // Cleanup
             let _ = client1.disconnect().await;
             let _ = client2.disconnect().await;
-            return Err(anyhow::anyhow!("Failed to initialize OMEMO for second client: {}", e));
+            return Err(anyhow::anyhow!(
+                "Failed to initialize OMEMO for second client: {}",
+                e
+            ));
         }
     }
 
@@ -267,13 +334,16 @@ async fn test_omemo_multi_device_encryption_enhanced() -> Result<()> {
         Ok(id) => {
             info!("Client 1 device ID: {}", id);
             id
-        },
+        }
         Err(e) => {
             error!("Failed to get device ID for client 1: {}", e);
             // Cleanup
             let _ = client1.disconnect().await;
             let _ = client2.disconnect().await;
-            return Err(anyhow::anyhow!("Failed to get device ID for client 1: {}", e));
+            return Err(anyhow::anyhow!(
+                "Failed to get device ID for client 1: {}",
+                e
+            ));
         }
     };
 
@@ -281,13 +351,16 @@ async fn test_omemo_multi_device_encryption_enhanced() -> Result<()> {
         Ok(id) => {
             info!("Client 2 device ID: {}", id);
             id
-        },
+        }
         Err(e) => {
             error!("Failed to get device ID for client 2: {}", e);
             // Cleanup
             let _ = client1.disconnect().await;
             let _ = client2.disconnect().await;
-            return Err(anyhow::anyhow!("Failed to get device ID for client 2: {}", e));
+            return Err(anyhow::anyhow!(
+                "Failed to get device ID for client 2: {}",
+                e
+            ));
         }
     };
 
@@ -295,7 +368,10 @@ async fn test_omemo_multi_device_encryption_enhanced() -> Result<()> {
     if device_id1 == device_id2 {
         warn!("Both clients have the same device ID: {}. This suggests multi-device support may not be working correctly.", device_id1);
     } else {
-        info!("Confirmed clients have different device IDs: {} and {}", device_id1, device_id2);
+        info!(
+            "Confirmed clients have different device IDs: {} and {}",
+            device_id1, device_id2
+        );
     }
 
     // 5. Get fingerprints for both devices
@@ -303,7 +379,7 @@ async fn test_omemo_multi_device_encryption_enhanced() -> Result<()> {
         Ok(fp) => {
             info!("Client 1 fingerprint: {}", fp);
             fp
-        },
+        }
         Err(e) => {
             warn!("Failed to get fingerprint for client 1: {}", e);
             "unknown".to_string()
@@ -314,7 +390,7 @@ async fn test_omemo_multi_device_encryption_enhanced() -> Result<()> {
         Ok(fp) => {
             info!("Client 2 fingerprint: {}", fp);
             fp
-        },
+        }
         Err(e) => {
             warn!("Failed to get fingerprint for client 2: {}", e);
             "unknown".to_string()
@@ -330,13 +406,13 @@ async fn test_omemo_multi_device_encryption_enhanced() -> Result<()> {
 
     // 6. Verify device discovery between the clients
     info!("Testing device discovery between clients...");
-    
+
     // Get client1's view of own devices
     let devices_from_client1 = match client1.get_contact_devices(&credentials.username).await {
         Ok(devices) => {
             info!("Client 1 sees these devices for the account: {:?}", devices);
             devices
-        },
+        }
         Err(e) => {
             warn!("Client 1 failed to get device list: {}", e);
             Vec::new()
@@ -348,7 +424,7 @@ async fn test_omemo_multi_device_encryption_enhanced() -> Result<()> {
         Ok(devices) => {
             info!("Client 2 sees these devices for the account: {:?}", devices);
             devices
-        },
+        }
         Err(e) => {
             warn!("Client 2 failed to get device list: {}", e);
             Vec::new()
@@ -358,9 +434,11 @@ async fn test_omemo_multi_device_encryption_enhanced() -> Result<()> {
     // Verify both clients can see each other's device IDs
     let client1_sees_client2 = devices_from_client1.contains(&device_id2);
     let client2_sees_client1 = devices_from_client2.contains(&device_id1);
-    
+
     if client1_sees_client2 && client2_sees_client1 {
-        info!("Device discovery is working correctly: both clients can see each other's device IDs");
+        info!(
+            "Device discovery is working correctly: both clients can see each other's device IDs"
+        );
     } else {
         warn!("Device discovery issues detected:");
         if !client1_sees_client2 {
@@ -388,7 +466,7 @@ async fn test_omemo_multi_device_encryption_enhanced() -> Result<()> {
     // First, get contact's device ID(s)
     match client1.request_omemo_devicelist(test_contact).await {
         Ok(_) => info!("Successfully requested device list for contact"),
-        Err(e) => warn!("Failed to request device list for contact: {}", e)
+        Err(e) => warn!("Failed to request device list for contact: {}", e),
     };
 
     tokio::time::sleep(TokioDuration::from_secs(1)).await;
@@ -396,13 +474,16 @@ async fn test_omemo_multi_device_encryption_enhanced() -> Result<()> {
     let contact_devices = match client1.get_contact_devices(test_contact).await {
         Ok(devices) => {
             if devices.is_empty() {
-                info!("Contact {} has no OMEMO devices, using default ID 1", test_contact);
+                info!(
+                    "Contact {} has no OMEMO devices, using default ID 1",
+                    test_contact
+                );
                 vec![1]
             } else {
                 info!("Contact {} has devices: {:?}", test_contact, devices);
                 devices
             }
-        },
+        }
         Err(e) => {
             warn!("Failed to get contact devices: {}", e);
             vec![1]
@@ -412,37 +493,64 @@ async fn test_omemo_multi_device_encryption_enhanced() -> Result<()> {
     // Attempt trust differentiation if there's at least one device
     if !contact_devices.is_empty() {
         let contact_device_id = contact_devices[0];
-        
+
         // Client 1 trusts the device
-        match client1.mark_device_trusted(test_contact, contact_device_id).await {
-            Ok(_) => info!("Client 1 successfully trusted contact device {}", contact_device_id),
-            Err(e) => warn!("Client 1 failed to trust contact device: {}", e)
+        match client1
+            .mark_device_trusted(test_contact, contact_device_id)
+            .await
+        {
+            Ok(_) => info!(
+                "Client 1 successfully trusted contact device {}",
+                contact_device_id
+            ),
+            Err(e) => warn!("Client 1 failed to trust contact device: {}", e),
         }
-        
+
         // Client 2 does not trust (explicitly marks as untrusted)
-        match client2.mark_device_untrusted(test_contact, contact_device_id).await {
-            Ok(_) => info!("Client 2 successfully marked contact device {} as untrusted", contact_device_id),
-            Err(e) => warn!("Client 2 failed to untrust contact device: {}", e)
+        match client2
+            .mark_device_untrusted(test_contact, contact_device_id)
+            .await
+        {
+            Ok(_) => info!(
+                "Client 2 successfully marked contact device {} as untrusted",
+                contact_device_id
+            ),
+            Err(e) => warn!("Client 2 failed to untrust contact device: {}", e),
         }
-        
+
         // Verify trust settings
-        match client1.is_device_trusted(test_contact, contact_device_id).await {
+        match client1
+            .is_device_trusted(test_contact, contact_device_id)
+            .await
+        {
             Ok(trusted) => info!("Client 1 trust status for contact device: {}", trusted),
-            Err(e) => warn!("Failed to check client 1 trust status: {}", e)
+            Err(e) => warn!("Failed to check client 1 trust status: {}", e),
         }
-        
-        match client2.is_device_trusted(test_contact, contact_device_id).await {
+
+        match client2
+            .is_device_trusted(test_contact, contact_device_id)
+            .await
+        {
             Ok(trusted) => info!("Client 2 trust status for contact device: {}", trusted),
-            Err(e) => warn!("Failed to check client 2 trust status: {}", e)
+            Err(e) => warn!("Failed to check client 2 trust status: {}", e),
         }
     }
 
     // 9. Send encrypted message from client1 to the contact
     let timestamp1 = chrono::Utc::now().timestamp();
-    let test_message1 = format!("ENHANCED OMEMO multi-device test message from client1 - {}", timestamp1);
+    let test_message1 = format!(
+        "ENHANCED OMEMO multi-device test message from client1 - {}",
+        timestamp1
+    );
 
-    info!("Sending OMEMO encrypted message from client1 to contact {}", test_contact);
-    match client1.send_encrypted_message(test_contact, &test_message1).await {
+    info!(
+        "Sending OMEMO encrypted message from client1 to contact {}",
+        test_contact
+    );
+    match client1
+        .send_encrypted_message(test_contact, &test_message1)
+        .await
+    {
         Ok(_) => info!("OMEMO encrypted message sent successfully from client1"),
         Err(e) => {
             error!("Failed to send OMEMO encrypted message from client1: {}", e);
@@ -455,24 +563,41 @@ async fn test_omemo_multi_device_encryption_enhanced() -> Result<()> {
     let carbon_received = match wait_for_message(
         &mut msg_rx2,
         |msg| msg.content == test_message1,
-        5 // 5 second timeout
-    ).await {
+        5, // 5 second timeout
+    )
+    .await
+    {
         Ok(msg) => {
-            info!("Client2 received and decrypted carbon copy successfully: {}", msg.id);
+            info!(
+                "Client2 received and decrypted carbon copy successfully: {}",
+                msg.id
+            );
             true
-        },
+        }
         Err(e) => {
-            warn!("Client2 did not receive or couldn't decrypt carbon copy: {}", e);
+            warn!(
+                "Client2 did not receive or couldn't decrypt carbon copy: {}",
+                e
+            );
             false
         }
     };
 
     // 11. Send encrypted message from client2 to the contact
     let timestamp2 = chrono::Utc::now().timestamp();
-    let test_message2 = format!("ENHANCED OMEMO multi-device test message from client2 - {}", timestamp2);
+    let test_message2 = format!(
+        "ENHANCED OMEMO multi-device test message from client2 - {}",
+        timestamp2
+    );
 
-    info!("Sending OMEMO encrypted message from client2 to contact {}", test_contact);
-    match client2.send_encrypted_message(test_contact, &test_message2).await {
+    info!(
+        "Sending OMEMO encrypted message from client2 to contact {}",
+        test_contact
+    );
+    match client2
+        .send_encrypted_message(test_contact, &test_message2)
+        .await
+    {
         Ok(_) => info!("OMEMO encrypted message sent successfully from client2"),
         Err(e) => {
             warn!("Failed to send OMEMO encrypted message from client2: {}", e);
@@ -485,36 +610,72 @@ async fn test_omemo_multi_device_encryption_enhanced() -> Result<()> {
     let carbon_received2 = match wait_for_message(
         &mut msg_rx1,
         |msg| msg.content == test_message2,
-        5 // 5 second timeout
-    ).await {
+        5, // 5 second timeout
+    )
+    .await
+    {
         Ok(msg) => {
-            info!("Client1 received and decrypted carbon copy successfully: {}", msg.id);
+            info!(
+                "Client1 received and decrypted carbon copy successfully: {}",
+                msg.id
+            );
             true
-        },
+        }
         Err(e) => {
-            warn!("Client1 did not receive or couldn't decrypt carbon copy: {}", e);
+            warn!(
+                "Client1 did not receive or couldn't decrypt carbon copy: {}",
+                e
+            );
             false
         }
     };
 
     // 13. Summary of multi-device capabilities
     info!("\n==== OMEMO Multi-Device Support Evaluation ====");
-    info!("1. Different device IDs: {}", if device_id1 != device_id2 { "PASS" } else { "FAIL" });
-    info!("2. Different fingerprints: {}", if fingerprint1 != fingerprint2 && fingerprint1 != "unknown" { "PASS" } else { "UNCLEAR" });
-    info!("3. Device discovery: {}", if client1_sees_client2 && client2_sees_client1 { "PASS" } else { "FAIL" });
-    info!("4. Carbon copy reception and decryption from client1: {}", if carbon_received { "PASS" } else { "FAIL" });
-    info!("5. Carbon copy reception and decryption from client2: {}", if carbon_received2 { "PASS" } else { "FAIL" });
-    
-    let overall_assessment = if device_id1 != device_id2 && 
-                             (client1_sees_client2 || client2_sees_client1) && 
-                             (carbon_received || carbon_received2) {
+    info!(
+        "1. Different device IDs: {}",
+        if device_id1 != device_id2 {
+            "PASS"
+        } else {
+            "FAIL"
+        }
+    );
+    info!(
+        "2. Different fingerprints: {}",
+        if fingerprint1 != fingerprint2 && fingerprint1 != "unknown" {
+            "PASS"
+        } else {
+            "UNCLEAR"
+        }
+    );
+    info!(
+        "3. Device discovery: {}",
+        if client1_sees_client2 && client2_sees_client1 {
+            "PASS"
+        } else {
+            "FAIL"
+        }
+    );
+    info!(
+        "4. Carbon copy reception and decryption from client1: {}",
+        if carbon_received { "PASS" } else { "FAIL" }
+    );
+    info!(
+        "5. Carbon copy reception and decryption from client2: {}",
+        if carbon_received2 { "PASS" } else { "FAIL" }
+    );
+
+    let overall_assessment = if device_id1 != device_id2
+        && (client1_sees_client2 || client2_sees_client1)
+        && (carbon_received || carbon_received2)
+    {
         "PASSED - Multi-device functionality appears to be working"
     } else if device_id1 != device_id2 {
         "PARTIAL - Devices have unique IDs but carbon functionality is limited"
     } else {
         "FAILED - Core multi-device capability issues detected"
     };
-    
+
     info!("Overall assessment: {}", overall_assessment);
     info!("===============================================\n");
 

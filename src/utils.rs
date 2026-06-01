@@ -1,8 +1,8 @@
 use anyhow::Result;
-use std::io::Write;
+use chrono::{DateTime, Local};
 use log::{LevelFilter, Record};
 use std::fs::OpenOptions;
-use chrono::{DateTime, Local};
+use std::io::Write;
 
 // This file contains utility functions that assist with various tasks in the application, such as formatting messages and handling errors.
 
@@ -32,9 +32,9 @@ impl log::Log for SimpleLogger {
             let now: DateTime<Local> = Local::now();
             // Enhanced logging format to include source file and line number for better debugging
             let log_message = format!(
-                "[{}] {} [{}:{}] {}\n", 
-                now.format("%Y-%m-%d %H:%M:%S"), 
-                record.level(), 
+                "[{}] {} [{}:{}] {}\n",
+                now.format("%Y-%m-%d %H:%M:%S"),
+                record.level(),
                 record.file().unwrap_or("unknown"),
                 record.line().unwrap_or(0),
                 record.args()
@@ -61,7 +61,6 @@ impl log::Log for SimpleLogger {
     }
 }
 
-
 /// Read a line of input from stdin, trimming whitespace
 pub fn read_line() -> Result<String> {
     let mut input = String::new();
@@ -71,12 +70,15 @@ pub fn read_line() -> Result<String> {
 
 pub fn setup_logging(log_file: Option<&str>, level: LevelFilter) -> Result<()> {
     let logger = SimpleLogger::new(log_file)?;
-    log::set_boxed_logger(Box::new(logger))
-        .map(|()| log::set_max_level(level))?;
-    
+    log::set_boxed_logger(Box::new(logger)).map(|()| log::set_max_level(level))?;
+
     // Log startup information
     log::info!("Logging initialized at level: {}", level);
-    log::info!("App version: {} (built on {})", env!("CARGO_PKG_VERSION", "unknown"), env!("CARGO_PKG_NAME", "chatterbox"));
-    
+    log::info!(
+        "App version: {} (built on {})",
+        env!("CARGO_PKG_VERSION", "unknown"),
+        env!("CARGO_PKG_NAME", "chatterbox")
+    );
+
     Ok(())
 }

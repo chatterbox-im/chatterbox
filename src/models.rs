@@ -58,7 +58,11 @@ impl PresenceEvent {
     /// Returns `None` for events that should not update the contact list (subscriptions, errors).
     pub fn to_contact_status(&self) -> Option<(String, ContactStatus)> {
         match self {
-            Self::Available { jid, show, idle_since } => {
+            Self::Available {
+                jid,
+                show,
+                idle_since,
+            } => {
                 let is_idle = idle_since.map_or(false, |t| {
                     chrono::Utc::now() - t > chrono::Duration::minutes(5)
                 });
@@ -66,7 +70,9 @@ impl PresenceEvent {
                     ContactStatus::Away
                 } else {
                     match show {
-                        Some(ShowStatus::Away | ShowStatus::Xa | ShowStatus::Dnd) => ContactStatus::Away,
+                        Some(ShowStatus::Away | ShowStatus::Xa | ShowStatus::Dnd) => {
+                            ContactStatus::Away
+                        }
                         _ => ContactStatus::Online,
                     }
                 };
@@ -101,7 +107,11 @@ pub struct Message {
 
 impl Message {
     /// Outgoing encrypted message (OMEMO). Use this for all sent OMEMO messages.
-    pub fn outgoing_encrypted(id: impl Into<String>, recipient: impl Into<String>, content: impl Into<String>) -> Self {
+    pub fn outgoing_encrypted(
+        id: impl Into<String>,
+        recipient: impl Into<String>,
+        content: impl Into<String>,
+    ) -> Self {
         Self {
             id: id.into(),
             sender_id: "me".to_string(),
@@ -114,7 +124,11 @@ impl Message {
     }
 
     /// Outgoing plaintext message. Use this for unencrypted sends.
-    pub fn outgoing_plaintext(id: impl Into<String>, recipient: impl Into<String>, content: impl Into<String>) -> Self {
+    pub fn outgoing_plaintext(
+        id: impl Into<String>,
+        recipient: impl Into<String>,
+        content: impl Into<String>,
+    ) -> Self {
         Self {
             id: id.into(),
             sender_id: "me".to_string(),
@@ -127,7 +141,11 @@ impl Message {
     }
 
     /// Incoming encrypted message (OMEMO). Use for received OMEMO messages.
-    pub fn incoming_encrypted(id: impl Into<String>, sender: impl Into<String>, content: impl Into<String>) -> Self {
+    pub fn incoming_encrypted(
+        id: impl Into<String>,
+        sender: impl Into<String>,
+        content: impl Into<String>,
+    ) -> Self {
         Self {
             id: id.into(),
             sender_id: sender.into(),
@@ -140,7 +158,11 @@ impl Message {
     }
 
     /// Incoming plaintext message. Use for received unencrypted messages.
-    pub fn incoming_plaintext(id: impl Into<String>, sender: impl Into<String>, content: impl Into<String>) -> Self {
+    pub fn incoming_plaintext(
+        id: impl Into<String>,
+        sender: impl Into<String>,
+        content: impl Into<String>,
+    ) -> Self {
         Self {
             id: id.into(),
             sender_id: sender.into(),
@@ -166,7 +188,13 @@ impl Message {
     }
 
     /// Delivery status update message (echoed back to UI to update status display).
-    pub fn delivery_update(id: impl Into<String>, recipient: impl Into<String>, content: impl Into<String>, status: DeliveryStatus, encrypted: bool) -> Self {
+    pub fn delivery_update(
+        id: impl Into<String>,
+        recipient: impl Into<String>,
+        content: impl Into<String>,
+        status: DeliveryStatus,
+        encrypted: bool,
+    ) -> Self {
         Self {
             id: id.into(),
             sender_id: "me".to_string(),
@@ -194,7 +222,7 @@ pub enum DeliveryStatus {
     Sending = 1,   // Message is being sent
     Sent = 2,      // Successfully sent to server
     Stored = 3,    // Stored on server (offline message)
-    Delivered = 4, // Delivered to recipient's device 
+    Delivered = 4, // Delivered to recipient's device
     Read = 5,      // Read by recipient
     Failed = 6,    // Failed to send
 }

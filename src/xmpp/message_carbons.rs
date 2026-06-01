@@ -4,10 +4,10 @@
 use anyhow::{anyhow, Result};
 use log::{debug, error, info, warn};
 
-use xmpp_parsers::Element;
-use crate::models::{Message, DeliveryStatus};
 use super::custom_ns;
+use crate::models::{DeliveryStatus, Message};
 use base64::Engine;
+use xmpp_parsers::Element;
 
 /// Implementation of XEP-0280 Message Carbons
 impl super::XMPPClient {
@@ -23,7 +23,10 @@ impl super::XMPPClient {
             }
             Err(e) => {
                 error!("Failed to enable message carbons: {}", e);
-                Err(anyhow!("Server rejected message carbons enable request: {}", e))
+                Err(anyhow!(
+                    "Server rejected message carbons enable request: {}",
+                    e
+                ))
             }
         }
     }
@@ -40,7 +43,10 @@ impl super::XMPPClient {
             }
             Err(e) => {
                 // Soft failure — assume success on timeout
-                warn!("Failed to disable message carbons ({}), assuming success", e);
+                warn!(
+                    "Failed to disable message carbons ({}), assuming success",
+                    e
+                );
                 self.set_carbons_enabled(false);
                 Ok(true)
             }
@@ -85,70 +91,82 @@ impl super::XMPPClient {
     pub async fn process_carbon(&self, stanza: &xmpp_parsers::Element) -> Result<()> {
         // Process carbon copy of a message (sent or received from another client)
         debug!("Processing message carbon");
-        
+
         // Check if it's a sent or received carbon
         let is_sent = stanza.has_child("sent", custom_ns::CARBONS);
         let is_received = stanza.has_child("received", custom_ns::CARBONS);
-        
+
         if !is_sent && !is_received {
             return Err(anyhow!("Not a valid carbon message"));
         }
-        
+
         let carbon_type = if is_sent { "sent" } else { "received" };
         debug!("Carbon type: {}", carbon_type);
-        
-        let carbon_element = stanza.get_child(carbon_type, custom_ns::CARBONS)
+
+        let carbon_element = stanza
+            .get_child(carbon_type, custom_ns::CARBONS)
             .ok_or_else(|| anyhow!("Missing {} element in carbon", carbon_type))?;
-        
+
         // Extract the forwarded message
-        let forwarded = carbon_element.get_child("forwarded", custom_ns::FORWARD)
+        let forwarded = carbon_element
+            .get_child("forwarded", custom_ns::FORWARD)
             .ok_or_else(|| anyhow!("Missing forwarded element in carbon"))?;
-        
-        let message = forwarded.get_child("message", "jabber:client")
+
+        let message = forwarded
+            .get_child("message", "jabber:client")
             .ok_or_else(|| anyhow!("Missing message element in forwarded carbon"))?;
-        
+
         // Log message attributes without using debug formatting
-        debug!("Carbon message from: {}, to: {}", 
-               message.attr("from").unwrap_or("unknown"),
-               message.attr("to").unwrap_or("unknown"));
-               
+        debug!(
+            "Carbon message from: {}, to: {}",
+            message.attr("from").unwrap_or("unknown"),
+            message.attr("to").unwrap_or("unknown")
+        );
+
         for child in message.children() {
             debug!("Carbon message child: {}", child.name());
         }
-        
+
         // Check if this is an OMEMO encrypted message
         if message.has_child("encrypted", custom_ns::OMEMO) {
             debug!("Carbon contains an OMEMO encrypted message");
             return self.process_carbon_omemo(message, is_sent).await;
         }
-        
+
         // Extract message details
-        let from = message.attr("from").ok_or_else(|| anyhow!("No from attribute in carbon message"))?;
-        let to = message.attr("to").ok_or_else(|| anyhow!("No to attribute in carbon message"))?;
-        
+        let from = message
+            .attr("from")
+            .ok_or_else(|| anyhow!("No from attribute in carbon message"))?;
+        let to = message
+            .attr("to")
+            .ok_or_else(|| anyhow!("No to attribute in carbon message"))?;
+
         // Get the body element - look for it with namespace "" or "jabber:client"
         let body_text = match message.get_child("body", "") {
             Some(body_elem) => {
                 debug!("Found body element with empty namespace");
                 body_elem.text()
-            },
+            }
             None => match message.get_child("body", "jabber:client") {
                 Some(body_elem) => {
                     debug!("Found body element with jabber:client namespace");
                     body_elem.text()
-                },
+                }
                 None => {
                     // Empty body is allowed, but first check if this is a receipt or chat state
                     if message.has_child("received", custom_ns::RECEIPTS) {
                         if let Some(receipt) = message.get_child("received", custom_ns::RECEIPTS) {
                             if let Some(receipt_id) = receipt.attr("id") {
-                                debug!("Carbon contains delivery receipt for message ID: {}", receipt_id);
+                                debug!(
+                                    "Carbon contains delivery receipt for message ID: {}",
+                                    receipt_id
+                                );
                                 // Process the receipt if needed
                                 return Ok(());
                             }
                         }
                     }
-                    
+
                     // Check for chat states
                     for state in &["active", "composing", "paused", "inactive", "gone"] {
                         if message.has_child(state, custom_ns::CHATSTATES) {
@@ -157,7 +175,7 @@ impl super::XMPPClient {
                             return Ok(());
                         }
                     }
-                    
+
                     // Search through all children for a body element regardless of namespace
                     for child in message.children() {
                         if child.name() == "body" {
@@ -167,38 +185,64 @@ impl super::XMPPClient {
                                 return Ok(());
                             }
                             let body = child.text();
-                            debug!("Carbon message {}-> {} ({}): {}", 
+                            debug!(
+                                "Carbon message {}-> {} ({}): {}",
                                 if is_sent { "sent " } else { "received " },
-                                to, from, body);
-                            return self.send_carbon_to_ui(from, to, is_sent, message.attr("id"), body, false).await;
+                                to,
+                                from,
+                                body
+                            );
+                            return self
+                                .send_carbon_to_ui(
+                                    from,
+                                    to,
+                                    is_sent,
+                                    message.attr("id"),
+                                    body,
+                                    false,
+                                )
+                                .await;
                         }
                     }
-                    
+
                     // If we get here, it's some other kind of message we don't specifically handle
                     debug!("Carbon contains empty-body message of unknown type");
                     return Ok(());
                 }
-            }
+            },
         };
-        
+
         // Only reaches here if we found a body in one of the first two checks
-        debug!("Carbon message {}-> {} ({}): {}", 
+        debug!(
+            "Carbon message {}-> {} ({}): {}",
             if is_sent { "sent " } else { "received " },
-            to, from, body_text);
-        
-        self.send_carbon_to_ui(from, to, is_sent, message.attr("id"), body_text, false).await
+            to,
+            from,
+            body_text
+        );
+
+        self.send_carbon_to_ui(from, to, is_sent, message.attr("id"), body_text, false)
+            .await
     }
-    
+
     /// Process an OMEMO encrypted carbon message
-        async fn process_carbon_omemo(&self, message: &xmpp_parsers::Element, is_sent: bool) -> Result<()> {
+    async fn process_carbon_omemo(
+        &self,
+        message: &xmpp_parsers::Element,
+        is_sent: bool,
+    ) -> Result<()> {
         debug!("Processing OMEMO encrypted carbon message");
-        
+
         // Extract message details
-        let from = message.attr("from").ok_or_else(|| anyhow!("No from attribute in carbon message"))?;
-        let to = message.attr("to").ok_or_else(|| anyhow!("No to attribute in carbon message"))?;
-        
+        let from = message
+            .attr("from")
+            .ok_or_else(|| anyhow!("No from attribute in carbon message"))?;
+        let to = message
+            .attr("to")
+            .ok_or_else(|| anyhow!("No to attribute in carbon message"))?;
+
         debug!("Carbon OMEMO message from: {},: to:: {}", from, to);
-        
+
         // Get the OMEMO manager
         let omemo_manager = match self.omemo_manager.clone() {
             Some(m) => m,
@@ -207,11 +251,12 @@ impl super::XMPPClient {
                 return Err(anyhow!("OMEMO manager not initialized"));
             }
         };
-        
+
         // Extract the encrypted element
-        let encrypted = message.get_child("encrypted", custom_ns::OMEMO)
+        let encrypted = message
+            .get_child("encrypted", custom_ns::OMEMO)
             .ok_or_else(|| anyhow!("Missing encrypted element in OMEMO carbon message"))?;
-        
+
         // Get the header element which contains keys and other metadata
         let header = match encrypted.get_child("header", custom_ns::OMEMO) {
             Some(h) => h,
@@ -220,7 +265,7 @@ impl super::XMPPClient {
                 return Err(anyhow!("Missing header in OMEMO carbon message"));
             }
         };
-        
+
         // Extract the sender device ID
         let sender_device_id = match header.attr("sid") {
             Some(sid) => match sid.parse::<u32>() {
@@ -235,18 +280,21 @@ impl super::XMPPClient {
                 return Err(anyhow!("Missing sender device ID in header"));
             }
         };
-        
+
         // Get our device ID
         let own_device_id = {
             let manager = omemo_manager.lock().await;
             manager.get_device_id()
         };
-        
-        debug!("OMEMO carbon message from device ID: {}, our device ID: {}", sender_device_id, own_device_id);
-        
+
+        debug!(
+            "OMEMO carbon message from device ID: {}, our device ID: {}",
+            sender_device_id, own_device_id
+        );
+
         // Extract encrypted keys
         let mut encrypted_keys = std::collections::HashMap::new();
-        
+
         for key_elem in header.children().filter(|n| n.name() == "key") {
             if let Some(rid_str) = key_elem.attr("rid") {
                 match rid_str.parse::<u32>() {
@@ -256,13 +304,13 @@ impl super::XMPPClient {
                             Ok(key_bytes) => {
                                 debug!("Found encrypted key for device ID: {}", recipient_id);
                                 encrypted_keys.insert(recipient_id, key_bytes);
-                            },
+                            }
                             Err(e) => {
                                 debug!("Failed to decode key for device {}: {}", rid_str, e);
                                 // Continue with other keys
                             }
                         }
-                    },
+                    }
                     Err(e) => {
                         debug!("Invalid recipient ID: {}", e);
                         // Continue with other keys
@@ -270,13 +318,20 @@ impl super::XMPPClient {
                 }
             }
         }
-        
+
         // If the sender device is our own device, this is a sent carbon echo — skip decryption
         if sender_device_id == own_device_id {
-            debug!("Skipping decryption of our own sent carbon (device {})", sender_device_id);
-            let msg_id = message.attr("id").map(|s| s.to_string()).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            debug!(
+                "Skipping decryption of our own sent carbon (device {})",
+                sender_device_id
+            );
+            let msg_id = message
+                .attr("id")
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
             let recipient_jid = to.split('/').next().unwrap_or(to).to_string();
-            let mut ui_message = Message::outgoing_encrypted(msg_id, recipient_jid, "[Sent encrypted message]");
+            let mut ui_message =
+                Message::outgoing_encrypted(msg_id, recipient_jid, "[Sent encrypted message]");
             ui_message.delivery_status = DeliveryStatus::Delivered;
             if let Err(e) = self.msg_tx.send(ui_message).await {
                 error!("Failed to send own-carbon placeholder to UI: {}", e);
@@ -285,15 +340,27 @@ impl super::XMPPClient {
         }
 
         if !encrypted_keys.contains_key(&own_device_id) {
-            debug!("No key found for our device ID {} in carbon message", own_device_id);
-            return self.send_carbon_to_ui(
-                from, to, is_sent, message.attr("id"),
-                "[Message from another device - not encrypted for this device]", true,
-            ).await;
+            debug!(
+                "No key found for our device ID {} in carbon message",
+                own_device_id
+            );
+            return self
+                .send_carbon_to_ui(
+                    from,
+                    to,
+                    is_sent,
+                    message.attr("id"),
+                    "[Message from another device - not encrypted for this device]",
+                    true,
+                )
+                .await;
         }
-        
+
         // Get IV (initialization vector)
-        let iv = match header.get_child("iv", custom_ns::OMEMO).or_else(|| header.get_child("iv", "")) {
+        let iv = match header
+            .get_child("iv", custom_ns::OMEMO)
+            .or_else(|| header.get_child("iv", ""))
+        {
             Some(iv_elem) => {
                 let iv_base64 = iv_elem.text();
                 match base64::engine::general_purpose::STANDARD.decode(iv_base64) {
@@ -303,16 +370,19 @@ impl super::XMPPClient {
                         return Err(anyhow!("Failed to decode IV: {}", e));
                     }
                 }
-            },
+            }
             None => {
                 error!("Missing IV in carbon OMEMO header");
                 return Err(anyhow!("Missing IV in header"));
             }
         };
-        
+
         // Get the payload (encrypted message content)
         // Key-transport messages (no payload) are valid but contain no visible content
-        let payload = match encrypted.get_child("payload", custom_ns::OMEMO).or_else(|| encrypted.get_child("payload", "")) {
+        let payload = match encrypted
+            .get_child("payload", custom_ns::OMEMO)
+            .or_else(|| encrypted.get_child("payload", ""))
+        {
             Some(payload_elem) => {
                 let payload_base64 = payload_elem.text();
                 match base64::engine::general_purpose::STANDARD.decode(payload_base64) {
@@ -322,13 +392,13 @@ impl super::XMPPClient {
                         return Err(anyhow!("Failed to decode payload: {}", e));
                     }
                 }
-            },
+            }
             None => {
                 debug!("Key-transport OMEMO carbon message (no payload) - skipping");
                 return Ok(());
             }
         };
-        
+
         // Determine the bare JID of the sender
         let sender_jid = if is_sent {
             // For sent carbons, we are the sender
@@ -337,35 +407,41 @@ impl super::XMPPClient {
             // For received carbons, the other party is the sender
             from.split('/').next().unwrap_or(from).to_string()
         };
-        
+
         debug!("Decrypting carbon from sender JID: {}", sender_jid);
-        
+
         // Now we need to decrypt the message using the OMEMO manager
         let decrypted_content = {
             let mut manager = omemo_manager.lock().await;
-            
-            debug!("Decrypting OMEMO carbon message from {}:{}", sender_jid, sender_device_id);
-            
+
+            debug!(
+                "Decrypting OMEMO carbon message from {}:{}",
+                sender_jid, sender_device_id
+            );
+
             // Get the encrypted key for our device
             let _encrypted_key = encrypted_keys.get(&own_device_id).unwrap().clone();
-            
+
             // Create an OMEMO message structure with the parts we extracted
             let omemo_message = crate::omemo::protocol::OmemoMessage {
                 sender_device_id,
                 ratchet_key: vec![], // This will be handled by the session
-                previous_counter: 0,  // This will be handled by the session
-                counter: 0,           // This will be handled by the session
+                previous_counter: 0, // This will be handled by the session
+                counter: 0,          // This will be handled by the session
                 ciphertext: payload,
                 mac: vec![], // The MAC will be verified by the session
                 iv,
                 encrypted_keys,
-                is_prekey: false,     // Will be determined by session state
-                ephemeral_key: None,  // Will be extracted from XML if present
+                is_prekey: false,    // Will be determined by session state
+                ephemeral_key: None, // Will be extracted from XML if present
                 prekey_devices: std::collections::HashSet::new(),
             };
-            
+
             // Try to decrypt the message
-            match manager.decrypt_message(&sender_jid, sender_device_id, &omemo_message).await {
+            match manager
+                .decrypt_message(&sender_jid, sender_device_id, &omemo_message)
+                .await
+            {
                 Ok(content) => content,
                 Err(e) => {
                     error!("Failed to decrypt OMEMO carbon message: {}", e);
@@ -373,10 +449,18 @@ impl super::XMPPClient {
                 }
             }
         };
-        
+
         debug!("Successfully decrypted OMEMO carbon message");
-        
-        self.send_carbon_to_ui(from, to, is_sent, message.attr("id"), decrypted_content, true).await
+
+        self.send_carbon_to_ui(
+            from,
+            to,
+            is_sent,
+            message.attr("id"),
+            decrypted_content,
+            true,
+        )
+        .await
     }
 }
 
@@ -390,7 +474,11 @@ mod tests {
             .attr("from", from)
             .attr("to", "me@server.example")
             .attr("id", "orig-id-1")
-            .append(Element::builder("body", "jabber:client").append(body).build())
+            .append(
+                Element::builder("body", "jabber:client")
+                    .append(body)
+                    .build(),
+            )
             .build();
 
         let forwarded = Element::builder("forwarded", custom_ns::FORWARD)
@@ -413,7 +501,11 @@ mod tests {
             .attr("from", "me@server.example/other-device")
             .attr("to", to)
             .attr("id", "orig-id-2")
-            .append(Element::builder("body", "jabber:client").append(body).build())
+            .append(
+                Element::builder("body", "jabber:client")
+                    .append(body)
+                    .build(),
+            )
             .build();
 
         let forwarded = Element::builder("forwarded", custom_ns::FORWARD)
@@ -473,7 +565,11 @@ mod tests {
     fn test_non_carbon_message_not_detected() {
         let stanza = Element::builder("message", "jabber:client")
             .attr("from", "bob@example.com")
-            .append(Element::builder("body", "jabber:client").append("plain msg").build())
+            .append(
+                Element::builder("body", "jabber:client")
+                    .append("plain msg")
+                    .build(),
+            )
             .build();
         assert!(!stanza.has_child("sent", custom_ns::CARBONS));
         assert!(!stanza.has_child("received", custom_ns::CARBONS));

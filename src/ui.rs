@@ -4,25 +4,29 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use log::info;  // Add the log import
 use log::debug; // Add the debug import
+use log::info; // Add the log import
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, List, ListItem, Paragraph, Clear, ListState},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
     Frame,
 };
-use std::{io, time::Duration, collections::{HashMap, HashSet}};
+use std::{
+    collections::{HashMap, HashSet},
+    io,
+    time::Duration,
+};
+use textwrap::wrap;
 use tui_input::{backend::crossterm::EventHandler, Input};
 use uuid::Uuid;
-use textwrap::wrap;
 
 // Use the new Message type from the models module and TypingStatus from xmpp
-use chatterbox::models::{Message, DeliveryStatus, ContactStatus};
+use chatterbox::models::{ContactStatus, DeliveryStatus, Message};
 use chatterbox::xmpp::chat_states::TypingStatus;
 
 // Export types needed by main module
-pub use ratatui::Terminal;
 pub use ratatui::backend::CrosstermBackend;
+pub use ratatui::Terminal;
 
 pub struct ChatUI {
     pub messages: Vec<Message>, // Make messages public so it can be accessed from main.rs
@@ -41,9 +45,9 @@ pub struct ChatUI {
     device_fingerprints_dialog: Option<DeviceFingerprintsDialog>, // Add this field for device fingerprints popup
     friend_request_notification: Option<FriendRequestNotification>, // Add this field for friend request notifications
     resources: HashMap<String, Vec<String>>, // Map of base JID -> resource JIDs
-    connection_status: bool, // Track XMPP server connection status
+    connection_status: bool,                 // Track XMPP server connection status
     message_scroll_offset: Option<usize>, // None = auto-scroll to bottom, Some(n) = n lines scrolled up from bottom
-    unread_contacts: HashSet<String>, // Contacts with unread messages
+    unread_contacts: HashSet<String>,     // Contacts with unread messages
     pub history_loaded_contacts: HashSet<String>, // Contacts whose history has been loaded
 }
 
@@ -57,12 +61,12 @@ struct KeyConfirmation {
 // Add this new struct for the add contact dialog
 struct ContactAddDialog {
     input: Input,
-    server_domain: String,  // Store the current server's domain for username-only JIDs
+    server_domain: String, // Store the current server's domain for username-only JIDs
 }
 
 // Add this new struct for contact removal confirmation
 struct ContactRemoveDialog {
-    contact: String,  // The contact to be removed
+    contact: String, // The contact to be removed
 }
 
 // Add this new struct for help dialog
@@ -76,12 +80,12 @@ struct DeviceFingerprintsDialog {
     current_device_id: Option<String>,
     contact_jid: Option<String>,
     contact_fingerprints: Vec<(String, String)>, // (Device ID, Fingerprint) for active contact
-    scroll_offset: usize, // For scrolling when content exceeds dialog height
+    scroll_offset: usize,                        // For scrolling when content exceeds dialog height
 }
 
 // Add this new struct for friend request notification
 struct FriendRequestNotification {
-    contact: String,  // The contact that was automatically accepted
+    contact: String, // The contact that was automatically accepted
     timestamp: chrono::DateTime<chrono::Utc>, // When the notification was created (for auto-dismiss)
 }
 
@@ -101,17 +105,17 @@ impl ChatUI {
             current_contact_index: 0,
             contact_status: HashMap::new(),
             typing_states: HashMap::new(),
-            omemo_enabled: true, // Default to enabled
-            key_confirmation: None, // Initialize to None
-            contact_add_dialog: None, // Initialize to None
-            contact_remove_dialog: None, // Initialize to None
-            help_dialog: None, // Initialize to None
-            device_fingerprints_dialog: None, // Initialize to None
-            friend_request_notification: None, // Initialize to None
-            resources: HashMap::new(), // Initialize resources map
-            connection_status: false, // Initialize connection status to disconnected
-            message_scroll_offset: None, // Auto-scroll to bottom by default
-            unread_contacts: HashSet::new(), // No unread messages initially
+            omemo_enabled: true,                     // Default to enabled
+            key_confirmation: None,                  // Initialize to None
+            contact_add_dialog: None,                // Initialize to None
+            contact_remove_dialog: None,             // Initialize to None
+            help_dialog: None,                       // Initialize to None
+            device_fingerprints_dialog: None,        // Initialize to None
+            friend_request_notification: None,       // Initialize to None
+            resources: HashMap::new(),               // Initialize resources map
+            connection_status: false,                // Initialize connection status to disconnected
+            message_scroll_offset: None,             // Auto-scroll to bottom by default
+            unread_contacts: HashSet::new(),         // No unread messages initially
             history_loaded_contacts: HashSet::new(), // No history loaded yet
         }
     }
@@ -151,12 +155,12 @@ impl ChatUI {
             // Also check for matching content from the same sender within a recent timeframe
             // This helps deduplicate messages that might have different IDs but are the same message
             let recent_threshold = chrono::Utc::now().timestamp() as u64 - 10; // Within last 10 seconds
-            if let Some(idx) = self.messages.iter().position(|m| 
-                m.sender_id == message.sender_id && 
-                m.recipient_id == message.recipient_id &&
-                m.content == message.content &&
-                m.timestamp > recent_threshold) 
-            {
+            if let Some(idx) = self.messages.iter().position(|m| {
+                m.sender_id == message.sender_id
+                    && m.recipient_id == message.recipient_id
+                    && m.content == message.content
+                    && m.timestamp > recent_threshold
+            }) {
                 // It's likely the same message with a different ID, update status
                 let existing = &mut self.messages[idx];
                 // Only update if the new status is "higher" in the delivery chain
@@ -168,7 +172,9 @@ impl ChatUI {
                 }
             } else {
                 // Insert in chronological order by timestamp
-                let insert_pos = self.messages.partition_point(|m| m.timestamp <= message.timestamp);
+                let insert_pos = self
+                    .messages
+                    .partition_point(|m| m.timestamp <= message.timestamp);
                 self.messages.insert(insert_pos, message);
             }
         }
@@ -177,10 +183,13 @@ impl ChatUI {
     pub fn add_contact(&mut self, contact: &str) {
         let base_jid = Self::get_base_jid(contact);
         let resource = Self::get_resource(contact);
-        
+
         // Store the resource if present
         if let Some(res) = resource {
-            let resources = self.resources.entry(base_jid.clone()).or_insert_with(Vec::new);
+            let resources = self
+                .resources
+                .entry(base_jid.clone())
+                .or_insert_with(Vec::new);
             if !resources.contains(&res) {
                 resources.push(res);
             }
@@ -194,9 +203,7 @@ impl ChatUI {
 
     // Get all resources for a given base JID
     pub fn get_resources(&self, base_jid: &str) -> Vec<String> {
-        self.resources.get(base_jid)
-            .cloned()
-            .unwrap_or_default()
+        self.resources.get(base_jid).cloned().unwrap_or_default()
     }
 
     pub fn set_active_contact(&mut self, contact: &str) {
@@ -210,12 +217,17 @@ impl ChatUI {
 
     // Add this method to show key confirmation popup
     /// Shows a popup dialog asking the user to confirm or reject an unrecognized OMEMO key
-    /// 
+    ///
     /// # Arguments
     /// * `contact` - The contact whose key needs confirmation
     /// * `fingerprint` - The fingerprint of the key (should be formatted for display)
     /// * `device_id` - Optional device ID associated with the key
-    pub fn show_key_confirmation(&mut self, contact: &str, fingerprint: &str, device_id: Option<&str>) {
+    pub fn show_key_confirmation(
+        &mut self,
+        contact: &str,
+        fingerprint: &str,
+        device_id: Option<&str>,
+    ) {
         //debug!{"UI: Showing key confirmation for contact: {} with fingerprint {} for device {}", contact, fingerprint, device_id.unwrap_or("N/A")};
         self.key_confirmation = Some(KeyConfirmation {
             contact: contact.to_string(),
@@ -226,7 +238,7 @@ impl ChatUI {
 
     // Add this method to show add contact dialog
     /// Shows a popup dialog for adding a new contact
-    /// 
+    ///
     /// # Arguments
     /// * `server_domain` - The current server's domain for username-only JIDs
     pub fn show_add_contact_dialog(&mut self, server_domain: &str) {
@@ -237,7 +249,7 @@ impl ChatUI {
     }
 
     /// Shows a popup dialog asking the user to confirm contact removal
-    /// 
+    ///
     /// # Arguments
     /// * `contact` - The contact to be removed
     pub fn show_contact_remove_dialog(&mut self, contact: &str) {
@@ -250,9 +262,9 @@ impl ChatUI {
     pub fn show_help_dialog(&mut self) {
         self.help_dialog = Some(HelpDialog {});
     }
-    
+
     /// Shows a dialog displaying all device fingerprints for the current account
-    /// 
+    ///
     /// # Arguments
     /// * `fingerprints` - A vector of tuples containing device ID and fingerprint
     pub fn show_device_fingerprints_dialog(
@@ -273,29 +285,35 @@ impl ChatUI {
     }
 
     /// Shows a non-blocking notification when a friend request is automatically accepted
-    /// 
+    ///
     /// # Arguments
     /// * `contact` - The contact whose request was automatically accepted
     pub fn show_friend_request_notification(&mut self, contact: &str) {
-        debug!("UI: Showing friend request notification for contact: {}", contact);
+        debug!(
+            "UI: Showing friend request notification for contact: {}",
+            contact
+        );
         self.friend_request_notification = Some(FriendRequestNotification {
             contact: contact.to_string(),
             timestamp: chrono::Utc::now(),
         });
-        
+
         // Add a system message about the friend request acceptance
-        self.add_message(Message::system("me", format!("Friend request from {} automatically accepted", contact)));
+        self.add_message(Message::system(
+            "me",
+            format!("Friend request from {} automatically accepted", contact),
+        ));
     }
 
     // Add a helper method to process the entered JID
     fn process_jid_input(&self, input: &str) -> String {
         let input = input.trim();
-        
+
         // If the input already contains @, assume it's a full JID
         if input.contains('@') {
             return input.to_string();
         }
-        
+
         // Otherwise, append the server domain from the dialog
         if let Some(dialog) = &self.contact_add_dialog {
             // Add the server domain to create a proper JID
@@ -318,22 +336,30 @@ impl ChatUI {
                         match key.code {
                             KeyCode::Char('y') | KeyCode::Char('Y') => {
                                 // Accept the key
-                                let contact = self.key_confirmation.as_ref().unwrap().contact.clone();
+                                let contact =
+                                    self.key_confirmation.as_ref().unwrap().contact.clone();
                                 self.key_confirmation = None;
-                                
+
                                 // Add system message about key acceptance
-                                self.add_message(Message::system("me", format!("OMEMO key for {} has been accepted", contact)));
-                                
+                                self.add_message(Message::system(
+                                    "me",
+                                    format!("OMEMO key for {} has been accepted", contact),
+                                ));
+
                                 return Ok(Some((contact, String::from("__KEY_ACCEPTED__"))));
                             }
                             KeyCode::Char('n') | KeyCode::Char('N') => {
                                 // Reject the key
-                                let contact = self.key_confirmation.as_ref().unwrap().contact.clone();
+                                let contact =
+                                    self.key_confirmation.as_ref().unwrap().contact.clone();
                                 self.key_confirmation = None;
-                                
+
                                 // Add system message about key rejection
-                                self.add_message(Message::system("me", format!("OMEMO key for {} has been rejected", contact)));
-                                
+                                self.add_message(Message::system(
+                                    "me",
+                                    format!("OMEMO key for {} has been rejected", contact),
+                                ));
+
                                 return Ok(Some((contact, String::from("__KEY_REJECTED__"))));
                             }
                             _ => {} // Ignore other keys when popup is active
@@ -343,7 +369,7 @@ impl ChatUI {
             }
             return Ok(None);
         }
-        
+
         // Handle contact remove confirmation dialog if active
         if let Some(dialog) = &self.contact_remove_dialog {
             if event::poll(Duration::from_millis(10))? {
@@ -354,19 +380,28 @@ impl ChatUI {
                                 // Confirm contact removal
                                 let contact = dialog.contact.clone();
                                 self.contact_remove_dialog = None;
-                                
+
                                 // Add system message about the removal
-                                self.add_message(Message::system("me", format!("Removing contact {}...", contact)));
-                                
-                                return Ok(Some((contact, String::from("__REMOVE_CONTACT_CONFIRMED__"))));
+                                self.add_message(Message::system(
+                                    "me",
+                                    format!("Removing contact {}...", contact),
+                                ));
+
+                                return Ok(Some((
+                                    contact,
+                                    String::from("__REMOVE_CONTACT_CONFIRMED__"),
+                                )));
                             }
                             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                                 // Cancel contact removal
                                 self.contact_remove_dialog = None;
-                                
+
                                 // Add system message about cancellation
-                                self.add_message(Message::system("me", "Contact removal cancelled"));
-                                
+                                self.add_message(Message::system(
+                                    "me",
+                                    "Contact removal cancelled",
+                                ));
+
                                 return Ok(None);
                             }
                             _ => {} // Ignore other keys when dialog is active
@@ -376,7 +411,7 @@ impl ChatUI {
             }
             return Ok(None);
         }
-        
+
         // Handle contact add dialog if active
         if let Some(dialog) = &self.contact_add_dialog {
             if event::poll(Duration::from_millis(10))? {
@@ -394,22 +429,25 @@ impl ChatUI {
                                 if !input.is_empty() {
                                     // Get the input before closing the dialog
                                     let input_str = input.to_string();
-                                    
+
                                     // Close the dialog
                                     self.contact_add_dialog = None;
-                                    
+
                                     // Process the input (add domain if needed)
                                     let contact_jid = self.process_jid_input(&input_str);
-                                    
+
                                     // Return the new contact JID to be added
-                                    return Ok(Some((contact_jid, String::from("__ADD_CONTACT__"))));
+                                    return Ok(Some((
+                                        contact_jid,
+                                        String::from("__ADD_CONTACT__"),
+                                    )));
                                 }
                             }
                             _ => {
                                 // Create a new dialog with the updated input
                                 let mut new_input = dialog.input.clone();
                                 new_input.handle_event(&Event::Key(key));
-                                
+
                                 // Update the dialog with the modified input
                                 self.contact_add_dialog = Some(ContactAddDialog {
                                     input: new_input,
@@ -478,29 +516,40 @@ impl ChatUI {
                     match key.code {
                         KeyCode::Esc => return Ok(Some((String::new(), String::new()))), // Signal to quit
                         KeyCode::Enter => {
-                            if !self.input.value().is_empty() {   
+                            if !self.input.value().is_empty() {
                                 let message_content = self.input.value().to_string();
                                 let recipient_jid = self.contact.clone();
-                                
+
                                 // Clear input field immediately
                                 self.input = Input::default();
-                                
+
                                 // When creating a new message:
                                 let message = if self.omemo_enabled {
-                                    Message::outgoing_encrypted(Uuid::new_v4().to_string(), recipient_jid.clone(), message_content.clone())
+                                    Message::outgoing_encrypted(
+                                        Uuid::new_v4().to_string(),
+                                        recipient_jid.clone(),
+                                        message_content.clone(),
+                                    )
                                 } else {
-                                    Message::outgoing_plaintext(Uuid::new_v4().to_string(), recipient_jid.clone(), message_content.clone())
+                                    Message::outgoing_plaintext(
+                                        Uuid::new_v4().to_string(),
+                                        recipient_jid.clone(),
+                                        message_content.clone(),
+                                    )
                                 };
-                                
+
                                 // Add the message to UI immediately
                                 self.add_message(message);
-                                
+
                                 // Check if we're about to send an encrypted message
                                 if self.omemo_enabled {
                                     info!("UI: Preparing encrypted message for {}", recipient_jid);
                                     // Instead of appending to the message content, add it as a separate flag
                                     info!("UI: Using __VERIFY_KEYS__ prefix in recipient field instead of content");
-                                    return Ok(Some((format!("__VERIFY_KEYS__:{}", recipient_jid), message_content)));
+                                    return Ok(Some((
+                                        format!("__VERIFY_KEYS__:{}", recipient_jid),
+                                        message_content,
+                                    )));
                                 } else {
                                     info!("UI: Sending unencrypted message to {}", recipient_jid);
                                     return Ok(Some((recipient_jid, message_content)));
@@ -513,74 +562,107 @@ impl ChatUI {
                                 Tab::Contacts => Tab::Messages,
                             };
                         }
-                        KeyCode::Char('o') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
+                        KeyCode::Char('o')
+                            if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
+                        {
                             // Toggle OMEMO encryption
                             self.omemo_enabled = !self.omemo_enabled;
-                            
+
                             // Add a system message about the change
                             let status_msg = if self.omemo_enabled {
                                 "OMEMO encryption enabled for this conversation"
                             } else {
                                 "OMEMO encryption disabled for this conversation"
                             };
-                            
+
                             self.add_message(Message::system("me", status_msg));
-                        },
-                        KeyCode::Char('t') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
+                        }
+                        KeyCode::Char('t')
+                            if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
+                        {
                             // Toggle trust for the current contact's OMEMO keys
                             if self.has_active_contact() {
                                 let current_contact = self.contact.clone();
-                                
+
                                 // Request a trust toggle operation from the main app
                                 // We'll use a special message format that will be handled in main.rs
-                                return Ok(Some((current_contact, String::from("__TOGGLE_OMEMO_TRUST__"))));
+                                return Ok(Some((
+                                    current_contact,
+                                    String::from("__TOGGLE_OMEMO_TRUST__"),
+                                )));
                             }
-                        },
-                        KeyCode::Char('a') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
+                        }
+                        KeyCode::Char('a')
+                            if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
+                        {
                             // Show add contact dialog
                             // We'll use the base domain from the current credentials
                             // The server domain will be supplied by main.rs before showing the dialog
                             return Ok(Some((String::new(), String::from("__SHOW_ADD_CONTACT__"))));
-                        },
-                        KeyCode::Char('d') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
+                        }
+                        KeyCode::Char('d')
+                            if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
+                        {
                             // Delete/remove the current contact
                             if self.has_active_contact() {
                                 let current_contact = self.contact.clone();
-                                
+
                                 // Request contact removal from the main app
-                                return Ok(Some((current_contact, String::from("__REMOVE_CONTACT__"))));
+                                return Ok(Some((
+                                    current_contact,
+                                    String::from("__REMOVE_CONTACT__"),
+                                )));
                             }
-                        },
-                        KeyCode::Char('h') | KeyCode::Char('H') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
+                        }
+                        KeyCode::Char('h') | KeyCode::Char('H')
+                            if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
+                        {
                             // Show help dialog
                             self.show_help_dialog();
                             return Ok(None);
-                        },
-                        KeyCode::Char('f') | KeyCode::Char('F') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
-                            return Ok(Some((String::new(), String::from("__SHOW_DEVICE_FINGERPRINTS__"))));
-                        },
-                        KeyCode::Char('m') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
+                        }
+                        KeyCode::Char('f') | KeyCode::Char('F')
+                            if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
+                        {
+                            return Ok(Some((
+                                String::new(),
+                                String::from("__SHOW_DEVICE_FINGERPRINTS__"),
+                            )));
+                        }
+                        KeyCode::Char('m')
+                            if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
+                        {
                             return Ok(Some((String::new(), String::from("__ENABLE_CARBONS__"))));
-                        },
-                        KeyCode::Char('r') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
-                        },
+                        }
+                        KeyCode::Char('r')
+                            if key.modifiers.contains(event::KeyModifiers::CONTROL) => {}
                         // Add test shortcut for friend request notifications (Ctrl+N)
-                        KeyCode::Char('n') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
-                            return Ok(Some((String::new(), String::from("__TEST_FRIEND_REQUEST__"))));
-                        },
+                        KeyCode::Char('n')
+                            if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
+                        {
+                            return Ok(Some((
+                                String::new(),
+                                String::from("__TEST_FRIEND_REQUEST__"),
+                            )));
+                        }
                         KeyCode::Up => {
                             if let Tab::Contacts = self.active_tab {
                                 if !self.contacts.is_empty() {
-                                    self.current_contact_index = 
-                                        (self.current_contact_index + self.contacts.len() - 1) % self.contacts.len();
-                                    let new_contact = self.contacts[self.current_contact_index].clone();
+                                    self.current_contact_index =
+                                        (self.current_contact_index + self.contacts.len() - 1)
+                                            % self.contacts.len();
+                                    let new_contact =
+                                        self.contacts[self.current_contact_index].clone();
                                     let contact_changed = new_contact != self.contact;
                                     self.contact = new_contact;
-                                    
+
                                     // Clear unread status for the newly selected contact
                                     if contact_changed {
                                         self.unread_contacts.remove(&self.contact);
-                                        return Ok(Some((self.contact.clone(), String::from("__CONTACT_CHANGED__"))));
+                                        return Ok(Some((
+                                            self.contact.clone(),
+                                            String::from("__CONTACT_CHANGED__"),
+                                        )));
                                     }
                                 }
                             }
@@ -588,15 +670,20 @@ impl ChatUI {
                         KeyCode::Down => {
                             if let Tab::Contacts = self.active_tab {
                                 if !self.contacts.is_empty() {
-                                    self.current_contact_index = (self.current_contact_index + 1) % self.contacts.len();
-                                    let new_contact = self.contacts[self.current_contact_index].clone();
+                                    self.current_contact_index =
+                                        (self.current_contact_index + 1) % self.contacts.len();
+                                    let new_contact =
+                                        self.contacts[self.current_contact_index].clone();
                                     let contact_changed = new_contact != self.contact;
                                     self.contact = new_contact;
-                                    
+
                                     // Clear unread status for the newly selected contact
                                     if contact_changed {
                                         self.unread_contacts.remove(&self.contact);
-                                        return Ok(Some((self.contact.clone(), String::from("__CONTACT_CHANGED__"))));
+                                        return Ok(Some((
+                                            self.contact.clone(),
+                                            String::from("__CONTACT_CHANGED__"),
+                                        )));
                                     }
                                 }
                             }
@@ -642,7 +729,12 @@ impl ChatUI {
                                             // Move cursor to new position
                                             let steps = cursor - pos;
                                             for _ in 0..steps {
-                                                self.input.handle_event(&Event::Key(crossterm::event::KeyEvent::new(KeyCode::Left, event::KeyModifiers::NONE)));
+                                                self.input.handle_event(&Event::Key(
+                                                    crossterm::event::KeyEvent::new(
+                                                        KeyCode::Left,
+                                                        event::KeyModifiers::NONE,
+                                                    ),
+                                                ));
                                             }
                                         }
                                         KeyCode::Right => {
@@ -660,7 +752,12 @@ impl ChatUI {
                                             }
                                             let steps = pos - cursor;
                                             for _ in 0..steps {
-                                                self.input.handle_event(&Event::Key(crossterm::event::KeyEvent::new(KeyCode::Right, event::KeyModifiers::NONE)));
+                                                self.input.handle_event(&Event::Key(
+                                                    crossterm::event::KeyEvent::new(
+                                                        KeyCode::Right,
+                                                        event::KeyModifiers::NONE,
+                                                    ),
+                                                ));
                                             }
                                         }
                                         _ => {
@@ -686,8 +783,8 @@ impl ChatUI {
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Percentage(20),  // Contacts panel
-                Constraint::Percentage(80),  // Chat panel
+                Constraint::Percentage(20), // Contacts panel
+                Constraint::Percentage(80), // Chat panel
             ])
             .split(size);
 
@@ -695,9 +792,9 @@ impl ChatUI {
         let chat_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Min(5),          // Messages area
-                Constraint::Length(3),       // Input box
-                Constraint::Length(1),       // Help line
+                Constraint::Min(5),    // Messages area
+                Constraint::Length(3), // Input box
+                Constraint::Length(1), // Help line
             ])
             .split(chunks[1]);
 
@@ -713,7 +810,7 @@ impl ChatUI {
                     ContactStatus::Away => "🟠 ",
                     ContactStatus::Offline => "⚪ ",
                 };
-                
+
                 // Get the resources for this contact
                 let resources = self.get_resources(c);
                 let resources_text = if !resources.is_empty() {
@@ -721,7 +818,7 @@ impl ChatUI {
                 } else {
                     String::new()
                 };
-                
+
                 let content = if i == self.current_contact_index {
                     format!("> {}{}{}", status_indicator, c, resources_text)
                 } else {
@@ -736,19 +833,22 @@ impl ChatUI {
             })
             .collect();
 
-        let contacts_list = List::new(contacts)
-            .block(Block::default()
+        let contacts_list = List::new(contacts).block(
+            Block::default()
                 .title("Contacts (Tab to focus)")
                 .borders(Borders::ALL)
                 .border_style(match self.active_tab {
                     Tab::Contacts => Style::default().fg(Color::Yellow),
                     _ => Style::default(),
-                }));
+                }),
+        );
         frame.render_widget(contacts_list, chunks[0]);
 
         // Draw messages (filtered to active contact only)
         let active_contact = &self.contact;
-        let filtered_messages: Vec<&Message> = self.messages.iter()
+        let filtered_messages: Vec<&Message> = self
+            .messages
+            .iter()
             .filter(|m| {
                 if active_contact.is_empty() {
                     return true; // Show all if no contact selected
@@ -756,7 +856,9 @@ impl ChatUI {
                 let sender_base = Self::get_base_jid(&m.sender_id);
                 let recipient_base = Self::get_base_jid(&m.recipient_id);
                 // Show messages from the active contact, or sent to the active contact, or system messages
-                sender_base == *active_contact || recipient_base == *active_contact || m.sender_id == "system"
+                sender_base == *active_contact
+                    || recipient_base == *active_contact
+                    || m.sender_id == "system"
             })
             .collect();
         let filtered_owned: Vec<Message> = filtered_messages.into_iter().cloned().collect();
@@ -777,7 +879,11 @@ impl ChatUI {
         frame.render_widget(input_widget, chat_chunks[1]);
 
         // Draw help line
-        let omemo_status_text = if self.omemo_enabled { "enabled" } else { "disabled" };
+        let omemo_status_text = if self.omemo_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        };
         let omemo_status_style = if self.omemo_enabled {
             Style::default().fg(Color::Green)
         } else {
@@ -785,11 +891,17 @@ impl ChatUI {
         };
 
         let help_spans = vec![
-            Span::styled(" ESC quit | TAB switch | Ctrl+H help | Ctrl+A add | Ctrl+O toggle OMEMO [", Style::default().fg(Color::Gray)),
+            Span::styled(
+                " ESC quit | TAB switch | Ctrl+H help | Ctrl+A add | Ctrl+O toggle OMEMO [",
+                Style::default().fg(Color::Gray),
+            ),
             Span::styled(omemo_status_text, omemo_status_style),
-            Span::styled("] | Ctrl+T trust | Fn+↑/↓ scroll", Style::default().fg(Color::Gray)),
+            Span::styled(
+                "] | Ctrl+T trust | Fn+↑/↓ scroll",
+                Style::default().fg(Color::Gray),
+            ),
         ];
-        
+
         let help = Paragraph::new(Line::from(help_spans));
         frame.render_widget(help, chat_chunks[2]);
 
@@ -807,7 +919,7 @@ impl ChatUI {
         if let Some(key_conf) = &self.key_confirmation {
             draw_key_confirmation(frame, key_conf, size);
         }
-        
+
         // Draw add contact dialog if active
         if let Some(dialog) = &self.contact_add_dialog {
             draw_add_contact_dialog(frame, dialog, size);
@@ -827,10 +939,13 @@ impl ChatUI {
         if let Some(dialog) = &self.device_fingerprints_dialog {
             draw_device_fingerprints_dialog(frame, dialog, size);
         }
-        
+
         // Draw friend request notification if active
         if let Some(notification) = &self.friend_request_notification {
-            info!("UI: Friend request notification is active for contact: {}", notification.contact);
+            info!(
+                "UI: Friend request notification is active for contact: {}",
+                notification.contact
+            );
             draw_friend_request_notification(frame, notification, size);
         } else {
             // This could spam the logs, so it's commented out, but useful for debugging
@@ -841,7 +956,7 @@ impl ChatUI {
     pub fn remove_last_message(&mut self) {
         self.messages.pop();
     }
-    
+
     pub fn clear_messages(&mut self) {
         self.messages.clear();
         self.message_scroll_offset = None;
@@ -852,43 +967,43 @@ impl ChatUI {
         let base_jid = Self::get_base_jid(contact_id);
         self.contact_status.insert(base_jid, status);
     }
-    
+
     pub fn get_contact_status(&self, contact_id: &str) -> ContactStatus {
         // Get status using the base JID
         let base_jid = Self::get_base_jid(contact_id);
-        self.contact_status.get(&base_jid)
+        self.contact_status
+            .get(&base_jid)
             .cloned()
             .unwrap_or(ContactStatus::Offline)
     }
-    
+
     // New methods for typing indicators
     pub fn update_typing_status(&mut self, contact_id: &str, status: TypingStatus) {
         // Store typing status using the base JID
         let base_jid = Self::get_base_jid(contact_id);
-        self.typing_states.insert(
-            base_jid, 
-            (status, chrono::Utc::now())
-        );
+        self.typing_states
+            .insert(base_jid, (status, chrono::Utc::now()));
     }
-    
+
     // Check and clear typing states older than the timeout duration
     pub fn clean_typing_states(&mut self, timeout_secs: i64) {
         let now = chrono::Utc::now();
         let mut to_remove = Vec::new();
-        
+
         for (jid, (status, timestamp)) in &self.typing_states {
             // Only auto-expire Composing and Paused states
-            if (*status == TypingStatus::Composing || *status == TypingStatus::Paused) 
-                && (now - *timestamp).num_seconds() > timeout_secs {
+            if (*status == TypingStatus::Composing || *status == TypingStatus::Paused)
+                && (now - *timestamp).num_seconds() > timeout_secs
+            {
                 to_remove.push(jid.clone());
             }
         }
-        
+
         for jid in to_remove {
             self.typing_states.remove(&jid);
         }
     }
-    
+
     // Reset typing status when a message is received from contact
     pub fn message_received_from(&mut self, contact_id: &str) {
         // When we receive a message, clear any typing status
@@ -901,20 +1016,20 @@ impl ChatUI {
     }
 
     /// Returns whether OMEMO encryption is currently enabled for conversations
-    /// 
+    ///
     /// This setting can be toggled by the user with Ctrl+O
     pub fn is_omemo_enabled(&self) -> bool {
         self.omemo_enabled
     }
 
     /// Set the connection status to the XMPP server
-    /// 
+    ///
     /// # Arguments
     /// * `connected` - true if connected to the XMPP server, false otherwise
     pub fn set_connection_status(&mut self, connected: bool) {
         self.connection_status = connected;
     }
-    
+
     /// Returns whether the client is currently connected to the XMPP server
     pub fn is_connected(&self) -> bool {
         self.connection_status
@@ -931,7 +1046,10 @@ impl ChatUI {
         if let Some(notification) = &self.friend_request_notification {
             let now = chrono::Utc::now();
             if (now - notification.timestamp).num_seconds() > timeout_secs {
-                debug!("UI: Auto-dismissing friend request notification for {}", notification.contact);
+                debug!(
+                    "UI: Auto-dismissing friend request notification for {}",
+                    notification.contact
+                );
                 self.friend_request_notification = None;
             }
         } else {
@@ -942,18 +1060,21 @@ impl ChatUI {
     }
 
     /// Test the friend request notification UI by artificially triggering a notification
-    /// 
+    ///
     /// This is a helper method for testing the UI notification system
     pub fn test_friend_request_notification(&mut self) {
         // Show a test notification
         info!("TEST: Artificially showing friend request notification for test@example.com");
         self.show_friend_request_notification("test@example.com");
-        
+
         // Also add the test contact to the contacts list
         self.add_contact("test@example.com");
-        
+
         // Add a system message to confirm test was triggered
-        self.add_message(Message::system("me", "TEST: Friend request notification triggered manually"));
+        self.add_message(Message::system(
+            "me",
+            "TEST: Friend request notification triggered manually",
+        ));
     }
 }
 
@@ -961,8 +1082,8 @@ fn draw_messages<B: Backend>(f: &mut Frame<B>, messages: &[Message], area: Rect,
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(1),       // Messages
-            Constraint::Length(1),    // Typing indicator
+            Constraint::Min(1),    // Messages
+            Constraint::Length(1), // Typing indicator
         ])
         .split(area);
 
@@ -981,28 +1102,30 @@ fn draw_messages<B: Backend>(f: &mut Frame<B>, messages: &[Message], area: Rect,
 
             // Add encryption indicator based on whether this specific message was encrypted
             let encryption_indicator = if m.encrypted { " 🔒" } else { " ❌" };
-            let prefix = if m.sender_id == "me" || m.sender_id.contains("@") && m.recipient_id != "me" {
-                format!("[{}] You{}: ", timestamp, encryption_indicator)
-            } else if m.sender_id == "system" {
-                format!("[{}] System: ", timestamp)
-            } else {
-                format!("[{}] {}{}: ", timestamp, m.sender_id, encryption_indicator)
-            };
+            let prefix =
+                if m.sender_id == "me" || m.sender_id.contains("@") && m.recipient_id != "me" {
+                    format!("[{}] You{}: ", timestamp, encryption_indicator)
+                } else if m.sender_id == "system" {
+                    format!("[{}] System: ", timestamp)
+                } else {
+                    format!("[{}] {}{}: ", timestamp, m.sender_id, encryption_indicator)
+                };
 
             // Simplified status indicator using ticks clearly
-            let status_indicator = if m.sender_id == "me" || m.sender_id.contains("@") && m.recipient_id != "me" {
-                match m.delivery_status {
-                    DeliveryStatus::Sending => "", // no tick yet
-                    DeliveryStatus::Sent => " ✓",
-                    DeliveryStatus::Delivered => " ✓✓",
-                    DeliveryStatus::Read => " ✓✓✓",
-                    DeliveryStatus::Stored => " 📥",
-                    DeliveryStatus::Failed => " ❌",
-                    DeliveryStatus::Unknown => "",
-                }
-            } else {
-                ""
-            };
+            let status_indicator =
+                if m.sender_id == "me" || m.sender_id.contains("@") && m.recipient_id != "me" {
+                    match m.delivery_status {
+                        DeliveryStatus::Sending => "", // no tick yet
+                        DeliveryStatus::Sent => " ✓",
+                        DeliveryStatus::Delivered => " ✓✓",
+                        DeliveryStatus::Read => " ✓✓✓",
+                        DeliveryStatus::Stored => " 📥",
+                        DeliveryStatus::Failed => " ❌",
+                        DeliveryStatus::Unknown => "",
+                    }
+                } else {
+                    ""
+                };
 
             let full_content = format!("{}{}{}", prefix, m.content, status_indicator);
 
@@ -1017,8 +1140,12 @@ fn draw_messages<B: Backend>(f: &mut Frame<B>, messages: &[Message], area: Rect,
             } else if m.sender_id == "me" {
                 match m.delivery_status {
                     DeliveryStatus::Failed => Style::default().fg(Color::Red),
-                    DeliveryStatus::Delivered | DeliveryStatus::Read => Style::default().fg(Color::Green),
-                    DeliveryStatus::Sent | DeliveryStatus::Sending => Style::default().fg(Color::Blue),
+                    DeliveryStatus::Delivered | DeliveryStatus::Read => {
+                        Style::default().fg(Color::Green)
+                    }
+                    DeliveryStatus::Sent | DeliveryStatus::Sending => {
+                        Style::default().fg(Color::Blue)
+                    }
                     DeliveryStatus::Stored => Style::default().fg(Color::Yellow),
                     _ => Style::default(),
                 }
@@ -1026,20 +1153,24 @@ fn draw_messages<B: Backend>(f: &mut Frame<B>, messages: &[Message], area: Rect,
                 Style::default()
             };
 
-            wrapped_lines.into_iter().map(move |line| {
-                ListItem::new(Text::from(line)).style(style)
-            })
+            wrapped_lines
+                .into_iter()
+                .map(move |line| ListItem::new(Text::from(line)).style(style))
         })
         .collect();
 
     // Add connection status icon to the title
-    let connection_icon = if ui.is_connected() { "🔌 " } else { "❌ " }; 
-    let scroll_indicator = if ui.message_scroll_offset.is_some() { " [scrolled - Fn+End to jump to latest]" } else { "" };
+    let connection_icon = if ui.is_connected() { "🔌 " } else { "❌ " };
+    let scroll_indicator = if ui.message_scroll_offset.is_some() {
+        " [scrolled - Fn+End to jump to latest]"
+    } else {
+        ""
+    };
     let title = format!("{}Messages{}", connection_icon, scroll_indicator);
-    
+
     // Create a ListState to control the scroll position
     let mut list_state = ListState::default();
-    
+
     // Set the selected item based on scroll offset
     if !messages_with_status.is_empty() {
         let last = messages_with_status.len() - 1;
@@ -1049,11 +1180,11 @@ fn draw_messages<B: Backend>(f: &mut Frame<B>, messages: &[Message], area: Rect,
         };
         list_state.select(Some(selected));
     }
-    
+
     let messages_list = List::new(messages_with_status)
         .block(Block::default().borders(Borders::ALL).title(title))
         .highlight_style(Style::default()); // Use default style to make selection invisible
-        
+
     // Render the widget with state to allow scrolling to the selected (last) message
     f.render_stateful_widget(messages_list, chunks[0], &mut list_state);
 }
@@ -1062,31 +1193,33 @@ fn draw_key_confirmation<B: Backend>(f: &mut Frame<B>, key_conf: &KeyConfirmatio
     // Calculate popup size and position (centered)
     let popup_width = 60.min(area.width - 4);
     let popup_height = 10.min(area.height - 4);
-    
+
     let popup_x = (area.width - popup_width) / 2;
     let popup_y = (area.height - popup_height) / 2;
-    
+
     let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
-    
+
     // Create popup with border
     let popup_block = Block::default()
         .title("Unrecognized OMEMO Key")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Yellow));
-    
+
     f.render_widget(Clear, popup_area); // Clear the area first
     f.render_widget(popup_block, popup_area);
-    
+
     // Create inner area for content
     let inner_area = popup_area.inner(&Margin {
         vertical: 1,
         horizontal: 2,
     });
-    
+
     // Format the content
-    let device_info = key_conf.device_id.as_ref()
+    let device_info = key_conf
+        .device_id
+        .as_ref()
         .map_or(String::new(), |id| format!(" (Device ID: {})", id));
-    
+
     let content = vec![
         format!("Contact: {}{}", key_conf.contact, device_info),
         "".to_string(),
@@ -1095,13 +1228,16 @@ fn draw_key_confirmation<B: Backend>(f: &mut Frame<B>, key_conf: &KeyConfirmatio
         "Do you want to accept this key?".to_string(),
         "Press [Y] to accept or [N] to reject".to_string(),
     ];
-    
+
     // Display content as a list
     let content_list = List::new(
-        content.iter().map(|s| ListItem::new(s.as_str())).collect::<Vec<_>>()
+        content
+            .iter()
+            .map(|s| ListItem::new(s.as_str()))
+            .collect::<Vec<_>>(),
     )
     .highlight_style(Style::default().add_modifier(Modifier::BOLD));
-    
+
     f.render_widget(content_list, inner_area);
 }
 
@@ -1109,59 +1245,65 @@ fn draw_add_contact_dialog<B: Backend>(f: &mut Frame<B>, dialog: &ContactAddDial
     // Calculate popup size and position (centered)
     let popup_width = 50.min(area.width - 4);
     let popup_height = 7.min(area.height - 4);
-    
+
     let popup_x = (area.width - popup_width) / 2;
     let popup_y = (area.height - popup_height) / 2;
-    
+
     let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
-    
+
     // Create popup with border
     let popup_block = Block::default()
         .title("Add New Contact")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Yellow));
-    
+
     f.render_widget(Clear, popup_area); // Clear the area first
     f.render_widget(popup_block, popup_area);
-    
+
     // Create inner area for content
     let inner_area = popup_area.inner(&Margin {
         vertical: 1,
         horizontal: 2,
     });
-    
+
     // Split inner area for content and input field
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2),  // Instructions
-            Constraint::Length(3),  // Input field
+            Constraint::Length(2), // Instructions
+            Constraint::Length(3), // Input field
         ])
         .split(inner_area);
-    
+
     // Display instructions
     let instructions = vec![
         "Enter username or full JID (username@domain) of the contact:".to_string(),
-        format!("Server: {} (will be used if only username is entered)", dialog.server_domain),
+        format!(
+            "Server: {} (will be used if only username is entered)",
+            dialog.server_domain
+        ),
     ];
-    
+
     let instructions_list = List::new(
-        instructions.iter().map(|s| ListItem::new(s.as_str())).collect::<Vec<_>>()
+        instructions
+            .iter()
+            .map(|s| ListItem::new(s.as_str()))
+            .collect::<Vec<_>>(),
     );
-    
+
     f.render_widget(instructions_list, chunks[0]);
-    
+
     // Display input field
     let input_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Blue));
-    
+
     let input_widget = Paragraph::new(dialog.input.value())
         .block(input_block)
         .style(Style::default());
-    
+
     f.render_widget(input_widget, chunks[1]);
-    
+
     // Set cursor position in the input field
     f.set_cursor(
         chunks[1].x + dialog.input.cursor() as u16 + 1,
@@ -1169,47 +1311,57 @@ fn draw_add_contact_dialog<B: Backend>(f: &mut Frame<B>, dialog: &ContactAddDial
     );
 }
 
-fn draw_contact_remove_dialog<B: Backend>(f: &mut Frame<B>, dialog: &ContactRemoveDialog, area: Rect) {
+fn draw_contact_remove_dialog<B: Backend>(
+    f: &mut Frame<B>,
+    dialog: &ContactRemoveDialog,
+    area: Rect,
+) {
     // Calculate popup size and position (centered)
-    let popup_width = 60.min(area.width - 4);  // Increased from 50 to 60
-    let popup_height = 8.min(area.height - 4);  // Increased from 6 to 8
-    
+    let popup_width = 60.min(area.width - 4); // Increased from 50 to 60
+    let popup_height = 8.min(area.height - 4); // Increased from 6 to 8
+
     let popup_x = (area.width - popup_width) / 2;
     let popup_y = (area.height - popup_height) / 2;
-    
+
     let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
-    
+
     // Create popup with border
     let popup_block = Block::default()
         .title("Confirm Contact Removal")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Red)); // Use red for warning
-    
+
     f.render_widget(Clear, popup_area); // Clear the area first
     f.render_widget(popup_block, popup_area);
-    
+
     // Create inner area for content
     let inner_area = popup_area.inner(&Margin {
         vertical: 1,
         horizontal: 2,
     });
-    
+
     // Prepare the content
     let content = vec![
-        format!("Are you sure you want to remove contact '{}'?", dialog.contact),
+        format!(
+            "Are you sure you want to remove contact '{}'?",
+            dialog.contact
+        ),
         "".to_string(),
         "This will remove the contact from your roster.".to_string(),
         "This action cannot be undone.".to_string(), // Added extra explanation line
         "".to_string(),
         "Press [Y] to confirm or [N]/[ESC] to cancel".to_string(),
     ];
-    
+
     // Display content as a list
     let content_list = List::new(
-        content.iter().map(|s| ListItem::new(s.as_str())).collect::<Vec<_>>()
+        content
+            .iter()
+            .map(|s| ListItem::new(s.as_str()))
+            .collect::<Vec<_>>(),
     )
     .highlight_style(Style::default().add_modifier(Modifier::BOLD));
-    
+
     f.render_widget(content_list, inner_area);
 }
 
@@ -1217,27 +1369,27 @@ fn draw_help_dialog<B: Backend>(f: &mut Frame<B>, area: Rect) {
     // Calculate popup size and position (centered)
     let popup_width = 80.min(area.width - 4);
     let popup_height = 28.min(area.height - 4);
-    
+
     let popup_x = (area.width - popup_width) / 2;
     let popup_y = (area.height - popup_height) / 2;
-    
+
     let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
-    
+
     // Create popup with border
     let popup_block = Block::default()
         .title("Keyboard Shortcuts")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
-    
+
     f.render_widget(Clear, popup_area); // Clear the area first
     f.render_widget(popup_block, popup_area);
-    
+
     // Create inner area for content
     let inner_area = popup_area.inner(&Margin {
         vertical: 1,
         horizontal: 2,
     });
-    
+
     // Create the shortcuts list
     let shortcuts = vec![
         ("General", ""),
@@ -1245,7 +1397,10 @@ fn draw_help_dialog<B: Backend>(f: &mut Frame<B>, area: Rect) {
         ("Tab", "Switch between Messages and Contacts"),
         ("", ""),
         ("Contacts Navigation", ""),
-        ("↑/↓", "Navigate through contacts (when Contacts tab is active)"),
+        (
+            "↑/↓",
+            "Navigate through contacts (when Contacts tab is active)",
+        ),
         ("", ""),
         ("Contacts Management", ""),
         ("Ctrl+A", "Add a new contact"),
@@ -1257,19 +1412,28 @@ fn draw_help_dialog<B: Backend>(f: &mut Frame<B>, area: Rect) {
         ("Security", ""),
         ("Ctrl+O", "Toggle OMEMO encryption for current conversation"),
         ("Ctrl+T", "Toggle trust for current contact's OMEMO keys"),
-        ("Ctrl+M", "Enable Message Carbons protocol (sync messages between devices)"),
+        (
+            "Ctrl+M",
+            "Enable Message Carbons protocol (sync messages between devices)",
+        ),
         ("Ctrl+F", "Show device fingerprints dialog"),
-        ("Ctrl+R", "Force OMEMO device list re-fetch for active contact"),
+        (
+            "Ctrl+R",
+            "Force OMEMO device list re-fetch for active contact",
+        ),
         ("", ""),
         ("Debug", ""),
-        ("Ctrl+N", "Test friend request notification popup (for debugging)"),
+        (
+            "Ctrl+N",
+            "Test friend request notification popup (for debugging)",
+        ),
         ("", ""),
         ("Help", ""),
         ("Ctrl+H", "Show this help dialog"),
         ("", ""),
         ("Press any key to close this dialog", ""),
     ];
-    
+
     // Convert the shortcuts to ListItems
     let items: Vec<ListItem> = shortcuts
         .iter()
@@ -1283,7 +1447,9 @@ fn draw_help_dialog<B: Backend>(f: &mut Frame<B>, area: Rect) {
                     // Category header
                     ListItem::new(Text::styled(
                         key.to_string(),
-                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
                     ))
                 }
             } else {
@@ -1297,44 +1463,50 @@ fn draw_help_dialog<B: Backend>(f: &mut Frame<B>, area: Rect) {
             }
         })
         .collect();
-    
+
     // Display the shortcuts list
     let shortcuts_list = List::new(items);
     f.render_widget(shortcuts_list, inner_area);
 }
 
-fn draw_device_fingerprints_dialog<B: Backend>(f: &mut Frame<B>, dialog: &DeviceFingerprintsDialog, area: Rect) {
+fn draw_device_fingerprints_dialog<B: Backend>(
+    f: &mut Frame<B>,
+    dialog: &DeviceFingerprintsDialog,
+    area: Rect,
+) {
     // Calculate popup size and position (centered)
     let popup_width = 80.min(area.width - 4);
     // Increase height if we have contact fingerprints
     let base_height = 20u16;
     let extra = if !dialog.contact_fingerprints.is_empty() {
         (dialog.contact_fingerprints.len() as u16 * 3 + 3).min(15)
-    } else { 0 };
+    } else {
+        0
+    };
     let popup_height = (base_height + extra).min(area.height - 4);
-    
+
     let popup_x = (area.width - popup_width) / 2;
     let popup_y = (area.height - popup_height) / 2;
-    
+
     let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
-    
+
     // Create popup with border
     let popup_block = Block::default()
         .title("OMEMO Fingerprints (Up/Down to scroll)")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Blue));
-    
+
     f.render_widget(Clear, popup_area); // Clear the area first
     f.render_widget(popup_block, popup_area);
-    
+
     // Create inner area for content
     let inner_area = popup_area.inner(&Margin {
         vertical: 1,
         horizontal: 2,
     });
-    
+
     let max_width = (inner_area.width as usize).saturating_sub(2);
-    
+
     // Helper function to wrap text
     fn wrap_text(text: &str, width: usize) -> Vec<String> {
         if width == 0 {
@@ -1358,16 +1530,16 @@ fn draw_device_fingerprints_dialog<B: Backend>(f: &mut Frame<B>, dialog: &Device
         }
         result
     }
-    
+
     // Create the fingerprints list with wrapped lines
     let mut fingerprints_content = Vec::new();
-    
+
     // --- Contact devices section ---
     if let Some(contact_jid) = &dialog.contact_jid {
         fingerprints_content.push("─".repeat(40.min(max_width)));
         fingerprints_content.push(format!("Contact fingerprints ({}):", contact_jid));
         fingerprints_content.push("".to_string());
-        
+
         if dialog.contact_fingerprints.is_empty() {
             fingerprints_content.push("No OMEMO keys found for this contact".to_string());
         } else {
@@ -1390,12 +1562,15 @@ fn draw_device_fingerprints_dialog<B: Backend>(f: &mut Frame<B>, dialog: &Device
     // --- Own devices section ---
     fingerprints_content.push("Your OMEMO device fingerprints:".to_string());
     fingerprints_content.push("".to_string());
-    
+
     if dialog.fingerprints.is_empty() {
         fingerprints_content.push("No devices found with OMEMO keys".to_string());
     } else {
         for (device_id, fingerprint) in &dialog.fingerprints {
-            let is_current = dialog.current_device_id.as_ref().map_or(false, |id| id == device_id);
+            let is_current = dialog
+                .current_device_id
+                .as_ref()
+                .map_or(false, |id| id == device_id);
             let device_label = if is_current {
                 format!("Device ID: {} (this device)", device_id)
             } else {
@@ -1414,13 +1589,13 @@ fn draw_device_fingerprints_dialog<B: Backend>(f: &mut Frame<B>, dialog: &Device
             fingerprints_content.push("".to_string());
         }
     }
-    
+
     fingerprints_content.push("Press any key to close".to_string());
-    
+
     // Apply scroll offset
     let start_idx = dialog.scroll_offset;
     let visible_lines = inner_area.height as usize;
-    
+
     // Convert content to ListItems, applying scroll offset
     let items: Vec<ListItem> = fingerprints_content
         .iter()
@@ -1430,86 +1605,96 @@ fn draw_device_fingerprints_dialog<B: Backend>(f: &mut Frame<B>, dialog: &Device
             if s.contains("(this device)") {
                 ListItem::new(Text::styled(
                     s.clone(),
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
                 ))
             } else if s.starts_with("Device ID:") {
-                ListItem::new(Text::styled(
-                    s.clone(),
-                    Style::default().fg(Color::Yellow)
-                ))
+                ListItem::new(Text::styled(s.clone(), Style::default().fg(Color::Yellow)))
             } else if s.starts_with("  ") && s.len() > 10 {
                 // Fingerprint lines (indented)
-                ListItem::new(Text::styled(
-                    s.clone(),
-                    Style::default().fg(Color::Green)
-                ))
+                ListItem::new(Text::styled(s.clone(), Style::default().fg(Color::Green)))
             } else if s.starts_with("Your OMEMO") {
                 ListItem::new(Text::styled(
-                    s.clone(), 
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                    s.clone(),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
                 ))
             } else if s.starts_with("Contact fingerprints") {
                 ListItem::new(Text::styled(
                     s.clone(),
-                    Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::Magenta)
+                        .add_modifier(Modifier::BOLD),
                 ))
             } else if s.starts_with("─") {
                 ListItem::new(Text::styled(
                     s.clone(),
-                    Style::default().fg(Color::DarkGray)
+                    Style::default().fg(Color::DarkGray),
                 ))
             } else {
                 ListItem::new(s.as_str())
             }
         })
         .collect();
-    
+
     // Display the fingerprints list
     let fingerprints_list = List::new(items);
     f.render_widget(fingerprints_list, inner_area);
 }
 
-fn draw_friend_request_notification<B: Backend>(f: &mut Frame<B>, notification: &FriendRequestNotification, area: Rect) {
+fn draw_friend_request_notification<B: Backend>(
+    f: &mut Frame<B>,
+    notification: &FriendRequestNotification,
+    area: Rect,
+) {
     // Calculate popup size and position (top-right corner)
     let popup_width = 40.min(area.width - 4);
     let popup_height = 5.min(area.height - 4);
-    
+
     // Position in top-right corner with some margin
     let popup_x = area.width - popup_width - 2;
     let popup_y = 2;
-    
+
     let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
-    
+
     // Log when rendering (this will help debug if the popup is being drawn)
-    log::info!("UI: Drawing friend request notification popup for contact: {}", notification.contact);
-    
+    log::info!(
+        "UI: Drawing friend request notification popup for contact: {}",
+        notification.contact
+    );
+
     // Create popup with border
     let popup_block = Block::default()
         .title("Friend Request Accepted")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Green));
-    
+
     f.render_widget(Clear, popup_area); // Clear the area first
     f.render_widget(popup_block, popup_area);
-    
+
     // Create inner area for content
     let inner_area = popup_area.inner(&Margin {
         vertical: 1,
         horizontal: 2,
     });
-    
+
     // Format the content
     let content = vec![
         format!("✅ Friend request from {} was", notification.contact),
         "automatically accepted".to_string(),
     ];
-    
+
     // Display content as a list
     let content_list = List::new(
-        content.iter().map(|s| ListItem::new(s.as_str())).collect::<Vec<_>>()
+        content
+            .iter()
+            .map(|s| ListItem::new(s.as_str()))
+            .collect::<Vec<_>>(),
     )
     .style(Style::default().fg(Color::Green));
-    
+
     f.render_widget(content_list, inner_area);
 }
 
@@ -1524,10 +1709,7 @@ pub fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
 
 pub fn restore_terminal(mut terminal: Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
     disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen
-    )?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
     Ok(())
 }

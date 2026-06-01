@@ -1,7 +1,7 @@
 // XEP-0184: Message Delivery Receipts Implementation
 // https://xmpp.org/extensions/xep-0184.html
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use log::{debug, error, info};
 use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
@@ -10,56 +10,51 @@ use uuid::Uuid;
 use xmpp_parsers::message::Message as XMPPMessage;
 use xmpp_parsers::Element;
 
-use crate::models::{Message, DeliveryStatus};
 use super::custom_ns;
-use super::PendingMessage;
 use super::transport::{self, StanzaTx};
+use super::PendingMessage;
+use crate::models::{DeliveryStatus, Message};
 
 /// Handle receipt notification in an incoming message
 pub async fn handle_receipt(
     stanza: &Element,
     pending_receipts: &Arc<TokioMutex<std::collections::HashMap<String, PendingMessage>>>,
-    msg_tx: &tokio::sync::mpsc::Sender<Message>
+    msg_tx: &tokio::sync::mpsc::Sender<Message>,
 ) -> Result<()> {
     // Check if this is a receipt (XEP-0184)
     if let Some(received) = stanza.get_child("received", custom_ns::RECEIPTS) {
         let from = stanza.attr("from").map(|s| s.to_string());
-        
+
         // Extract the message ID that this receipt is for
         if let Some(receipt_id) = received.attr("id") {
-            debug!("Received delivery receipt from {:?} for message ID: {}", from, receipt_id);
-            
+            debug!(
+                "Received delivery receipt from {:?} for message ID: {}",
+                from, receipt_id
+            );
+
             // Process the receipt
             let pending_clone = pending_receipts.clone();
             let msg_tx_clone = msg_tx.clone();
             let receipt_id = receipt_id.to_string();
-            
+
             // Process receipt in a separate task
             tokio::spawn(async move {
-                super::XMPPClient::process_receipt(
-                    msg_tx_clone,
-                    pending_clone,
-                    from,
-                    &receipt_id,
-                ).await;
+                super::XMPPClient::process_receipt(msg_tx_clone, pending_clone, from, &receipt_id)
+                    .await;
             });
-            
+
             return Ok(());
         }
     }
-    
+
     // Not a receipt or missing ID
     Ok(())
 }
 
 /// Send a receipt for a received message
-pub fn send_receipt(
-    stanza_tx: &StanzaTx,
-    from: &str,
-    id: &str
-) -> Result<()> {
+pub fn send_receipt(stanza_tx: &StanzaTx, from: &str, id: &str) -> Result<()> {
     debug!("Sending receipt for message {} to {}", id, from);
-    
+
     // Create receipt stanza
     let receipt = Element::builder("message", "jabber:client")
         .attr("to", from)
@@ -67,21 +62,25 @@ pub fn send_receipt(
         .append(
             Element::builder("received", custom_ns::RECEIPTS)
                 .attr("id", id)
-                .build()
+                .build(),
         )
         .build();
-    
-    transport::send_stanza(stanza_tx, receipt)
-        .map_err(|e| anyhow!("Failed to send receipt: {}", e))
+
+    transport::send_stanza(stanza_tx, receipt).map_err(|e| anyhow!("Failed to send receipt: {}", e))
 }
 
 /// Implementation of XEP-0184 Message Delivery Receipts
 impl super::XMPPClient {
     /// Create an XMPP message with receipt request
-    pub fn create_message(&self, recipient_jid: impl Into<String>, msg_id: String, content: &str) -> XMPPMessage {
+    pub fn create_message(
+        &self,
+        recipient_jid: impl Into<String>,
+        msg_id: String,
+        content: &str,
+    ) -> XMPPMessage {
         // First, check if we need to verify OMEMO keys for this recipient
         let recipient_str = recipient_jid.into();
-        
+
         // Extract the bare JID (remove resource part) for OMEMO checks
         let bare_jid = match recipient_str.parse::<xmpp_parsers::Jid>() {
             Ok(jid) => match jid {
@@ -89,7 +88,7 @@ impl super::XMPPClient {
                     let node = full.node.as_ref().map(|n| n.as_ref()).unwrap_or("");
                     let domain = full.domain.to_string();
                     format!("{}@{}", node, domain)
-                },
+                }
                 xmpp_parsers::Jid::Bare(bare) => bare.to_string(),
             },
             Err(e) => {
@@ -97,21 +96,27 @@ impl super::XMPPClient {
                 "unknown@example.com".to_string()
             }
         };
-        
+
         // Schedule an OMEMO key check in the background
         let client_clone = self.clone();
         let recipient_bare = bare_jid.clone();
         tokio::spawn(async move {
-            debug!("Checking OMEMO keys before sending message to {}", recipient_bare);
-            if let Err(e) = client_clone.check_omemo_keys_for_contact(&recipient_bare).await {
+            debug!(
+                "Checking OMEMO keys before sending message to {}",
+                recipient_bare
+            );
+            if let Err(e) = client_clone
+                .check_omemo_keys_for_contact(&recipient_bare)
+                .await
+            {
                 error!("Failed to check OMEMO keys for {}: {}", recipient_bare, e);
             }
         });
-        
+
         // Continue with regular message creation
         let mut message = XMPPMessage::new(None);
         message.id = Some(msg_id);
-        
+
         // Parse the string into a Jid
         let jid = match recipient_str.parse::<xmpp_parsers::Jid>() {
             Ok(jid) => jid,
@@ -121,20 +126,23 @@ impl super::XMPPClient {
                 "unknown@example.com".parse().unwrap()
             }
         };
-        
+
         message.to = Some(jid);
         message.type_ = xmpp_parsers::message::MessageType::Chat;
-        message.bodies.insert(String::new(), xmpp_parsers::message::Body(content.to_string()));
-        
+        message.bodies.insert(
+            String::new(),
+            xmpp_parsers::message::Body(content.to_string()),
+        );
+
         // Add XEP-0184 receipt request
         let receipt_request = Element::builder("request", custom_ns::RECEIPTS).build();
         message.payloads.push(receipt_request);
-        
+
         // Add a hint for the server to store the message in the archive (XEP-0313)
         // This ensures the message will be available in history later
         let store_hint = Element::builder("store", custom_ns::HINTS).build();
         message.payloads.push(store_hint);
-        
+
         message
     }
 
@@ -151,44 +159,53 @@ impl super::XMPPClient {
                 return Err(anyhow::anyhow!("Invalid recipient JID: {}", e));
             }
         };
-        
+
         let msg_id = Uuid::new_v4().to_string();
-        info!("Preparing to send message to {} with ID: {}", recipient, msg_id);
-        
+        info!(
+            "Preparing to send message to {} with ID: {}",
+            recipient, msg_id
+        );
+
         // Create message
         let message = self.create_message(recipient_jid.clone(), msg_id.clone(), content);
-        
+
         // Add to pending receipts before sending
         {
             let mut pending_receipts = self.pending_receipts.lock().await;
-            pending_receipts.insert(msg_id.clone(), PendingMessage {
-                id: msg_id.clone(),
-                to: recipient.to_string(),
-                timestamp: chrono::Utc::now().timestamp() as u64,
-                status: DeliveryStatus::Sending,
-                content: content.to_string(),
-            });
+            pending_receipts.insert(
+                msg_id.clone(),
+                PendingMessage {
+                    id: msg_id.clone(),
+                    to: recipient.to_string(),
+                    timestamp: chrono::Utc::now().timestamp() as u64,
+                    status: DeliveryStatus::Sending,
+                    content: content.to_string(),
+                },
+            );
         }
-        
+
         // Create and immediately send UI message to show pending message
-        let mut ui_message = Message::outgoing_plaintext(msg_id.clone(), recipient.to_string(), content.to_string());
+        let mut ui_message =
+            Message::outgoing_plaintext(msg_id.clone(), recipient.to_string(), content.to_string());
         ui_message.delivery_status = DeliveryStatus::Sending;
-        
+
         // Send to UI first
         if let Err(e) = self.msg_tx.send(ui_message).await {
             error!("Failed to send message to UI: {}", e);
         }
-        
+
         // Send via transport channel
         match transport::send_stanza(stanza_tx, message.into()) {
             Ok(_) => {
                 info!("Message sent successfully to {}", recipient);
-                self.update_message_status(&msg_id, DeliveryStatus::Sent).await;
+                self.update_message_status(&msg_id, DeliveryStatus::Sent)
+                    .await;
                 Ok(())
             }
             Err(e) => {
                 error!("Failed to send message: {}", e);
-                self.update_message_status(&msg_id, DeliveryStatus::Failed).await;
+                self.update_message_status(&msg_id, DeliveryStatus::Failed)
+                    .await;
                 Err(anyhow::anyhow!("Failed to send message: {}", e))
             }
         }
@@ -200,30 +217,28 @@ impl super::XMPPClient {
             error!("Cannot send receipt: no recipient specified");
             return;
         }
-        
+
         // Create receipt message
         let mut receipt = XMPPMessage::new(None);
-        
+
         // Convert String to Jid for the to field
-        let jid_to = to.map(|to_str| {
-            match to_str.parse::<xmpp_parsers::Jid>() {
-                Ok(jid) => jid,
-                Err(e) => {
-                    error!("Failed to parse JID for receipt: {}", e);
-                    "unknown@example.com".parse().unwrap()
-                }
+        let jid_to = to.map(|to_str| match to_str.parse::<xmpp_parsers::Jid>() {
+            Ok(jid) => jid,
+            Err(e) => {
+                error!("Failed to parse JID for receipt: {}", e);
+                "unknown@example.com".parse().unwrap()
             }
         });
-        
+
         receipt.to = jid_to;
         receipt.id = Some(Uuid::new_v4().to_string());
-        
+
         // Add received element with id attribute
         let received = Element::builder("received", custom_ns::RECEIPTS)
             .attr("id", &msg_id)
             .build();
         receipt.payloads.push(received);
-        
+
         // Send receipt
         debug!("Sending message receipt for ID: {}", msg_id);
         match transport::send_stanza(stanza_tx, receipt.into()) {
@@ -240,7 +255,7 @@ impl super::XMPPClient {
         receipt_id: &str,
     ) {
         debug!("Processing receipt for message ID: {}", receipt_id);
-        
+
         // First try direct match on message ID
         let mut found = false;
         {
@@ -249,7 +264,7 @@ impl super::XMPPClient {
                 found = true;
             }
         }
-        
+
         if found {
             // Update message status directly
             Self::update_tracked_message_status(
@@ -257,15 +272,15 @@ impl super::XMPPClient {
                 receipt_id,
                 DeliveryStatus::Delivered,
                 msg_tx,
-            ).await;
+            )
+            .await;
             return;
         }
-        
+
         // If not found by direct ID, we don't have enough context here
         // to do additional lookup, so just log the event
         debug!("Could not find message for receipt ID: {}", receipt_id);
     }
-
 
     /// Static helper to update message status from background handler
     pub async fn update_tracked_message_status(
@@ -276,23 +291,26 @@ impl super::XMPPClient {
     ) {
         // Update the status in our tracking map
         let pending_message;
-        
+
         {
             let mut pending_receipts_lock = pending_receipts.lock().await;
             if let Some(pending) = pending_receipts_lock.get_mut(msg_id) {
-                info!("Updating message {} status from {:?} to {:?}", msg_id, pending.status, new_status);
+                info!(
+                    "Updating message {} status from {:?} to {:?}",
+                    msg_id, pending.status, new_status
+                );
                 pending.status = new_status.clone();
                 pending_message = Some(pending.clone());
             } else {
                 debug!("Tried to update status for unknown message ID: {}", msg_id);
                 return;
             }
-            
+
             // Remove from tracking once delivered (no longer pending)
             if new_status == DeliveryStatus::Delivered || new_status == DeliveryStatus::Read {
                 pending_receipts_lock.remove(msg_id);
             }
-            
+
             // Evict stale entries older than 1 hour to prevent unbounded growth
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -302,16 +320,25 @@ impl super::XMPPClient {
                 pending_receipts_lock.retain(|_, v| now - v.timestamp < 3600);
             }
         }
-        
+
         // If we found and updated the message, send an update to the UI
         if let Some(pending) = pending_message {
             // Create a new message with the updated status for the UI
-            let ui_message = Message::delivery_update(pending.id.clone(), pending.to.clone(), pending.content.clone(), new_status, false);
-            
+            let ui_message = Message::delivery_update(
+                pending.id.clone(),
+                pending.to.clone(),
+                pending.content.clone(),
+                new_status,
+                false,
+            );
+
             // Send to UI
             match msg_tx.send(ui_message).await {
                 Ok(_) => debug!("Sent message status update to UI from background handler"),
-                Err(e) => error!("Failed to send message status update to UI from background handler: {}", e),
+                Err(e) => error!(
+                    "Failed to send message status update to UI from background handler: {}",
+                    e
+                ),
             }
         }
     }
@@ -320,8 +347,8 @@ impl super::XMPPClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use crate::models::DeliveryStatus;
+    use std::collections::HashMap;
 
     fn make_receipt_stanza(from: &str, receipt_id: &str) -> Element {
         Element::builder("message", "jabber:client")
@@ -340,7 +367,11 @@ mod tests {
             .attr("from", from)
             .attr("to", "me@server.example")
             .attr("id", id)
-            .append(Element::builder("body", "jabber:client").append("Hello").build())
+            .append(
+                Element::builder("body", "jabber:client")
+                    .append("Hello")
+                    .build(),
+            )
             .append(Element::builder("request", custom_ns::RECEIPTS).build())
             .build()
     }
@@ -353,13 +384,16 @@ mod tests {
         // Insert a pending receipt
         {
             let mut p = pending.lock().await;
-            p.insert("msg-42".to_string(), PendingMessage {
-                id: "msg-42".to_string(),
-                to: "alice@example.com".to_string(),
-                content: "Hello".to_string(),
-                timestamp: 1700000000,
-                status: DeliveryStatus::Sending,
-            });
+            p.insert(
+                "msg-42".to_string(),
+                PendingMessage {
+                    id: "msg-42".to_string(),
+                    to: "alice@example.com".to_string(),
+                    content: "Hello".to_string(),
+                    timestamp: 1700000000,
+                    status: DeliveryStatus::Sending,
+                },
+            );
         }
 
         let stanza = make_receipt_stanza("alice@example.com/phone", "msg-42");
@@ -396,7 +430,11 @@ mod tests {
 
         let stanza = Element::builder("message", "jabber:client")
             .attr("from", "bob@example.com")
-            .append(Element::builder("body", "jabber:client").append("hi").build())
+            .append(
+                Element::builder("body", "jabber:client")
+                    .append("hi")
+                    .build(),
+            )
             .build();
 
         let result = handle_receipt(&stanza, &pending, &msg_tx).await;

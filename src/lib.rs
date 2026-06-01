@@ -1,17 +1,17 @@
 // Re-export needed modules for testing
 pub mod models;
-pub mod omemo;  // OMEMO module
+pub mod omemo; // OMEMO module
 pub mod storage; // Local message persistence
-pub mod xmpp;  // Our new modular XMPP implementation
+pub mod xmpp; // Our new modular XMPP implementation
 
 // Re-export main types for convenience
 pub use models::*;
-pub use xmpp::XMPPClient;  // Expose the XMPPClient directly
+pub use xmpp::XMPPClient; // Expose the XMPPClient directly
 
 #[cfg(test)]
 mod tests {
     use super::*;
- 
+
     #[test]
     fn test_credential_manager() {
         // This test is a placeholder since credentials are now handled in the tests directory
@@ -27,34 +27,34 @@ mod tests {
             name: "Online User".to_string(),
             status: ContactStatus::Online,
         };
-        
+
         let offline_contact = Contact {
             id: "user2".to_string(),
             name: "Offline User".to_string(),
             status: ContactStatus::Offline,
         };
-        
+
         let away_contact = Contact {
             id: "user3".to_string(),
             name: "Away User".to_string(),
             status: ContactStatus::Away,
         };
-        
+
         // Verify contact properties
         assert_eq!(online_contact.id, "user1");
         assert_eq!(offline_contact.name, "Offline User");
-        
+
         // We can use pattern matching to check the status
         match online_contact.status {
             ContactStatus::Online => (),
             _ => panic!("Expected Online status"),
         }
-        
+
         match offline_contact.status {
             ContactStatus::Offline => (),
             _ => panic!("Expected Offline status"),
         }
-        
+
         match away_contact.status {
             ContactStatus::Away => (),
             _ => panic!("Expected Away status"),
@@ -73,7 +73,7 @@ mod tests {
             delivery_status: DeliveryStatus::Sending,
             encrypted: false,
         };
-        
+
         // Verify message properties
         assert_eq!(msg.id, "msg123");
         assert_eq!(msg.sender_id, "sender1");
@@ -81,7 +81,7 @@ mod tests {
         assert_eq!(msg.content, "Hello, world!");
         assert_eq!(msg.timestamp, 1650000000);
         assert_eq!(msg.delivery_status, DeliveryStatus::Sending);
-        
+
         // Test different delivery statuses
         let sent_msg = Message {
             id: msg.id.clone(),
@@ -92,7 +92,7 @@ mod tests {
             delivery_status: DeliveryStatus::Sent,
             encrypted: false,
         };
-        
+
         let delivered_msg = Message {
             id: msg.id.clone(),
             sender_id: msg.sender_id.clone(),
@@ -102,7 +102,7 @@ mod tests {
             delivery_status: DeliveryStatus::Delivered,
             encrypted: false,
         };
-        
+
         let read_msg = Message {
             id: msg.id.clone(),
             sender_id: msg.sender_id.clone(),
@@ -112,7 +112,7 @@ mod tests {
             delivery_status: DeliveryStatus::Read,
             encrypted: false,
         };
-        
+
         let failed_msg = Message {
             id: msg.id.clone(),
             sender_id: msg.sender_id.clone(),
@@ -122,7 +122,7 @@ mod tests {
             delivery_status: DeliveryStatus::Failed,
             encrypted: false,
         };
-        
+
         assert_eq!(sent_msg.delivery_status, DeliveryStatus::Sent);
         assert_eq!(delivered_msg.delivery_status, DeliveryStatus::Delivered);
         assert_eq!(read_msg.delivery_status, DeliveryStatus::Read);
@@ -141,7 +141,7 @@ mod tests {
             delivery_status: DeliveryStatus::Sending,
             encrypted: false,
         };
-        
+
         // Test with empty content (should still be valid structurally)
         let empty_content_message = Message {
             id: "msg456".to_string(),
@@ -152,7 +152,7 @@ mod tests {
             delivery_status: DeliveryStatus::Sending,
             encrypted: false,
         };
-        
+
         // Test with very long content
         let long_content = "A".repeat(10000); // 10,000 characters
         let long_content_message = Message {
@@ -164,7 +164,7 @@ mod tests {
             delivery_status: DeliveryStatus::Sending,
             encrypted: false,
         };
-        
+
         // Verify all messages are structurally valid
         assert_eq!(valid_message.id, "msg123");
         assert_eq!(empty_content_message.id, "msg456");
@@ -172,7 +172,7 @@ mod tests {
         assert_eq!(empty_content_message.content.len(), 0);
         assert_eq!(long_content_message.content.len(), 10000);
     }
-    
+
     #[test]
     fn test_timestamp_handling() {
         // Test with current timestamp
@@ -180,7 +180,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .expect("Time went backwards")
             .as_secs();
-        
+
         let current_message = Message {
             id: "msg_current".to_string(),
             sender_id: "sender1".to_string(),
@@ -190,7 +190,7 @@ mod tests {
             delivery_status: DeliveryStatus::Sending,
             encrypted: false,
         };
-        
+
         // Test with past timestamp
         let past_timestamp = current_timestamp - 3600; // 1 hour ago
         let past_message = Message {
@@ -202,7 +202,7 @@ mod tests {
             delivery_status: DeliveryStatus::Sent,
             encrypted: false,
         };
-        
+
         // Verify timestamps are stored correctly
         assert_eq!(current_message.timestamp, current_timestamp);
         assert_eq!(past_message.timestamp, past_timestamp);

@@ -8,19 +8,19 @@
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-    use std::sync::Arc;
-    use tokio::sync::Mutex;
     use anyhow::Result;
     use async_trait::async_trait;
     use base64::Engine;
+    use std::collections::HashMap;
+    use std::sync::Arc;
     use tempfile::TempDir;
+    use tokio::sync::Mutex;
 
-    use crate::omemo::{OmemoPubSub, OmemoManager, OMEMO_NAMESPACE};
     use crate::omemo::device_id::DeviceId;
     use crate::omemo::protocol::X3DHKeyBundle;
     use crate::omemo::storage::OmemoStorage;
     use crate::omemo::wire::PreKeySignalMessage;
+    use crate::omemo::{OmemoManager, OmemoPubSub, OMEMO_NAMESPACE};
 
     /// Mock PubSub that serves pre-configured device lists and bundles.
     struct MockPubSub {
@@ -118,11 +118,23 @@ mod tests {
             }
         }
 
-        async fn publish_item(&self, _to: Option<&str>, _node: &str, _id: &str, _payload: &str) -> Result<()> {
+        async fn publish_item(
+            &self,
+            _to: Option<&str>,
+            _node: &str,
+            _id: &str,
+            _payload: &str,
+        ) -> Result<()> {
             Ok(())
         }
 
-        async fn publish_item_alternative(&self, _to: Option<&str>, _node: &str, _id: &str, _payload: &str) -> Result<()> {
+        async fn publish_item_alternative(
+            &self,
+            _to: Option<&str>,
+            _node: &str,
+            _id: &str,
+            _payload: &str,
+        ) -> Result<()> {
             Ok(())
         }
 
@@ -161,7 +173,8 @@ mod tests {
         let pubsub = Arc::new(MockPubSub::new());
 
         // Create Alice's manager
-        let (mut alice, _alice_dir) = create_manager(alice_jid, alice_device_id, pubsub.clone()).await;
+        let (mut alice, _alice_dir) =
+            create_manager(alice_jid, alice_device_id, pubsub.clone()).await;
 
         // Create Bob's manager to get his keys
         let (bob, _bob_dir) = create_manager(bob_jid, bob_device_id, pubsub.clone()).await;
@@ -179,19 +192,25 @@ mod tests {
         pubsub.add_device_list(alice_jid, &[alice_device_id]).await;
 
         // Alice encrypts a message to Bob
-        let omemo_msg = alice.encrypt_message(bob_jid, "Hello Bob!")
+        let omemo_msg = alice
+            .encrypt_message(bob_jid, "Hello Bob!")
             .await
             .expect("Encryption should succeed");
 
         // Verify: message is marked as PreKey
-        assert!(omemo_msg.is_prekey, "First message should be a PreKey message");
+        assert!(
+            omemo_msg.is_prekey,
+            "First message should be a PreKey message"
+        );
         assert!(
             omemo_msg.prekey_devices.contains(&bob_device_id),
             "Bob's device should be in prekey_devices set"
         );
 
         // Verify: the encrypted key for Bob's device is a valid PreKeySignalMessage
-        let encrypted_key = omemo_msg.encrypted_keys.get(&bob_device_id)
+        let encrypted_key = omemo_msg
+            .encrypted_keys
+            .get(&bob_device_id)
             .expect("Should have encrypted key for Bob's device");
 
         let prekey_msg = PreKeySignalMessage::deserialize(encrypted_key)
@@ -217,7 +236,12 @@ mod tests {
         );
 
         // Verify: identity_key is Alice's (sender's) public identity key
-        let alice_identity_pub = &alice.key_bundle.as_ref().unwrap().identity_key_pair.public_key;
+        let alice_identity_pub = &alice
+            .key_bundle
+            .as_ref()
+            .unwrap()
+            .identity_key_pair
+            .public_key;
         assert_eq!(
             &prekey_msg.identity_key, alice_identity_pub,
             "identity_key should be sender's public identity key"
@@ -243,25 +267,36 @@ mod tests {
         let pubsub = Arc::new(MockPubSub::new());
 
         // Create both managers
-        let (mut alice, _alice_dir) = create_manager(alice_jid, alice_device_id, pubsub.clone()).await;
+        let (mut alice, _alice_dir) =
+            create_manager(alice_jid, alice_device_id, pubsub.clone()).await;
         let (mut bob, _bob_dir) = create_manager(bob_jid, bob_device_id, pubsub.clone()).await;
 
         // Configure mock with device lists and bundles
         pubsub.add_device_list(bob_jid, &[bob_device_id]).await;
         pubsub.add_device_list(alice_jid, &[alice_device_id]).await;
-        pubsub.add_bundle(bob_jid, bob_device_id, bob.key_bundle.as_ref().unwrap()).await;
-        pubsub.add_bundle(alice_jid, alice_device_id, alice.key_bundle.as_ref().unwrap()).await;
+        pubsub
+            .add_bundle(bob_jid, bob_device_id, bob.key_bundle.as_ref().unwrap())
+            .await;
+        pubsub
+            .add_bundle(
+                alice_jid,
+                alice_device_id,
+                alice.key_bundle.as_ref().unwrap(),
+            )
+            .await;
 
         // Alice encrypts
         let plaintext = "Hello Bob, this is a secret message!";
-        let omemo_msg = alice.encrypt_message(bob_jid, plaintext)
+        let omemo_msg = alice
+            .encrypt_message(bob_jid, plaintext)
             .await
             .expect("Encryption should succeed");
 
         assert!(omemo_msg.is_prekey, "First message should be PreKey format");
 
         // Bob decrypts
-        let decrypted = bob.decrypt_message(alice_jid, alice_device_id, &omemo_msg)
+        let decrypted = bob
+            .decrypt_message(alice_jid, alice_device_id, &omemo_msg)
             .await
             .expect("Decryption should succeed");
 
@@ -280,33 +315,43 @@ mod tests {
 
         let pubsub = Arc::new(MockPubSub::new());
 
-        let (mut alice, _alice_dir) = create_manager(alice_jid, alice_device_id, pubsub.clone()).await;
+        let (mut alice, _alice_dir) =
+            create_manager(alice_jid, alice_device_id, pubsub.clone()).await;
         let (bob, _bob_dir) = create_manager(bob_jid, bob_device_id, pubsub.clone()).await;
 
         pubsub.add_device_list(bob_jid, &[bob_device_id]).await;
         pubsub.add_device_list(alice_jid, &[alice_device_id]).await;
-        pubsub.add_bundle(bob_jid, bob_device_id, bob.key_bundle.as_ref().unwrap()).await;
+        pubsub
+            .add_bundle(bob_jid, bob_device_id, bob.key_bundle.as_ref().unwrap())
+            .await;
 
         // First message — establishes session
-        let msg1 = alice.encrypt_message(bob_jid, "First message")
+        let msg1 = alice
+            .encrypt_message(bob_jid, "First message")
             .await
             .expect("First encryption should succeed");
         assert!(msg1.is_prekey, "First message should be PreKey");
 
         // Second message — session already exists, should be regular format
-        let msg2 = alice.encrypt_message(bob_jid, "Second message")
+        let msg2 = alice
+            .encrypt_message(bob_jid, "Second message")
             .await
             .expect("Second encryption should succeed");
 
         // The second message should NOT be a PreKey message
-        assert!(!msg2.is_prekey, "Second message should NOT be PreKey format");
+        assert!(
+            !msg2.is_prekey,
+            "Second message should NOT be PreKey format"
+        );
         assert!(
             !msg2.prekey_devices.contains(&bob_device_id),
             "Bob's device should not be in prekey_devices for second message"
         );
 
         // Verify the encrypted key is NOT a PreKeySignalMessage (just a regular SignalMessage)
-        let encrypted_key = msg2.encrypted_keys.get(&bob_device_id)
+        let encrypted_key = msg2
+            .encrypted_keys
+            .get(&bob_device_id)
             .expect("Should have encrypted key for Bob's device");
         let prekey_parse = PreKeySignalMessage::deserialize(encrypted_key);
         assert!(
