@@ -28,6 +28,8 @@ use chatterbox::xmpp::chat_states::TypingStatus;
 pub use ratatui::backend::CrosstermBackend;
 pub use ratatui::Terminal;
 
+const INPUT_POLL_TIMEOUT: Duration = Duration::from_millis(50);
+
 pub struct ChatUI {
     pub messages: Vec<Message>, // Make messages public so it can be accessed from main.rs
     input: Input,
@@ -334,7 +336,7 @@ impl ChatUI {
     pub fn handle_input(&mut self) -> Result<Option<(String, String)>> {
         // Handle key confirmation popup if active
         if self.key_confirmation.is_some() {
-            if event::poll(Duration::from_millis(10))? {
+            if event::poll(INPUT_POLL_TIMEOUT)? {
                 let terminal_event = event::read()?;
                 if let Some(focused) = focus_state_from_event(&terminal_event) {
                     self.terminal_focused = focused;
@@ -381,7 +383,7 @@ impl ChatUI {
 
         // Handle contact remove confirmation dialog if active
         if let Some(dialog) = &self.contact_remove_dialog {
-            if event::poll(Duration::from_millis(10))? {
+            if event::poll(INPUT_POLL_TIMEOUT)? {
                 let terminal_event = event::read()?;
                 if let Some(focused) = focus_state_from_event(&terminal_event) {
                     self.terminal_focused = focused;
@@ -428,7 +430,7 @@ impl ChatUI {
 
         // Handle contact add dialog if active
         if let Some(dialog) = &self.contact_add_dialog {
-            if event::poll(Duration::from_millis(10))? {
+            if event::poll(INPUT_POLL_TIMEOUT)? {
                 let terminal_event = event::read()?;
                 if let Some(focused) = focus_state_from_event(&terminal_event) {
                     self.terminal_focused = focused;
@@ -482,7 +484,7 @@ impl ChatUI {
 
         // Handle help dialog if active
         if self.help_dialog.is_some() {
-            if event::poll(Duration::from_millis(10))? {
+            if event::poll(INPUT_POLL_TIMEOUT)? {
                 let terminal_event = event::read()?;
                 if let Some(focused) = focus_state_from_event(&terminal_event) {
                     self.terminal_focused = focused;
@@ -500,7 +502,7 @@ impl ChatUI {
 
         // Handle device fingerprints dialog if active
         if let Some(ref mut dialog) = self.device_fingerprints_dialog {
-            if event::poll(Duration::from_millis(10))? {
+            if event::poll(INPUT_POLL_TIMEOUT)? {
                 let terminal_event = event::read()?;
                 if let Some(focused) = focus_state_from_event(&terminal_event) {
                     self.terminal_focused = focused;
@@ -539,7 +541,7 @@ impl ChatUI {
         }
 
         // Original input handling code
-        if event::poll(Duration::from_millis(10))? {
+        if event::poll(INPUT_POLL_TIMEOUT)? {
             let terminal_event = event::read()?;
             if let Some(focused) = focus_state_from_event(&terminal_event) {
                 self.terminal_focused = focused;
