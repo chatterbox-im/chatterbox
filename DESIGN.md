@@ -11,22 +11,24 @@ The application follows a modular, asynchronous, and event-driven architecture:
 *   **Asynchronous:** Built upon the `tokio` runtime, enabling non-blocking I/O for network operations (XMPP) and UI responsiveness.
 *   **Modular:** Code is organized into distinct modules based on functionality (UI, XMPP communication, data models, utilities, credentials, encryption). The XMPP module itself is further subdivided based on specific XMPP Extension Protocols (XEPs).
 *   **Event-Driven:** The main application loop reacts to events originating from user input (via `crossterm`), the XMPP client (incoming messages, presence changes, receipts), and internal timers (e.g., for typing status).
+    The TUI loop blocks on `tokio::select!` instead of continuously polling and redrawing.
 *   **Terminal UI (TUI):** Uses the `ratatui` library (and `crossterm` backend) to render the user interface directly in the terminal.
 *   **Client-Server:** Interacts with a standard XMPP server for all communication.
 
 ## 3. Core Components
 
 *   **`main.rs`:**
-    *   Slim entry point (~240 lines).
+    *   Entry point (~280 lines).
     *   Handles command-line argument parsing and logging setup.
     *   Loads credentials and establishes the XMPP connection.
     *   Delegates to `app::run_app()` after successful connection.
 *   **`app.rs`:**
     *   Application lifecycle: TUI setup, event loop, and command dispatch.
     *   Opens the local `MessageStore` on startup.
-    *   Runs the main event loop, orchestrating interactions between the UI, XMPP client, and local store.
+    *   Runs the main event loop with `tokio::select!`, orchestrating terminal events, XMPP events, timers, and the local store.
     *   Handles contact switching (loads local history instantly, then MAM catch-up).
     *   Persists all sent and received messages to the local store.
+    *   Sends optional OS notifications for incoming messages using `notify-rust`, suppressing them while the terminal reports focus.
 *   **`lib.rs`:**
     *   Defines the library crate root.
     *   Re-exports core modules and types for external use (primarily testing in this case).
@@ -34,21 +36,25 @@ The application follows a modular, asynchronous, and event-driven architecture:
 *   **`ui.rs`:**
     *   Manages the entire Terminal User Interface using `ratatui`.
     *   Defines the layout (Contacts pane, Chat pane, Input box).
-    *   Handles user input events (keystrokes for typing, navigation, sending messages, switching focus).
+    *   Spawns `TerminalEventReader`, a small blocking crossterm reader thread that forwards terminal events into the async app loop.
+    *   Handles user input events supplied by the app loop (keystrokes, terminal focus changes, typing, navigation, sending messages, switching panes).
     *   Renders messages, contact list, presence status, delivery status, and typing indicators.
-    *   Manages UI state (active tab, selected contact, input buffer).
+    *   Manages UI state (active tab, selected contact, input buffer, dialogs, notification toggle, terminal focus).
 *   **`xmpp/` (Module Root: `xmpp/mod.rs`):**
     *   Encapsulates all XMPP communication logic using `tokio-xmpp` and `xmpp-parsers`.
     *   Manages the connection lifecycle (connect, disconnect, reconnect attempts).
-    *   Handles the main XMPP event stream in an asynchronous task (`handle_incoming_messages`).
-    *   Provides methods for core XMPP actions (sending messages, fetching roster, sending presence/chat states).
+    *   Spawns `transport.rs`, a transport actor that owns `tokio_xmpp::AsyncClient` exclusively and multiplexes inbound XMPP events with outbound stanza sends through channels.
+    *   Handles the XMPP event stream in `event_loop.rs` via `XMPPClient::handle_incoming_messages`.
+    *   Provides methods for core XMPP actions (sending messages, fetching roster, sending presence/chat states) by sending stanzas through `transport::StanzaTx`.
     *   Contains submodules for specific XEP implementations:
         *   `delivery_receipts.rs`: Implements XEP-0184 (Message Delivery Receipts). Handles sending receipt requests and processing incoming receipts.
         *   `chat_states.rs`: Implements XEP-0085 (Chat State Notifications). Handles sending and receiving typing indicators (composing, paused, active).
         *   `message_archive.rs`: Implements XEP-0313 (Message Archive Management - MAM). Handles querying the server for message history.
-        *   `omemo_integration.rs`: Handles the integration of OMEMO encryption (XEP-0384) with the XMPP message flow. This includes processing OMEMO stanzas, interacting with the `OmemoManager` for encryption/decryption, and managing XMPP PubSub interactions for OMEMO bundle and device list publication/retrieval.
+        *   `message_carbons.rs`: Implements XEP-0280 (Message Carbons).
+        *   `omemo_handler.rs` and `omemo_integration/`: Handle OMEMO stanza processing, encryption/decryption integration, and PubSub operations for bundle and device list publication/retrieval.
 *   **`omemo/` (Module Root: `omemo/mod.rs`):**
-    *   Contains the core logic for OMEMO end-to-end encryption. Key components include the `OmemoManager` (in `manager.rs`) which orchestrates cryptographic operations, session management, and interaction with the OMEMO store. It also includes modules for cryptographic primitives (`crypto.rs`), session state (`session.rs`), X3DH and Double Ratchet protocol logic (e.g. `x3dh.rs`, `double_ratchet.rs`), and key/identity storage (`store.rs`).
+    *   Contains the core logic for OMEMO end-to-end encryption. `OmemoManager` is defined in `omemo/mod.rs` and orchestrates cryptographic operations, session management, PubSub access, and interaction with `OmemoStorage`.
+    *   Current modules include `bundle.rs`, `crypto.rs`, `decrypt.rs`, `device_discovery.rs`, `device_id.rs`, `encrypt.rs`, `lifecycle.rs`, `protocol.rs`, `session.rs`, `storage.rs`, and `wire.rs`.
 *   **`models.rs`:**
     *   Defines core data structures used throughout the application, such as `Message`, `DeliveryStatus`, `ContactStatus`, etc. Ensures consistent data representation.
 *   **`storage.rs`:**
@@ -58,7 +64,9 @@ The application follows a modular, asynchronous, and event-driven architecture:
     *   Idempotent inserts (`INSERT OR IGNORE`) allow safe replay of MAM results.
     *   Used as the primary source of history on contact switch; MAM becomes catch-up only.
 *   **`credentials.rs`:**
-    *   Handles the loading and saving of user credentials (server, username, password) securely to a configuration file.
+    *   Handles loading and saving credentials and app settings.
+    *   Credentials are stored in `credentials.json`; saved passwords are base64-encoded for storage, not encrypted.
+    *   App settings such as the OS notification toggle are stored in `settings.json`.
 *   **`utils.rs`:**
     *   Contains miscellaneous utility functions, such as setting up logging (`log` crate) and reading lines from standard input.
 
@@ -74,17 +82,22 @@ The application follows a modular, asynchronous, and event-driven architecture:
 *   **Message Carbons (XEP-0280):** Synchronizing messages sent/received by other clients for the same account.
 *   **OMEMO Encryption (XEP-0384):** End-to-end encryption for messages (implementation details in `omemo/`).
 *   **Local Message Persistence:** SQLite-backed per-account message storage for instant history access offline.
+*   **Optional OS Notifications:** Desktop notifications for incoming messages using `notify-rust`, disabled by default, persisted in app settings, and suppressed while the terminal is focused.
 
 ## 5. Concurrency and State Management
 
 *   **`tokio`:** Used for the asynchronous runtime, managing tasks for network I/O, UI events, and background processing (like history loading).
-*   **`Arc<TokioMutex<T>>`:** Used to safely share mutable state (like the `XMPPAsyncClient` instance and the `pending_receipts` map) across different asynchronous tasks.
+*   **Transport actor:** `xmpp/transport.rs` owns `XMPPAsyncClient` exclusively. Outbound stanzas are sent to it through `StanzaTx`; inbound XMPP events are sent back over an event channel. The raw XMPP client is not shared behind a mutex.
+*   **Event-driven UI loop:** `app.rs` waits on terminal events, incoming messages, presence updates, friend requests, typing notifications, and periodic timers with `tokio::select!`. The UI redraws only when state changes.
+*   **Terminal event reader:** `ui.rs` uses a small blocking reader thread for `crossterm` events and forwards them to the async loop over a Tokio channel.
+*   **Shared state:** `Arc<TokioMutex<T>>` is still used for scoped mutable state such as pending delivery receipts, IQ response routing, and the OMEMO manager, but not for the XMPP transport itself.
 *   **`tokio::sync::mpsc` Channels:** Used for communication between asynchronous tasks. Examples:
-    *   XMPP event handler sends received `Message` objects to the main loop/UI task.
-    *   Main loop sends commands (like "send message") to the XMPP task (implicitly via client methods).
-    *   Presence updates are broadcast to subscribers (the UI) via a shared channel.
+    *   XMPP event handling sends received `Message` objects to the main loop/UI task.
+    *   The app sends outbound stanzas through the transport channel via `XMPPClient` methods.
     *   Typing notifications are sent from the XMPP handler to the UI via a channel.
-    *   Background history loading task sends results back to the main message channel.
+    *   Background history loading tasks send results back to the main message channel.
+*   **`tokio::sync::broadcast` Channels:** Used for presence updates and auto-accepted friend request notifications.
+*   **`tokio::sync::watch` Channel:** Publishes late-bound state such as the OMEMO manager, PubSub response map, local JID, and typing sender to the XMPP event loop after initialization.
 
 ## 6. Key Dependencies
 
@@ -93,17 +106,19 @@ The application follows a modular, asynchronous, and event-driven architecture:
 *   **`crossterm`:** Terminal manipulation and event handling backend for `ratatui`.
 *   **`tokio-xmpp`:** Core XMPP client library.
 *   **`xmpp-parsers`:** Parsing XMPP XML stanzas.
-*   **`log` / `env_logger`:** Logging framework.
+*   **`log`:** Logging facade, backed by the custom logger in `utils.rs`.
+*   **`clap`:** Command-line argument parsing.
 *   **`anyhow`:** Error handling.
 *   **`uuid`:** Generating unique IDs (e.g., for messages, stanza tracking).
 *   **`serde`:** Serialization/Deserialization (for credentials).
 *   **`rusqlite`:** SQLite database access (bundled) for local message persistence.
+*   **`notify-rust`:** Cross-platform OS desktop notifications.
 *   **`chrono`:** Timestamp handling for MAM queries and message ordering.
 *   **OMEMO Dependencies:** Cryptographic libraries (`curve25519-dalek`, `aes-gcm`, etc.) for end-to-end encryption.
 
 ## 7. OMEMO Encryption Implementation
 
-OMEMO (XEP-0384) is an end-to-end encryption protocol for XMPP based on the Signal Double Ratchet Algorithm. Here's how it's implemented in Sermo:
+OMEMO (XEP-0384) is an end-to-end encryption protocol for XMPP based on the Signal Double Ratchet Algorithm. Here's how it's implemented in Chatterbox:
 
 ### 7.1 Core Principles
 
@@ -118,7 +133,7 @@ OMEMO (XEP-0384) is an end-to-end encryption protocol for XMPP based on the Sign
 *   **Device Identity:**
     *   Each client instance generates an identity key pair (Curve25519).
     *   This identity remains consistent across restarts for the same device.
-    *   Stored securely in the local device storage.
+    *   Stored in local OMEMO storage.
 
 *   **Key Bundles:**
     *   Contains identity key, signed pre-keys, and a set of one-time pre-keys.
@@ -139,7 +154,7 @@ OMEMO (XEP-0384) is an end-to-end encryption protocol for XMPP based on the Sign
     4. The `XMPPClient` sends this stanza.
 
 *   **Message Decryption Process:**
-    1. Upon receiving an XMPP message containing an OMEMO `<encrypted>` element, the `XMPPClient` passes it to the `xmpp/omemo_integration.rs` handler.
+    1. Upon receiving an XMPP message containing an OMEMO `<encrypted>` element, the `XMPPClient` passes it through `xmpp/omemo_handler.rs` and the `xmpp/omemo_integration/` helpers.
     2. This handler, in turn, invokes the `OmemoManager`.
     3. The `OmemoManager` inspects the OMEMO headers to find the encrypted message key intended for the current device.
     4. It uses the pre-established OMEMO session (Double Ratchet) with the sender's device to decrypt this message key.
@@ -149,16 +164,16 @@ OMEMO (XEP-0384) is an end-to-end encryption protocol for XMPP based on the Sign
 ### 7.3 Technical Components
 
 *   **Key Storage (`omemo/storage.rs`):**
-    *   Securely stores identity keys, session states, and pre-keys.
-    *   Uses file-based or database storage with appropriate encryption.
+    *   Stores identity keys, session states, device IDs, trust state, and pre-key metadata.
+    *   Uses local storage paths derived from the account or OMEMO directory override.
 
 *   **Cryptographic Operations (`omemo/crypto.rs`):**
     *   Handles all cryptographic primitives (Curve25519, AES-GCM, etc.).
     *   Provides key generation, signing, and verification.
-    *   Implements the Double Ratchet Algorithm for message key derivation.
+    *   Provides interop helpers such as XEdDSA verification and prefixed X25519 public key encoding.
 
 *   **Protocol Implementation (`omemo/protocol.rs`):**
-    *   Implements the OMEMO protocol details.
+    *   Implements X3DH and Double Ratchet protocol details.
     *   Handles XML stanza structure for OMEMO elements.
     *   Manages device list publication and updates.
 
@@ -167,7 +182,7 @@ OMEMO (XEP-0384) is an end-to-end encryption protocol for XMPP based on the Sign
     *   Handles session establishment, updates, and termination.
     *   Implements the Double Ratchet state machine.
 
-*   **XMPP Integration (`xmpp/omemo_integration.rs`):**
+*   **XMPP Integration (`xmpp/omemo_handler.rs`, `xmpp/omemo_integration/`):**
     *   Connects OMEMO functionality with the XMPP client. Intercepts outgoing messages for encryption and processes incoming encrypted messages for decryption. Crucially, it also handles the XMPP PubSub (PEP) interactions required by OMEMO, such as publishing the local device's bundle and fetching bundles and device lists for contacts.
 
 ### 7.4 Security Considerations
@@ -264,13 +279,20 @@ With ~35 `Message` construction sites across 10+ files, manual struct literal co
 
 All ~35 production construction sites across `send.rs`, `omemo_handler.rs`, `message_carbons.rs`, `coordinator.rs`, `event_loop.rs`, `delivery_receipts.rs`, `ui.rs`, `app.rs`, and `omemo_integration/xmpp_client_impl.rs` use factory functions.
 
-## 10. Coordinator Architecture (Additive)
+## 10. Transport and Coordinator Architecture
 
-A new single-threaded coordinator pattern exists in `xmpp/coordinator.rs` and `xmpp/transport.rs` as an alternative to the current `event_loop.rs` architecture. It is **not yet wired into `main.rs`** but provides:
+`xmpp/transport.rs` is part of the current runtime path. When `XMPPClient::connect()` succeeds, it spawns a transport actor that owns `tokio_xmpp::AsyncClient` and exposes channel handles for the rest of the XMPP layer:
+
+*   **`StanzaTx`:** Cloneable sender for outbound XML stanzas.
+*   **Transport event receiver:** Delivers `tokio_xmpp::Event` values (`Online`, `Stanza`, `Disconnected`) to `event_loop.rs`.
+*   **No shared raw client mutex:** Senders never lock `XMPPAsyncClient`; they enqueue stanzas to the transport actor.
+*   **Optional reconnect variants:** `spawn_transport_with_reconnect()` and bounded-channel variants exist for coordinator-style use.
+
+`xmpp/coordinator.rs` remains an additional single-threaded coordinator pattern and testbed for a more command-oriented XMPP architecture. It provides:
 
 *   **`CoordinatorState`:** All mutable state in one struct (no `Arc<Mutex<>>` needed).
 *   **`send_to_ui()` helper:** Non-blocking `try_send()` to prevent channel backpressure from deadlocking the event loop.
 *   **`TransportHandle`:** Bounded channels for stanza send/receive with automatic reconnection and exponential backoff.
 *   **Command dispatch:** `CoordinatorCommand` enum for type-safe app→XMPP communication.
 
-The coordinator handles plaintext messages, OMEMO encryption/decryption, carbon copies, delivery receipts, presence, and key verification — all inline without spawning additional tasks.
+The current `main.rs` path still uses `XMPPClient`, `transport.rs`, and `event_loop.rs`; the coordinator is exported and heavily tested but is not the app entry point.
