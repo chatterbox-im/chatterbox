@@ -76,6 +76,7 @@ struct DeviceFingerprintsDialog {
     current_device_id: Option<String>,
     contact_jid: Option<String>,
     contact_fingerprints: Vec<(String, String)>, // (Device ID, Fingerprint) for active contact
+    scroll_offset: usize, // For scrolling when content exceeds dialog height
 }
 
 // Add this new struct for friend request notification
@@ -267,6 +268,7 @@ impl ChatUI {
             current_device_id,
             contact_jid,
             contact_fingerprints,
+            scroll_offset: 0,
         });
     }
 
@@ -435,12 +437,34 @@ impl ChatUI {
         }
 
         // Handle device fingerprints dialog if active
-        if self.device_fingerprints_dialog.is_some() {
+        if let Some(ref mut dialog) = self.device_fingerprints_dialog {
             if event::poll(Duration::from_millis(10))? {
                 if let Event::Key(key) = event::read()? {
                     if key.kind == KeyEventKind::Press {
-                        // Any key press will close the device fingerprints dialog
-                        self.device_fingerprints_dialog = None;
+                        match key.code {
+                            KeyCode::Up => {
+                                // Up arrow to scroll up one line
+                                if dialog.scroll_offset > 0 {
+                                    dialog.scroll_offset -= 1;
+                                }
+                            }
+                            KeyCode::Down => {
+                                // Down arrow to scroll down one line
+                                dialog.scroll_offset += 1;
+                            }
+                            KeyCode::Home => {
+                                // Home to jump to top
+                                dialog.scroll_offset = 0;
+                            }
+                            KeyCode::End => {
+                                // End to jump to bottom
+                                dialog.scroll_offset = usize::MAX;
+                            }
+                            _ => {
+                                // Any other key closes the dialog
+                                self.device_fingerprints_dialog = None;
+                            }
+                        }
                     }
                 }
             }
@@ -1281,7 +1305,7 @@ fn draw_help_dialog<B: Backend>(f: &mut Frame<B>, area: Rect) {
 
 fn draw_device_fingerprints_dialog<B: Backend>(f: &mut Frame<B>, dialog: &DeviceFingerprintsDialog, area: Rect) {
     // Calculate popup size and position (centered)
-    let popup_width = 70.min(area.width - 4);
+    let popup_width = 80.min(area.width - 4);
     // Increase height if we have contact fingerprints
     let base_height = 20u16;
     let extra = if !dialog.contact_fingerprints.is_empty() {
@@ -1296,7 +1320,7 @@ fn draw_device_fingerprints_dialog<B: Backend>(f: &mut Frame<B>, dialog: &Device
     
     // Create popup with border
     let popup_block = Block::default()
-        .title("OMEMO Fingerprints")
+        .title("OMEMO Fingerprints (Up/Down to scroll)")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Blue));
     
@@ -1309,9 +1333,60 @@ fn draw_device_fingerprints_dialog<B: Backend>(f: &mut Frame<B>, dialog: &Device
         horizontal: 2,
     });
     
-    // Create the fingerprints list
+    let max_width = (inner_area.width as usize).saturating_sub(2);
+    
+    // Helper function to wrap text
+    fn wrap_text(text: &str, width: usize) -> Vec<String> {
+        if width == 0 {
+            return vec![text.to_string()];
+        }
+        let mut result = Vec::new();
+        let mut current = String::new();
+        for word in text.split(' ') {
+            if current.is_empty() {
+                current = word.to_string();
+            } else if current.len() + 1 + word.len() <= width {
+                current.push(' ');
+                current.push_str(word);
+            } else {
+                result.push(current);
+                current = word.to_string();
+            }
+        }
+        if !current.is_empty() {
+            result.push(current);
+        }
+        result
+    }
+    
+    // Create the fingerprints list with wrapped lines
     let mut fingerprints_content = Vec::new();
     
+    // --- Contact devices section ---
+    if let Some(contact_jid) = &dialog.contact_jid {
+        fingerprints_content.push("─".repeat(40.min(max_width)));
+        fingerprints_content.push(format!("Contact fingerprints ({}):", contact_jid));
+        fingerprints_content.push("".to_string());
+        
+        if dialog.contact_fingerprints.is_empty() {
+            fingerprints_content.push("No OMEMO keys found for this contact".to_string());
+        } else {
+            for (device_id, fingerprint) in &dialog.contact_fingerprints {
+                fingerprints_content.push(format!("Device ID: {}", device_id));
+                // Wrap long fingerprints
+                let wrapped = wrap_text(fingerprint, max_width.saturating_sub(4));
+                for (idx, line) in wrapped.iter().enumerate() {
+                    if idx == 0 {
+                        fingerprints_content.push(format!("  {}", line));
+                    } else {
+                        fingerprints_content.push(format!("    {}", line));
+                    }
+                }
+                fingerprints_content.push("".to_string());
+            }
+        }
+    }
+
     // --- Own devices section ---
     fingerprints_content.push("Your OMEMO device fingerprints:".to_string());
     fingerprints_content.push("".to_string());
@@ -1327,33 +1402,30 @@ fn draw_device_fingerprints_dialog<B: Backend>(f: &mut Frame<B>, dialog: &Device
                 format!("Device ID: {}", device_id)
             };
             fingerprints_content.push(device_label);
-            fingerprints_content.push(format!("  {}", fingerprint));
-            fingerprints_content.push("".to_string());
-        }
-    }
-    
-    // --- Contact devices section ---
-    if let Some(contact_jid) = &dialog.contact_jid {
-        fingerprints_content.push("─".repeat(40));
-        fingerprints_content.push(format!("Contact fingerprints ({}):", contact_jid));
-        fingerprints_content.push("".to_string());
-        
-        if dialog.contact_fingerprints.is_empty() {
-            fingerprints_content.push("No OMEMO keys found for this contact".to_string());
-        } else {
-            for (device_id, fingerprint) in &dialog.contact_fingerprints {
-                fingerprints_content.push(format!("Device ID: {}", device_id));
-                fingerprints_content.push(format!("  {}", fingerprint));
-                fingerprints_content.push("".to_string());
+            // Wrap long fingerprints
+            let wrapped = wrap_text(fingerprint, max_width.saturating_sub(4));
+            for (idx, line) in wrapped.iter().enumerate() {
+                if idx == 0 {
+                    fingerprints_content.push(format!("  {}", line));
+                } else {
+                    fingerprints_content.push(format!("    {}", line));
+                }
             }
+            fingerprints_content.push("".to_string());
         }
     }
     
     fingerprints_content.push("Press any key to close".to_string());
     
-    // Convert content to ListItems
+    // Apply scroll offset
+    let start_idx = dialog.scroll_offset;
+    let visible_lines = inner_area.height as usize;
+    
+    // Convert content to ListItems, applying scroll offset
     let items: Vec<ListItem> = fingerprints_content
         .iter()
+        .skip(start_idx)
+        .take(visible_lines)
         .map(|s| {
             if s.contains("(this device)") {
                 ListItem::new(Text::styled(

@@ -77,7 +77,23 @@ async fn main() -> Result<()> {
                     dir.join("chatterbox.log")
                 }
             }
-            None => PathBuf::from("chatterbox.log"),
+            None => {
+                match dirs::data_dir() {
+                    Some(mut data_dir) => {
+                        data_dir.push("chatterbox");
+                        if let Err(e) = std::fs::create_dir_all(&data_dir) {
+                            eprintln!("Warning: Failed to create log directory {}: {}. Falling back to current directory.", data_dir.display(), e);
+                            PathBuf::from("chatterbox.log")
+                        } else {
+                            data_dir.join("chatterbox.log")
+                        }
+                    }
+                    None => {
+                        eprintln!("Warning: Could not determine XDG data directory. Falling back to current directory for logging.");
+                        PathBuf::from("chatterbox.log")
+                    }
+                }
+            }
         })
     } else {
         None

@@ -423,8 +423,8 @@ fn generate_and_save_identity_key() -> Result<KeyPair> {
 
 // ------------------- Multi-Device Support -------------------
 
-/// Path where the multi-device information is stored
-const MULTI_DEVICE_INFO_PATH: &str = ".omemo_multi_device_info.json";
+/// Filename where multi-device information is stored
+const MULTI_DEVICE_INFO_FILENAME: &str = "multi_device_info.json";
 
 /// Structure to store multi-device information
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -472,9 +472,10 @@ fn get_multi_device_info_path() -> PathBuf {
         return path;
     }
     
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(MULTI_DEVICE_INFO_PATH)
+    let mut path = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
+    path.push("chatterbox");
+    path.push(MULTI_DEVICE_INFO_FILENAME);
+    path
 }
 
 /// Load or initialize multi-device information
