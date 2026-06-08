@@ -927,29 +927,49 @@ impl DoubleRatchet {
             ));
         };
 
-        // Check if we need a DH ratchet step
-        if !signal_msg.ratchet_key.is_empty() && signal_msg.ratchet_key != state.remote_ratchet_key
-        {
-            debug!("Double Ratchet decrypt_key: performing DH ratchet step (new ratchet key)");
-            Self::dh_ratchet(state, &signal_msg.ratchet_key)?;
-        }
-
-        // Skip keys if needed (with MAX_SKIP protection)
-        if signal_msg.counter > state.receive_message_number {
-            if signal_msg.counter - state.receive_message_number > Self::MAX_SKIP {
-                return Err(DoubleRatchetError::InvalidMessageFormatError(
-                    "Too many skipped messages in decrypt_key".to_string(),
-                ));
+        // First, check whether this is a delayed/out-of-order message whose key we
+        // already derived and stored earlier. This must happen before any DH ratchet
+        // decision, since such a message carries an older ratchet key and counter.
+        let skip_index = (signal_msg.ratchet_key.clone(), signal_msg.counter);
+        let message_key = if let Some(stored_key) = state.skipped_message_keys.remove(&skip_index) {
+            debug!("Double Ratchet decrypt_key: using stored skipped message key for counter {}", signal_msg.counter);
+            stored_key
+        } else {
+            // Check if we need a DH ratchet step
+            if !signal_msg.ratchet_key.is_empty()
+                && signal_msg.ratchet_key != state.remote_ratchet_key
+            {
+                debug!("Double Ratchet decrypt_key: performing DH ratchet step (new ratchet key)");
+                Self::dh_ratchet(state, &signal_msg.ratchet_key)?;
             }
-            while state.receive_message_number < signal_msg.counter {
-                let current_counter = state.receive_message_number;
-                let skipped_key = Self::derive_next_receiving_key(state);
-                let skip_index = (signal_msg.ratchet_key.clone(), current_counter);
-                state.skipped_message_keys.insert(skip_index, skipped_key);
-            }
-        }
 
-        let message_key = Self::derive_next_receiving_key(state);
+            // Reject messages from this chain that we've already advanced past and
+            // for which no skipped key is stored. Deriving here would silently advance
+            // (and desync) the receiving chain on a replayed or stale message.
+            if signal_msg.counter < state.receive_message_number {
+                return Err(DoubleRatchetError::InvalidMessageFormatError(format!(
+                    "Message counter {} is too old (already processed, no stored key)",
+                    signal_msg.counter
+                )));
+            }
+
+            // Skip keys if needed (with MAX_SKIP protection)
+            if signal_msg.counter > state.receive_message_number {
+                if signal_msg.counter - state.receive_message_number > Self::MAX_SKIP {
+                    return Err(DoubleRatchetError::InvalidMessageFormatError(
+                        "Too many skipped messages in decrypt_key".to_string(),
+                    ));
+                }
+                while state.receive_message_number < signal_msg.counter {
+                    let current_counter = state.receive_message_number;
+                    let skipped_key = Self::derive_next_receiving_key(state);
+                    let skip_index = (signal_msg.ratchet_key.clone(), current_counter);
+                    state.skipped_message_keys.insert(skip_index, skipped_key);
+                }
+            }
+
+            Self::derive_next_receiving_key(state)
+        };
 
         // Expand message_key via HKDF to get (cipher_key, mac_key, iv)
         let expanded = crypto::hkdf_derive(&[], &message_key, b"WhisperMessageKeys", 80)
@@ -1500,6 +1520,86 @@ mod tests {
             .unwrap();
         let payload_bytes = B64.decode(payload.text()).unwrap();
         assert_eq!(payload_bytes, vec![0xCC; 48]);
+    }
+
+    /// Build a matched initiator/recipient ratchet pair for testing.
+    fn paired_sessions() -> (RatchetState, RatchetState) {
+        let alice_identity = X3DHProtocol::generate_key_pair().unwrap();
+        let bob_identity = X3DHProtocol::generate_key_pair().unwrap();
+        let bob_spk = X3DHProtocol::generate_key_pair().unwrap();
+        let bob_opk = X3DHProtocol::generate_key_pair().unwrap();
+        let ephemeral = X3DHProtocol::generate_key_pair().unwrap();
+
+        let alice = DoubleRatchet::new_session_initiator_with_ephemeral(
+            alice_identity.clone(),
+            bob_identity.public_key.clone(),
+            bob_spk.public_key.clone(),
+            Some(bob_opk.public_key.clone()),
+            ephemeral.private_key.clone(),
+            1, // local device id
+            2, // remote device id
+            "bob@example.com".to_string(),
+        )
+        .unwrap();
+
+        let bob = DoubleRatchet::new_session_recipient(
+            bob_identity,
+            alice_identity.public_key.clone(),
+            bob_spk,
+            Some(bob_opk),
+            ephemeral.public_key.clone(),
+            2,
+            1,
+            "alice@example.com".to_string(),
+        )
+        .unwrap();
+
+        (alice, bob)
+    }
+
+    #[test]
+    fn test_decrypt_key_out_of_order_delivery() {
+        // Regression test: messages that arrive out of order must still decrypt
+        // using the stored skipped message keys. Previously decrypt_key stored
+        // skipped keys but never consulted them, so delayed messages were lost.
+        let (mut alice, mut bob) = paired_sessions();
+
+        let k0 = vec![0x10u8; 32];
+        let k1 = vec![0x11u8; 32];
+        let k2 = vec![0x12u8; 32];
+
+        let m0 = DoubleRatchet::encrypt_key(&mut alice, &k0).unwrap();
+        let m1 = DoubleRatchet::encrypt_key(&mut alice, &k1).unwrap();
+        let m2 = DoubleRatchet::encrypt_key(&mut alice, &k2).unwrap();
+
+        // Deliver out of order: m2 first, then m0, then m1.
+        let d2 = DoubleRatchet::decrypt_key(&mut bob, &m2).unwrap();
+        assert_eq!(d2, k2, "newest message should decrypt");
+
+        let d0 = DoubleRatchet::decrypt_key(&mut bob, &m0).unwrap();
+        assert_eq!(d0, k0, "delayed message 0 should decrypt via skipped key");
+
+        let d1 = DoubleRatchet::decrypt_key(&mut bob, &m1).unwrap();
+        assert_eq!(d1, k1, "delayed message 1 should decrypt via skipped key");
+    }
+
+    #[test]
+    fn test_decrypt_key_replay_rejected() {
+        // A replayed message (already consumed, no stored key) must be rejected
+        // rather than silently advancing/desyncing the receiving chain.
+        let (mut alice, mut bob) = paired_sessions();
+
+        let k0 = vec![0x20u8; 32];
+        let m0 = DoubleRatchet::encrypt_key(&mut alice, &k0).unwrap();
+
+        assert_eq!(DoubleRatchet::decrypt_key(&mut bob, &m0).unwrap(), k0);
+        // Replaying the same message must error (key already consumed).
+        assert!(DoubleRatchet::decrypt_key(&mut bob, &m0).is_err());
+
+        // The chain must still be usable for the next legitimate message.
+        let k1 = vec![0x21u8; 32];
+        let m1 = DoubleRatchet::encrypt_key(&mut alice, &k1).unwrap();
+        assert_eq!(DoubleRatchet::decrypt_key(&mut bob, &m1).unwrap(), k1);
     }
 
     #[test]
