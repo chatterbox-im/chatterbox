@@ -54,5 +54,7 @@ notify-rust = "4.11"
 [build-dependencies]
 regex = "1.11.1"
 
-[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+# Linux uses birdcage (Landlock + seccomp); macOS uses a hand-written Seatbelt
+# profile via sandbox_init directly (see src/sandbox.rs).
+[target.'cfg(target_os = "linux")'.dependencies]
 birdcage = "0.8.1"
