@@ -75,7 +75,8 @@ impl XMPPClient {
                         let from = stanza.attr("from").unwrap_or("");
                         let to = stanza.attr("to").unwrap_or("");
                         info!("Received message stanza from='{}', to='{}'", from, to);
-                        debug!("Message stanza content: {:?}", stanza);
+                        // Don't dump the full stanza — it may contain a plaintext body.
+                        debug!("Received <{}> stanza from {}", stanza.name(), from);
 
                         fn has_omemo_encryption(
                             msg_stanza: &xmpp_parsers::Element,
@@ -214,7 +215,8 @@ impl XMPPClient {
                             });
                         } else {
                             info!("Processing non-OMEMO message from {}", from);
-                            debug!("Non-OMEMO message content: {:?}", stanza);
+                            // Don't dump the full stanza — it contains the plaintext body.
+                            debug!("Non-OMEMO message <{}> from {}", stanza.name(), from);
 
                             if let Err(e) = delivery_receipts::handle_receipt(
                                 &stanza,
@@ -291,7 +293,7 @@ impl XMPPClient {
                                     .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
                                 let content = body.text();
 
-                                debug!("Found message body from {}: '{}'", from, content);
+                                debug!("Found message body from {} ({} bytes)", from, content.len());
 
                                 if !content.is_empty() {
                                     let sender_bare_jid =
@@ -303,7 +305,12 @@ impl XMPPClient {
                                         content.clone(),
                                     );
 
-                                    info!("Sending message to UI: from='{}' (bare: '{}'), content='{}'", from, sender_bare_jid, content);
+                                    info!(
+                                        "Sending message to UI: from='{}' (bare: '{}', {} bytes)",
+                                        from,
+                                        sender_bare_jid,
+                                        content.len()
+                                    );
 
                                     if let Err(e) = msg_tx.send(message).await {
                                         error!("Failed to send message to UI: {}", e);

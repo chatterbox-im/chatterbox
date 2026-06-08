@@ -80,7 +80,10 @@ impl super::XMPPClient {
             (_, true) => Message::incoming_encrypted(msg_id, sender_id, content),
         };
 
-        debug!("Sending carbon message to UI: {}", ui_message.content);
+        debug!(
+            "Sending carbon message to UI ({} bytes)",
+            ui_message.content.len()
+        );
         if let Err(e) = self.msg_tx.send(ui_message).await {
             error!("Failed to send carbon message to UI: {}", e);
         }

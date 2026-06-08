@@ -322,15 +322,14 @@ impl XMPPClient {
                     .await
                 {
                     Ok(plaintext) => {
-                        warn!(
-                            "DECRYPT_SUCCESS: Successfully decrypted message from {}:{}",
-                            from, sender_device_id
-                        );
-                        warn!(
-                            "DECRYPT_SUCCESS: Plaintext length: {} bytes",
+                        // NB: never log decrypted plaintext content — doing so would
+                        // persist private message bodies to the log file on disk.
+                        info!(
+                            "Successfully decrypted message from {}:{} ({} bytes)",
+                            from,
+                            sender_device_id,
                             plaintext.len()
                         );
-                        warn!("DECRYPT_SUCCESS: Plaintext content: '{}'", plaintext);
 
                         // Strip resource from sender JID to get bare JID
                         let sender_bare_jid = from.split('/').next().unwrap_or(from).to_string();
@@ -342,15 +341,15 @@ impl XMPPClient {
                             plaintext.clone(),
                         );
 
-                        warn!("UI_DELIVERY_DEBUG: Sending decrypted message to UI channel");
-                        warn!("UI_DELIVERY_DEBUG: Message details - ID: {}, Sender: {}, Content: '{}'", 
-                            message.id, message.sender_id, message.content);
-
-                        // Send to UI
+                        // Send to UI (capture identifiers first; send() moves `message`)
+                        let logged_id = message.id.clone();
                         if let Err(e) = self.msg_tx.send(message).await {
                             error!("FAILED to send decrypted message to UI: {}", e);
                         } else {
-                            warn!("SUCCESS: Sent decrypted OMEMO message to UI channel");
+                            debug!(
+                                "Sent decrypted OMEMO message {} from {} to UI channel",
+                                logged_id, sender_bare_jid
+                            );
                         }
 
                         // Send a receipt if requested

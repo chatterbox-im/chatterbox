@@ -887,7 +887,11 @@ async fn handle_user_command(
 ) -> Result<()> {
     if content.starts_with("/plain ") {
         let plain_content = content.trim_start_matches("/plain ");
-        warn!("⚠️ SENDING UNENCRYPTED MESSAGE: {}", plain_content);
+        warn!(
+            "⚠️ SENDING UNENCRYPTED MESSAGE to {} ({} bytes)",
+            recipient,
+            plain_content.len()
+        );
         match xmpp_client
             .send_message_with_receipt(recipient, plain_content)
             .await
