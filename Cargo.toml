@@ -53,3 +53,6 @@ notify-rust = "4.11"
 
 [build-dependencies]
 regex = "1.11.1"
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+birdcage = "0.8.1"

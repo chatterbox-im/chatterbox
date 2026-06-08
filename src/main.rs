@@ -10,6 +10,7 @@ use std::{
 
 mod app;
 mod credentials;
+mod sandbox;
 mod ui;
 mod utils;
 
@@ -69,6 +70,34 @@ fn prompt_credentials() -> (String, String, String) {
 async fn main() -> Result<()> {
     // Parse command line arguments FIRST
     let args = Args::parse();
+
+    // Enable the startup sandbox as early as possible, before we open any files
+    // or sockets. This confines the process to its own data directories plus the
+    // network; the rest of the user's home becomes unreadable. On the first run
+    // this re-execs a sandboxed copy of ourselves and does not return here.
+    {
+        let mut allow_dirs: Vec<PathBuf> = Vec::new();
+        if let Some(dir) = dirs::config_dir() {
+            allow_dirs.push(dir.join("chatterbox"));
+        }
+        if let Some(dir) = dirs::data_dir() {
+            allow_dirs.push(dir.join("chatterbox"));
+        }
+        if let Some(ref dir) = args.omemo_dir {
+            allow_dirs.push(dir.clone());
+        }
+        // The sandbox canonicalises these paths, so they must exist first.
+        allow_dirs.retain(|d| match std::fs::create_dir_all(d) {
+            Ok(_) => true,
+            Err(e) => {
+                eprintln!("Warning: could not create {}: {}", d.display(), e);
+                d.exists()
+            }
+        });
+        allow_dirs.sort();
+        allow_dirs.dedup();
+        sandbox::install_and_reexec(&allow_dirs);
+    }
 
     // Determine the log file path based on --omemo-dir
     // In release builds, do not create a log file (avoid leaking sensitive data to disk)
