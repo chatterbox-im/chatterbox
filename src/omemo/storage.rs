@@ -9,7 +9,7 @@ use crate::omemo::device_id::DeviceId;
 use crate::omemo::protocol::{DeviceIdentity, RatchetState, X3DHKeyBundle};
 use anyhow::{anyhow, Result};
 use bincode;
-use log::{debug, error};
+use log::{debug, error, warn};
 use once_cell::sync::OnceCell;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -313,6 +313,66 @@ impl OmemoStorage {
         )?;
 
         Ok(())
+    }
+
+    /// Persist a freshly-fetched device identity with **identity-key pinning**.
+    ///
+    /// A device's OMEMO identity key is permanent; fingerprint verification pins
+    /// it. If a *different* identity key was already stored for this device, the
+    /// key has changed — a possible MITM (e.g. a malicious/compromised server
+    /// republishing a bundle). In that case we do NOT carry over the previous
+    /// trust: trust is reset to `Untrusted` and a pending verification is recorded
+    /// so the existing UI flow prompts the user to re-verify. Otherwise the prior
+    /// trust level is preserved (unchanged refetch behavior).
+    ///
+    /// `new_fingerprint` is the displayable fingerprint of `identity`'s identity
+    /// key (computed by the caller via `generate_standard_fingerprint`). Returns
+    /// `true` iff the identity key changed.
+    pub fn save_fetched_identity(
+        &mut self,
+        jid: &str,
+        identity: &DeviceIdentity,
+        new_fingerprint: &str,
+    ) -> Result<bool> {
+        let device_id = identity.id;
+
+        // Read the previously-pinned key (if any) BEFORE overwriting it.
+        let existing_key = self
+            .load_device_identity(jid, device_id)
+            .ok()
+            .map(|e| e.identity_key);
+        let existing_trust = self.get_trust_level(jid, device_id).ok();
+
+        let key_changed = existing_key
+            .as_ref()
+            .map(|old| crate::omemo::crypto::identity_key_changed(old, &identity.identity_key))
+            .unwrap_or(false);
+
+        // Persist the new identity (overwrites identity.bin).
+        self.save_device_identity(jid, identity, false)?;
+
+        if key_changed {
+            warn!(
+                "OMEMO identity key for {}:{} CHANGED since last fetch — possible MITM. \
+                 Resetting trust to Untrusted and flagging for re-verification.",
+                jid, device_id
+            );
+            self.set_trust_level(jid, device_id, TrustLevel::Untrusted)?;
+            if let Err(e) = self.store_pending_device_verification(jid, device_id, new_fingerprint) {
+                warn!(
+                    "Failed to record pending verification for changed key {}:{}: {}",
+                    jid, device_id, e
+                );
+            }
+        } else if let Some(trust) = existing_trust {
+            // Same key (or first contact with a prior trust marker): preserve an
+            // explicitly-set trust level across the refetch.
+            if trust != TrustLevel::Undecided {
+                self.set_trust_level(jid, device_id, trust)?;
+            }
+        }
+
+        Ok(key_changed)
     }
 
     /// Load a device identity
@@ -936,6 +996,68 @@ impl OmemoStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::omemo::protocol::{DeviceIdentity, PreKeyBundle, SignedPreKeyBundle};
+
+    fn make_identity(device_id: DeviceId, key_byte: u8) -> DeviceIdentity {
+        DeviceIdentity {
+            id: device_id,
+            identity_key: vec![key_byte; 32],
+            signed_pre_key: SignedPreKeyBundle {
+                id: 1,
+                public_key: vec![0xAA; 32],
+                signature: vec![0xBB; 64],
+            },
+            pre_keys: vec![PreKeyBundle {
+                id: 1,
+                public_key: vec![0xCC; 32],
+            }],
+        }
+    }
+
+    #[test]
+    fn test_identity_key_pinning_resets_trust_on_change() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut storage = OmemoStorage::new(Some(tmp.path().to_path_buf())).unwrap();
+
+        let jid = "alice@example.org";
+        let dev: DeviceId = 1234;
+
+        // First contact: store identity A. No prior key → not a change.
+        let id_a = make_identity(dev, 0x11);
+        let changed = storage.save_fetched_identity(jid, &id_a, "FP_A").unwrap();
+        assert!(!changed, "first save must not be flagged as a key change");
+
+        // User verifies the device.
+        storage.set_trust_level(jid, dev, TrustLevel::Verified).unwrap();
+        assert_eq!(storage.get_trust_level(jid, dev).unwrap(), TrustLevel::Verified);
+
+        // Same key refetched → trust preserved, no pending verification raised.
+        let changed = storage.save_fetched_identity(jid, &id_a, "FP_A").unwrap();
+        assert!(!changed, "same key must not be flagged as changed");
+        assert_eq!(
+            storage.get_trust_level(jid, dev).unwrap(),
+            TrustLevel::Verified,
+            "verified trust must survive a same-key refetch"
+        );
+
+        // Attacker swaps the identity key for the SAME device id.
+        let id_b = make_identity(dev, 0x22);
+        let changed = storage.save_fetched_identity(jid, &id_b, "FP_B").unwrap();
+
+        assert!(changed, "key swap MUST be detected");
+        assert_eq!(
+            storage.get_trust_level(jid, dev).unwrap(),
+            TrustLevel::Untrusted,
+            "trust MUST be reset to Untrusted on key change (no MITM trust transfer)"
+        );
+        // New key is persisted.
+        assert_eq!(storage.load_device_identity(jid, dev).unwrap().identity_key, id_b.identity_key);
+        // UI re-verification is flagged with the new fingerprint.
+        assert_eq!(
+            storage.get_pending_device_verification(jid).unwrap(),
+            Some((dev, "FP_B".to_string()))
+        );
+    }
 
     #[test]
     fn test_alphanumeric_jid_conversion() {

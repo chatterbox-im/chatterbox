@@ -289,23 +289,24 @@ impl OmemoManager {
         // Parse the response to extract the device bundle
         let identity = self.parse_device_bundle_response(&response, device_id)?;
 
-        // Store the identity, preserving existing trust level if one exists
+        // Store the identity with identity-key pinning. If the device's identity
+        // key changed since we last saw it, trust is reset to Untrusted and the
+        // user is prompted to re-verify (possible MITM); otherwise prior trust is
+        // preserved. Compute the fingerprint before taking the storage lock.
+        let new_fingerprint = self.generate_standard_fingerprint(&identity.identity_key);
         let mut storage_guard = self.storage.lock().await;
-        let existing_trust = storage_guard.get_trust_level(remote_jid, device_id).ok();
-        storage_guard
-            .save_device_identity(remote_jid, &identity, false)
+        let key_changed = storage_guard
+            .save_fetched_identity(remote_jid, &identity, &new_fingerprint)
             .map_err(|e| {
                 OmemoError::StorageError(format!("Failed to store device identity: {}", e))
             })?;
-        // Restore previous trust level if it was explicitly set
-        if let Some(trust) = existing_trust {
-            if trust != crate::omemo::storage::TrustLevel::Undecided {
-                storage_guard
-                    .set_trust_level(remote_jid, device_id, trust)
-                    .map_err(|e| {
-                        OmemoError::StorageError(format!("Failed to restore trust level: {}", e))
-                    })?;
-            }
+        drop(storage_guard);
+
+        if key_changed {
+            warn!(
+                "OMEMO identity key for {}:{} changed — marked Untrusted, awaiting re-verification",
+                remote_jid, device_id
+            );
         }
 
         Ok(identity)

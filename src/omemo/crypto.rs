@@ -970,9 +970,48 @@ pub fn xeddsa_verify(
     Ok(false)
 }
 
+/// Returns true if two encoded Curve25519 identity keys represent *different*
+/// keys. A leading `0x05` type-prefix (the 33-byte libsignal encoding) is
+/// ignored, so the 32-byte and 33-byte encodings of the same key compare equal.
+///
+/// Used for identity-key pinning: a change here for an already-known device is a
+/// possible MITM and must reset trust.
+pub fn identity_key_changed(old: &[u8], new: &[u8]) -> bool {
+    fn strip(k: &[u8]) -> &[u8] {
+        if k.len() == 33 && k[0] == 0x05 {
+            &k[1..]
+        } else {
+            k
+        }
+    }
+    strip(old) != strip(new)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_identity_key_changed() {
+        let a = vec![0x11u8; 32];
+        let b = vec![0x22u8; 32];
+
+        // Same raw key → not changed.
+        assert!(!identity_key_changed(&a, &a));
+
+        // Same key, one with 0x05 prefix (33 bytes) → not changed.
+        let a_prefixed = encode_public_key_with_prefix(&a);
+        assert_eq!(a_prefixed.len(), 33);
+        assert!(!identity_key_changed(&a, &a_prefixed));
+        assert!(!identity_key_changed(&a_prefixed, &a));
+
+        // Different keys → changed (raw and prefixed forms).
+        assert!(identity_key_changed(&a, &b));
+        assert!(identity_key_changed(
+            &encode_public_key_with_prefix(&a),
+            &encode_public_key_with_prefix(&b)
+        ));
+    }
 
     #[test]
     fn test_dino_key_montgomery_to_edwards() {

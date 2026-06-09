@@ -1031,7 +1031,7 @@ impl OmemoManager {
     }
 
     /// Generate a standard fingerprint from a public key using SHA-256
-    fn generate_standard_fingerprint(&self, public_key: &[u8]) -> String {
+    pub(crate) fn generate_standard_fingerprint(&self, public_key: &[u8]) -> String {
         let hash = crate::omemo::crypto::sha256_hash(public_key);
         debug!(
             "generate_standard_fingerprint: SHA-256 hash: {}",
