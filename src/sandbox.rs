@@ -236,10 +236,14 @@ mod linux {
             cage.add_exception(Exception::WriteAndRead(dir.clone()))?;
         }
 
+        // Mark the child so it doesn't re-exec again. birdcage's `Command` has no
+        // `env()`, and it spawns inheriting our environment — and `FullEnvironment`
+        // keeps that env intact — so set the marker in our own env before spawning.
+        std::env::set_var(SANDBOX_MARKER, "1");
+
         // Re-run ourselves with the same args; stdio is inherited (keeps the TTY).
         let mut cmd = Command::new(exe);
         cmd.args(std::env::args_os().skip(1));
-        cmd.env(SANDBOX_MARKER, "1");
 
         // `spawn` installs the sandbox in this process and launches the child.
         // Any error here is before the child exists, so it's safe to fall through.
