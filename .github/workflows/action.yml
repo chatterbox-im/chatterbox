@@ -10,6 +10,10 @@ jobs:
       XMPP_PASSWORD: ${{ secrets.XMPP_PASSWORD }}
       XMPP_USERNAME_B: ${{ secrets.XMPP_USERNAME_B }}
       XMPP_PASSWORD_B: ${{ secrets.XMPP_PASSWORD_B }}
+      # ubuntu-latest (24.04) sets kernel.apparmor_restrict_unprivileged_userns=1,
+      # which blocks the privileged ops inside birdcage's sandbox namespaces (EPERM).
+      # The sandbox works on real Linux desktops; disable it only for CI.
+      CHATTERBOX_NO_SANDBOX: 1
     steps:
       - uses: actions/checkout@v4
 
