@@ -66,8 +66,13 @@ fn prompt_credentials() -> (String, String, String) {
     (server, username, password)
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    // The startup sandbox must be installed BEFORE any async runtime spawns
+    // worker threads: birdcage's Linux backend (Landlock/seccomp) panics if
+    // `Sandbox::spawn` is called from a multi-threaded process. `#[tokio::main]`
+    // would start those threads before our code runs, so we keep this prologue
+    // single-threaded and drive the tokio runtime manually afterwards.
+
     // Parse command line arguments FIRST
     let args = Args::parse();
 
@@ -99,6 +104,13 @@ async fn main() -> Result<()> {
         sandbox::install_and_reexec(&allow_dirs);
     }
 
+    // Sandbox is installed (still single-threaded). Now start the async runtime
+    // and run the application body. Runtime::new() == multi-thread + enable_all,
+    // matching the previous #[tokio::main] behavior.
+    tokio::runtime::Runtime::new()?.block_on(async_main(args))
+}
+
+async fn async_main(args: Args) -> Result<()> {
     // Determine the log file path based on --omemo-dir
     // In release builds, do not create a log file (avoid leaking sensitive data to disk)
     let log_file_path: Option<PathBuf> = if cfg!(debug_assertions) {
