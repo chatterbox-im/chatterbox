@@ -805,8 +805,8 @@ impl ChatUI {
         Ok(None)
     }
 
-    pub fn draw<B: Backend>(&self, frame: &mut Frame<B>) {
-        let size = frame.size();
+    pub fn draw(&self, frame: &mut Frame) {
+        let size = frame.area();
 
         // Create a layout with 3 horizontal sections
         let chunks = Layout::default()
@@ -951,12 +951,12 @@ impl ChatUI {
 
         // Set cursor position
         if let Tab::Messages = self.active_tab {
-            frame.set_cursor(
+            frame.set_cursor_position((
                 // Put cursor past the end of the input text
                 chat_chunks[1].x + self.input.cursor() as u16 + 1,
                 // Put cursor at the start of the input line
                 chat_chunks[1].y + 1,
-            );
+            ));
         }
 
         // Draw key confirmation popup if active
@@ -1141,7 +1141,7 @@ impl ChatUI {
     }
 }
 
-fn draw_messages<B: Backend>(f: &mut Frame<B>, messages: &[Message], area: Rect, ui: &ChatUI) {
+fn draw_messages(f: &mut Frame, messages: &[Message], area: Rect, ui: &ChatUI) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -1252,7 +1252,7 @@ fn draw_messages<B: Backend>(f: &mut Frame<B>, messages: &[Message], area: Rect,
     f.render_stateful_widget(messages_list, chunks[0], &mut list_state);
 }
 
-fn draw_key_confirmation<B: Backend>(f: &mut Frame<B>, key_conf: &KeyConfirmation, area: Rect) {
+fn draw_key_confirmation(f: &mut Frame, key_conf: &KeyConfirmation, area: Rect) {
     // Calculate popup size and position (centered)
     let popup_width = 60.min(area.width - 4);
     let popup_height = 10.min(area.height - 4);
@@ -1272,7 +1272,7 @@ fn draw_key_confirmation<B: Backend>(f: &mut Frame<B>, key_conf: &KeyConfirmatio
     f.render_widget(popup_block, popup_area);
 
     // Create inner area for content
-    let inner_area = popup_area.inner(&Margin {
+    let inner_area = popup_area.inner(Margin {
         vertical: 1,
         horizontal: 2,
     });
@@ -1304,7 +1304,7 @@ fn draw_key_confirmation<B: Backend>(f: &mut Frame<B>, key_conf: &KeyConfirmatio
     f.render_widget(content_list, inner_area);
 }
 
-fn draw_add_contact_dialog<B: Backend>(f: &mut Frame<B>, dialog: &ContactAddDialog, area: Rect) {
+fn draw_add_contact_dialog(f: &mut Frame, dialog: &ContactAddDialog, area: Rect) {
     // Calculate popup size and position (centered)
     let popup_width = 50.min(area.width - 4);
     let popup_height = 7.min(area.height - 4);
@@ -1324,7 +1324,7 @@ fn draw_add_contact_dialog<B: Backend>(f: &mut Frame<B>, dialog: &ContactAddDial
     f.render_widget(popup_block, popup_area);
 
     // Create inner area for content
-    let inner_area = popup_area.inner(&Margin {
+    let inner_area = popup_area.inner(Margin {
         vertical: 1,
         horizontal: 2,
     });
@@ -1368,14 +1368,14 @@ fn draw_add_contact_dialog<B: Backend>(f: &mut Frame<B>, dialog: &ContactAddDial
     f.render_widget(input_widget, chunks[1]);
 
     // Set cursor position in the input field
-    f.set_cursor(
+    f.set_cursor_position((
         chunks[1].x + dialog.input.cursor() as u16 + 1,
         chunks[1].y + 1,
-    );
+    ));
 }
 
-fn draw_contact_remove_dialog<B: Backend>(
-    f: &mut Frame<B>,
+fn draw_contact_remove_dialog(
+    f: &mut Frame,
     dialog: &ContactRemoveDialog,
     area: Rect,
 ) {
@@ -1398,7 +1398,7 @@ fn draw_contact_remove_dialog<B: Backend>(
     f.render_widget(popup_block, popup_area);
 
     // Create inner area for content
-    let inner_area = popup_area.inner(&Margin {
+    let inner_area = popup_area.inner(Margin {
         vertical: 1,
         horizontal: 2,
     });
@@ -1428,7 +1428,7 @@ fn draw_contact_remove_dialog<B: Backend>(
     f.render_widget(content_list, inner_area);
 }
 
-fn draw_help_dialog<B: Backend>(f: &mut Frame<B>, area: Rect) {
+fn draw_help_dialog(f: &mut Frame, area: Rect) {
     // Calculate popup size and position (centered)
     let popup_width = 80.min(area.width - 4);
     let popup_height = 28.min(area.height - 4);
@@ -1448,7 +1448,7 @@ fn draw_help_dialog<B: Backend>(f: &mut Frame<B>, area: Rect) {
     f.render_widget(popup_block, popup_area);
 
     // Create inner area for content
-    let inner_area = popup_area.inner(&Margin {
+    let inner_area = popup_area.inner(Margin {
         vertical: 1,
         horizontal: 2,
     });
@@ -1533,8 +1533,8 @@ fn draw_help_dialog<B: Backend>(f: &mut Frame<B>, area: Rect) {
     f.render_widget(shortcuts_list, inner_area);
 }
 
-fn draw_device_fingerprints_dialog<B: Backend>(
-    f: &mut Frame<B>,
+fn draw_device_fingerprints_dialog(
+    f: &mut Frame,
     dialog: &DeviceFingerprintsDialog,
     area: Rect,
 ) {
@@ -1564,7 +1564,7 @@ fn draw_device_fingerprints_dialog<B: Backend>(
     f.render_widget(popup_block, popup_area);
 
     // Create inner area for content
-    let inner_area = popup_area.inner(&Margin {
+    let inner_area = popup_area.inner(Margin {
         vertical: 1,
         horizontal: 2,
     });
@@ -1708,8 +1708,8 @@ fn draw_device_fingerprints_dialog<B: Backend>(
     f.render_widget(fingerprints_list, inner_area);
 }
 
-fn draw_friend_request_notification<B: Backend>(
-    f: &mut Frame<B>,
+fn draw_friend_request_notification(
+    f: &mut Frame,
     notification: &FriendRequestNotification,
     area: Rect,
 ) {
@@ -1739,7 +1739,7 @@ fn draw_friend_request_notification<B: Backend>(
     f.render_widget(popup_block, popup_area);
 
     // Create inner area for content
-    let inner_area = popup_area.inner(&Margin {
+    let inner_area = popup_area.inner(Margin {
         vertical: 1,
         horizontal: 2,
     });
