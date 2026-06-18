@@ -799,4 +799,46 @@ impl XMPPClient {
     pub fn get_omemo_manager(&self) -> Option<Arc<TokioMutex<crate::omemo::OmemoManager>>> {
         self.omemo_manager.clone()
     }
+
+    /// Get the stored trust level for a specific device.
+    pub async fn get_device_trust_level(
+        &self,
+        jid: &str,
+        device_id: crate::omemo::device_id::DeviceId,
+    ) -> Result<crate::omemo::TrustLevel> {
+        let manager = self
+            .omemo_manager
+            .as_ref()
+            .ok_or_else(|| anyhow!("No OMEMO manager available"))?;
+        let guard = manager.lock().await;
+        guard
+            .get_device_trust_level(jid, device_id)
+            .await
+            .map_err(|e| anyhow!("{}", e))
+    }
+
+    /// Set trust for a single device (trusted = true → Trusted, false → Untrusted).
+    pub async fn set_single_device_trust(
+        &self,
+        jid: &str,
+        device_id: crate::omemo::device_id::DeviceId,
+        trusted: bool,
+    ) -> Result<()> {
+        let manager = self
+            .omemo_manager
+            .as_ref()
+            .ok_or_else(|| anyhow!("No OMEMO manager available"))?;
+        let guard = manager.lock().await;
+        if trusted {
+            guard
+                .trust_device_identity(jid, device_id)
+                .await
+                .map_err(|e| anyhow!("{}", e))
+        } else {
+            guard
+                .untrust_device_identity(jid, device_id)
+                .await
+                .map_err(|e| anyhow!("{}", e))
+        }
+    }
 }

@@ -934,6 +934,25 @@ async fn handle_user_command(
         return Ok(());
     }
 
+    if content.starts_with("__SET_DEVICE_TRUST__:") {
+        let rest = content.trim_start_matches("__SET_DEVICE_TRUST__:");
+        // Format: <jid>:<device_id>:<1_or_0>
+        // JID may contain ':', so use rsplitn from the right
+        let parts: Vec<&str> = rest.rsplitn(3, ':').collect();
+        // rsplitn gives [flag, device_id, jid]
+        if parts.len() == 3 {
+            let flag = parts[0];
+            if let Ok(device_id) = parts[1].parse::<u32>() {
+                let jid = parts[2];
+                let trusted = flag == "1";
+                if let Err(e) = xmpp_client.set_single_device_trust(jid, device_id, trusted).await {
+                    info!("MAIN: set_single_device_trust failed: {}", e);
+                }
+            }
+        }
+        return Ok(());
+    }
+
     if content == "__SHOW_ADD_CONTACT__" {
         handle_show_add_contact(chat_ui, xmpp_client).await;
         return Ok(());
@@ -1082,6 +1101,8 @@ async fn handle_show_device_fingerprints(
     terminal: &mut crate::ui::Terminal<crate::ui::CrosstermBackend<io::Stdout>>,
     xmpp_client: &mut XMPPClient,
 ) {
+    use chatterbox::omemo::TrustLevel;
+
     info!("MAIN: Received request to show device fingerprints dialog (own devices)");
     chat_ui.reset_device_fingerprints_dialog();
 
@@ -1100,6 +1121,29 @@ async fn handle_show_device_fingerprints(
     );
     let _ = terminal.draw(|f| chat_ui.draw(f));
 
+    // ── helper: fetch fingerprint + trust for one device ──────────────────────
+    async fn fetch_fp_trust(
+        client: &XMPPClient,
+        jid: &str,
+        device_id: u32,
+    ) -> (String, TrustLevel) {
+        let fp = match tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            client.get_device_fingerprint(jid, device_id),
+        )
+        .await
+        {
+            Ok(Ok(f)) => f,
+            Ok(Err(e)) => format!("(error: {})", e),
+            Err(_) => "(timeout)".to_string(),
+        };
+        let trust = match client.get_device_trust_level(jid, device_id).await {
+            Ok(t) => t,
+            Err(_) => TrustLevel::Undecided,
+        };
+        (fp, trust)
+    }
+
     match tokio::time::timeout(
         std::time::Duration::from_secs(5),
         xmpp_client.get_device_ids_for_user(bare_jid),
@@ -1108,35 +1152,24 @@ async fn handle_show_device_fingerprints(
     {
         Ok(Ok(device_ids)) if !device_ids.is_empty() => {
             chat_ui.remove_last_message();
-            let mut fingerprints = Vec::new();
+
+            // ── own devices ───────────────────────────────────────────────────
+            let current_device_id = xmpp_client.get_own_device_id().await.ok();
+            let mut own_rows: Vec<(String, String, TrustLevel, bool)> = Vec::new();
             for device_id in &device_ids {
-                match tokio::time::timeout(
-                    std::time::Duration::from_secs(3),
-                    xmpp_client.get_device_fingerprint(bare_jid, *device_id),
-                )
-                .await
-                {
-                    Ok(Ok(fingerprint)) => {
-                        fingerprints.push((device_id.to_string(), fingerprint));
-                    }
-                    Ok(Err(e)) => {
-                        fingerprints.push((device_id.to_string(), format!("Error: {}", e)));
-                    }
-                    Err(_) => {
-                        fingerprints.push((
-                            device_id.to_string(),
-                            "Error: Timeout retrieving fingerprint".to_string(),
-                        ));
-                    }
-                }
+                let (fp, trust) =
+                    fetch_fp_trust(xmpp_client, bare_jid, *device_id).await;
+                let is_current = current_device_id.map_or(false, |id| id == *device_id);
+                own_rows.push((device_id.to_string(), fp, trust, is_current));
             }
 
-            // Also fetch the active contact's fingerprints
+            // ── contact devices ───────────────────────────────────────────────
             let active_contact = chat_ui.get_active_contact();
-            let (contact_jid, contact_fingerprints) =
+            let (contact_jid, contact_rows) =
                 if !active_contact.is_empty() && active_contact != bare_jid {
-                    let contact_bare = active_contact.split('/').next().unwrap_or(&active_contact);
-                    let mut cfps = Vec::new();
+                    let contact_bare =
+                        active_contact.split('/').next().unwrap_or(&active_contact);
+                    let mut rows: Vec<(String, String, TrustLevel)> = Vec::new();
                     if let Ok(Ok(contact_device_ids)) = tokio::time::timeout(
                         std::time::Duration::from_secs(5),
                         xmpp_client.get_device_ids_for_user(contact_bare),
@@ -1144,58 +1177,23 @@ async fn handle_show_device_fingerprints(
                     .await
                     {
                         for device_id in &contact_device_ids {
-                            match tokio::time::timeout(
-                                std::time::Duration::from_secs(3),
-                                xmpp_client.get_device_fingerprint(contact_bare, *device_id),
-                            )
-                            .await
-                            {
-                                Ok(Ok(fp)) => cfps.push((device_id.to_string(), fp)),
-                                Ok(Err(e)) => {
-                                    cfps.push((device_id.to_string(), format!("Error: {}", e)))
-                                }
-                                Err(_) => cfps.push((device_id.to_string(), "Timeout".to_string())),
-                            }
+                            let (fp, trust) =
+                                fetch_fp_trust(xmpp_client, contact_bare, *device_id).await;
+                            rows.push((device_id.to_string(), fp, trust));
                         }
                     }
-                    (Some(contact_bare.to_string()), cfps)
+                    (Some(contact_bare.to_string()), rows)
                 } else {
                     (None, Vec::new())
                 };
 
-            if fingerprints.is_empty() {
+            if own_rows.is_empty() && contact_rows.is_empty() {
                 chat_ui.add_message(create_system_message(
                     "me",
                     "No device fingerprints could be retrieved.",
                 ));
             } else {
-                let current_device_id = match xmpp_client.get_own_device_id().await {
-                    Ok(id) => Some(id.to_string()),
-                    Err(_) => None,
-                };
-                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    chat_ui.show_device_fingerprints_dialog(
-                        fingerprints.clone(),
-                        current_device_id,
-                        contact_jid.clone(),
-                        contact_fingerprints.clone(),
-                    );
-                })) {
-                    Ok(_) => {}
-                    Err(_) => {
-                        chat_ui.reset_device_fingerprints_dialog();
-                        chat_ui.add_message(create_system_message(
-                            "me",
-                            "Failed to display fingerprints in dialog. Showing as messages instead:",
-                        ));
-                        for (device_id, fingerprint) in fingerprints {
-                            chat_ui.add_message(create_system_message(
-                                "me",
-                                &format!("Device {}: {}", device_id, fingerprint),
-                            ));
-                        }
-                    }
-                }
+                chat_ui.show_device_fingerprints_dialog(bare_jid.to_string(), own_rows, contact_jid, contact_rows);
             }
             if let Err(e) = terminal.draw(|f| chat_ui.draw(f)) {
                 chat_ui.reset_device_fingerprints_dialog();

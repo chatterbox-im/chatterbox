@@ -8,7 +8,7 @@ use log::debug; // Add the debug import
 use log::info; // Add the log import
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState},
     Frame,
 };
 use std::{
@@ -27,6 +27,7 @@ use uuid::Uuid;
 
 // Use the new Message type from the models module and TypingStatus from xmpp
 use chatterbox::models::{ContactStatus, DeliveryStatus, Message};
+use chatterbox::omemo::TrustLevel;
 use chatterbox::xmpp::chat_states::TypingStatus;
 
 // Export types needed by main module
@@ -139,13 +140,18 @@ struct HelpDialog {
     // No additional state needed for the help dialog
 }
 
-// Add this new struct for device fingerprints dialog
+// Device fingerprints / trust table dialog (opened with Ctrl+F)
 struct DeviceFingerprintsDialog {
-    fingerprints: Vec<(String, String)>, // (Device ID, Fingerprint)
-    current_device_id: Option<String>,
+    /// Contact devices: (device_id, fingerprint, trust).
+    contact_rows: Vec<(String, String, TrustLevel)>,
     contact_jid: Option<String>,
-    contact_fingerprints: Vec<(String, String)>, // (Device ID, Fingerprint) for active contact
-    scroll_offset: usize,                        // For scrolling when content exceeds dialog height
+    /// Own devices: (device_id, fingerprint, trust, is_current_device).
+    own_rows: Vec<(String, String, TrustLevel, bool)>,
+    /// Bare JID of the local account (used when toggling own-device trust).
+    own_jid: String,
+    /// Unified cursor: 0..contact_rows.len() = contact section,
+    /// contact_rows.len()..total = own section.
+    selected_row: usize,
 }
 
 // Add this new struct for friend request notification
@@ -330,24 +336,20 @@ impl ChatUI {
         self.help_dialog = Some(HelpDialog {});
     }
 
-    /// Shows a dialog displaying all device fingerprints for the current account
-    ///
-    /// # Arguments
-    /// * `fingerprints` - A vector of tuples containing device ID and fingerprint
+    /// Shows the OMEMO device-trust table dialog (Ctrl+F).
     pub fn show_device_fingerprints_dialog(
         &mut self,
-        fingerprints: Vec<(String, String)>,
-        current_device_id: Option<String>,
+        own_jid: String,
+        own_rows: Vec<(String, String, TrustLevel, bool)>,
         contact_jid: Option<String>,
-        contact_fingerprints: Vec<(String, String)>,
+        contact_rows: Vec<(String, String, TrustLevel)>,
     ) {
-        //debug!("UI: Showing device fingerprints dialog with {} own devices, {} contact devices", fingerprints.len(), contact_fingerprints.len());
         self.device_fingerprints_dialog = Some(DeviceFingerprintsDialog {
-            fingerprints,
-            current_device_id,
+            own_jid,
+            own_rows,
             contact_jid,
-            contact_fingerprints,
-            scroll_offset: 0,
+            contact_rows,
+            selected_row: 0,
         });
     }
 
@@ -518,31 +520,57 @@ impl ChatUI {
             return Ok(None);
         }
 
-        // Handle device fingerprints dialog if active
+        // Handle device fingerprints / trust dialog if active
         if let Some(ref mut dialog) = self.device_fingerprints_dialog {
+            let n_contact = dialog.contact_rows.len();
+            let n_own = dialog.own_rows.len();
+            let total = n_contact + n_own;
             match key.code {
                 KeyCode::Up => {
-                    // Up arrow to scroll up one line
-                    if dialog.scroll_offset > 0 {
-                        dialog.scroll_offset -= 1;
+                    if total > 0 && dialog.selected_row > 0 {
+                        dialog.selected_row -= 1;
                     }
                 }
                 KeyCode::Down => {
-                    // Down arrow to scroll down one line
-                    dialog.scroll_offset += 1;
+                    if total > 0 && dialog.selected_row + 1 < total {
+                        dialog.selected_row += 1;
+                    }
                 }
-                KeyCode::Home => {
-                    // Home to jump to top
-                    dialog.scroll_offset = 0;
+                KeyCode::Char(' ') | KeyCode::Enter => {
+                    let sel = dialog.selected_row;
+                    if sel < n_contact {
+                        // Contact device row
+                        let row = &mut dialog.contact_rows[sel];
+                        let jid = dialog.contact_jid.clone().unwrap_or_default();
+                        let device_id = row.0.clone();
+                        let new_trusted =
+                            !matches!(row.2, TrustLevel::Trusted | TrustLevel::Verified);
+                        row.2 = if new_trusted { TrustLevel::Trusted } else { TrustLevel::Untrusted };
+                        let flag = if new_trusted { "1" } else { "0" };
+                        let signal = format!("__SET_DEVICE_TRUST__:{}:{}:{}", jid, device_id, flag);
+                        return Ok(Some((String::new(), signal)));
+                    } else {
+                        // Own device row — skip "this device"
+                        let own_idx = sel - n_contact;
+                        if let Some(row) = dialog.own_rows.get_mut(own_idx) {
+                            let is_current = row.3;
+                            if !is_current {
+                                let jid = dialog.own_jid.clone();
+                                let device_id = row.0.clone();
+                                let new_trusted =
+                                    !matches!(row.2, TrustLevel::Trusted | TrustLevel::Verified);
+                                row.2 = if new_trusted { TrustLevel::Trusted } else { TrustLevel::Untrusted };
+                                let flag = if new_trusted { "1" } else { "0" };
+                                let signal = format!("__SET_DEVICE_TRUST__:{}:{}:{}", jid, device_id, flag);
+                                return Ok(Some((String::new(), signal)));
+                            }
+                        }
+                    }
                 }
-                KeyCode::End => {
-                    // End to jump to bottom
-                    dialog.scroll_offset = usize::MAX;
-                }
-                _ => {
-                    // Any other key closes the dialog
+                KeyCode::Esc => {
                     self.device_fingerprints_dialog = None;
                 }
+                _ => {} // absorb other keys — don't close dialog accidentally
             }
             return Ok(None);
         }
@@ -1538,174 +1566,212 @@ fn draw_device_fingerprints_dialog(
     dialog: &DeviceFingerprintsDialog,
     area: Rect,
 ) {
-    // Calculate popup size and position (centered)
-    let popup_width = 80.min(area.width - 4);
-    // Increase height if we have contact fingerprints
-    let base_height = 20u16;
-    let extra = if !dialog.contact_fingerprints.is_empty() {
-        (dialog.contact_fingerprints.len() as u16 * 3 + 3).min(15)
-    } else {
-        0
-    };
-    let popup_height = (base_height + extra).min(area.height - 4);
-
-    let popup_x = (area.width - popup_width) / 2;
-    let popup_y = (area.height - popup_height) / 2;
-
+    // ── popup geometry ────────────────────────────────────────────────────────
+    let popup_width = 84u16.min(area.width.saturating_sub(4));
+    let contact_rows = dialog.contact_rows.len() as u16;
+    let own_rows = dialog.own_rows.len() as u16;
+    // header + contact section header + table header + rows + gap + own section
+    // header + table header + rows + footer
+    let popup_height = (4 + contact_rows.max(1) + 4 + own_rows.max(1) + 4)
+        .min(area.height.saturating_sub(4));
+    let popup_x = (area.width.saturating_sub(popup_width)) / 2;
+    let popup_y = (area.height.saturating_sub(popup_height)) / 2;
     let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
 
-    // Create popup with border
-    let popup_block = Block::default()
-        .title("OMEMO Fingerprints (Up/Down to scroll)")
+    f.render_widget(Clear, popup_area);
+    let outer_block = Block::default()
+        .title(" OMEMO Keys  ↑/↓ navigate · Space toggle trust · Esc close ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Blue));
+    f.render_widget(outer_block, popup_area);
 
-    f.render_widget(Clear, popup_area); // Clear the area first
-    f.render_widget(popup_block, popup_area);
+    let inner = popup_area.inner(Margin { vertical: 1, horizontal: 1 });
 
-    // Create inner area for content
-    let inner_area = popup_area.inner(Margin {
-        vertical: 1,
-        horizontal: 2,
-    });
-
-    let max_width = (inner_area.width as usize).saturating_sub(2);
-
-    // Helper function to wrap text
-    fn wrap_text(text: &str, width: usize) -> Vec<String> {
-        if width == 0 {
-            return vec![text.to_string()];
-        }
-        let mut result = Vec::new();
-        let mut current = String::new();
-        for word in text.split(' ') {
-            if current.is_empty() {
-                current = word.to_string();
-            } else if current.len() + 1 + word.len() <= width {
-                current.push(' ');
-                current.push_str(word);
-            } else {
-                result.push(current);
-                current = word.to_string();
-            }
-        }
-        if !current.is_empty() {
-            result.push(current);
-        }
-        result
-    }
-
-    // Create the fingerprints list with wrapped lines
-    let mut fingerprints_content = Vec::new();
-
-    // --- Contact devices section ---
-    if let Some(contact_jid) = &dialog.contact_jid {
-        fingerprints_content.push("─".repeat(40.min(max_width)));
-        fingerprints_content.push(format!("Contact fingerprints ({}):", contact_jid));
-        fingerprints_content.push("".to_string());
-
-        if dialog.contact_fingerprints.is_empty() {
-            fingerprints_content.push("No OMEMO keys found for this contact".to_string());
+    // ── helper: format a fingerprint to fit in `w` chars ─────────────────────
+    fn fmt_fp(fp: &str, w: usize) -> String {
+        // strip spaces → re-chunk into groups of 4 hex chars separated by spaces
+        let hex: String = fp.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+        let grouped: String = hex
+            .as_bytes()
+            .chunks(4)
+            .map(|c| std::str::from_utf8(c).unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join(" ");
+        if grouped.len() > w {
+            format!("{}…", &grouped[..w.saturating_sub(1)])
         } else {
-            for (device_id, fingerprint) in &dialog.contact_fingerprints {
-                fingerprints_content.push(format!("Device ID: {}", device_id));
-                // Wrap long fingerprints
-                let wrapped = wrap_text(fingerprint, max_width.saturating_sub(4));
-                for (idx, line) in wrapped.iter().enumerate() {
-                    if idx == 0 {
-                        fingerprints_content.push(format!("  {}", line));
-                    } else {
-                        fingerprints_content.push(format!("    {}", line));
-                    }
-                }
-                fingerprints_content.push("".to_string());
-            }
+            grouped
         }
     }
 
-    // --- Own devices section ---
-    fingerprints_content.push("Your OMEMO device fingerprints:".to_string());
-    fingerprints_content.push("".to_string());
+    // ── trust slider helper ───────────────────────────────────────────────────
+    fn trust_cell(trust: &TrustLevel) -> (String, Color) {
+        match trust {
+            TrustLevel::Trusted | TrustLevel::Verified => ("────● Trusted".to_string(), Color::Green),
+            TrustLevel::Untrusted => ("●──── Blocked".to_string(), Color::Red),
+            TrustLevel::Undecided => ("──?── Unknown".to_string(), Color::Yellow),
+        }
+    }
 
-    if dialog.fingerprints.is_empty() {
-        fingerprints_content.push("No devices found with OMEMO keys".to_string());
+    // ── column widths ─────────────────────────────────────────────────────────
+    // | device_id (9) | fingerprint (fill) | trust (13) |
+    let widths = [
+        Constraint::Length(9),
+        Constraint::Fill(1),
+        Constraint::Length(13),
+    ];
+    let fp_width = (inner.width as usize).saturating_sub(9 + 13 + 4); // approx
+
+    // ── layout: split inner vertically ───────────────────────────────────────
+    let contact_table_height = 2 + contact_rows.max(1); // header row + data rows
+    let gap = 1u16;
+    let own_table_height = 2 + own_rows.max(1);
+    let footer_height = 1u16;
+    let sections = Layout::vertical([
+        Constraint::Length(contact_table_height),
+        Constraint::Length(gap),
+        Constraint::Length(own_table_height),
+        Constraint::Min(footer_height),
+    ])
+    .split(inner);
+
+    // ── contact-device table ──────────────────────────────────────────────────
+    let header_style = Style::default()
+        .fg(Color::Magenta)
+        .add_modifier(Modifier::BOLD);
+    let contact_title = dialog
+        .contact_jid
+        .as_deref()
+        .unwrap_or("Contact devices");
+    let contact_rows_rendered: Vec<Row> = if dialog.contact_rows.is_empty() {
+        vec![Row::new(vec![
+            Cell::from(""),
+            Cell::from("No OMEMO devices found for this contact")
+                .style(Style::default().fg(Color::DarkGray)),
+            Cell::from(""),
+        ])]
     } else {
-        for (device_id, fingerprint) in &dialog.fingerprints {
-            let is_current = dialog
-                .current_device_id
-                .as_ref()
-                .map_or(false, |id| id == device_id);
-            let device_label = if is_current {
-                format!("Device ID: {} (this device)", device_id)
-            } else {
-                format!("Device ID: {}", device_id)
-            };
-            fingerprints_content.push(device_label);
-            // Wrap long fingerprints
-            let wrapped = wrap_text(fingerprint, max_width.saturating_sub(4));
-            for (idx, line) in wrapped.iter().enumerate() {
-                if idx == 0 {
-                    fingerprints_content.push(format!("  {}", line));
+        dialog
+            .contact_rows
+            .iter()
+            .map(|(dev, fp, trust)| {
+                let (trust_text, trust_color) = trust_cell(trust);
+                Row::new(vec![
+                    Cell::from(dev.as_str()),
+                    Cell::from(fmt_fp(fp, fp_width)),
+                    Cell::from(Span::styled(
+                        trust_text,
+                        Style::default().fg(trust_color),
+                    )),
+                ])
+            })
+            .collect()
+    };
+
+    let n_contact = dialog.contact_rows.len();
+    let mut contact_state = TableState::default();
+    if !dialog.contact_rows.is_empty() && dialog.selected_row < n_contact {
+        contact_state.select(Some(dialog.selected_row));
+    }
+
+    let contact_table = Table::new(contact_rows_rendered, widths)
+        .header(
+            Row::new(vec!["Device", "Fingerprint", "Trust"]).style(header_style),
+        )
+        .block(
+            Block::default()
+                .title(Span::styled(contact_title, Style::default().fg(Color::Magenta)))
+                .borders(Borders::NONE),
+        )
+        .row_highlight_style(
+            Style::default()
+                .bg(Color::Blue)
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol(">> ");
+
+    f.render_stateful_widget(contact_table, sections[0], &mut contact_state);
+
+    // ── own-device table ──────────────────────────────────────────────────────
+    let own_header_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let own_rows_rendered: Vec<Row> = if dialog.own_rows.is_empty() {
+        vec![Row::new(vec![
+            Cell::from(""),
+            Cell::from("No own devices found")
+                .style(Style::default().fg(Color::DarkGray)),
+            Cell::from(""),
+        ])]
+    } else {
+        dialog
+            .own_rows
+            .iter()
+            .map(|(dev, fp, trust, is_current)| {
+                let dev_text = if *is_current {
+                    format!("{} *", dev) // asterisk marks current device
                 } else {
-                    fingerprints_content.push(format!("    {}", line));
-                }
-            }
-            fingerprints_content.push("".to_string());
+                    dev.clone()
+                };
+                let dev_style = if *is_current {
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                let (trust_text, trust_color) = if *is_current {
+                    ("(this device)".to_string(), Color::Yellow)
+                } else {
+                    trust_cell(trust)
+                };
+                Row::new(vec![
+                    Cell::from(Span::styled(dev_text, dev_style)),
+                    Cell::from(fmt_fp(fp, fp_width)),
+                    Cell::from(Span::styled(trust_text, Style::default().fg(trust_color))),
+                ])
+            })
+            .collect()
+    };
+
+    // Selection within own section
+    let mut own_state = TableState::default();
+    if dialog.selected_row >= n_contact {
+        let own_idx = dialog.selected_row - n_contact;
+        if own_idx < dialog.own_rows.len() {
+            own_state.select(Some(own_idx));
         }
     }
 
-    fingerprints_content.push("Press any key to close".to_string());
+    let own_table = Table::new(own_rows_rendered, widths)
+        .header(
+            Row::new(vec!["Device", "Fingerprint", "Trust"]).style(own_header_style),
+        )
+        .block(
+            Block::default()
+                .title(Span::styled(
+                    "Your devices  (* = this device, cannot change trust)",
+                    Style::default().fg(Color::Cyan),
+                ))
+                .borders(Borders::NONE),
+        )
+        .row_highlight_style(
+            Style::default()
+                .bg(Color::Blue)
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol(">> ");
 
-    // Apply scroll offset
-    let start_idx = dialog.scroll_offset;
-    let visible_lines = inner_area.height as usize;
+    f.render_stateful_widget(own_table, sections[2], &mut own_state);
 
-    // Convert content to ListItems, applying scroll offset
-    let items: Vec<ListItem> = fingerprints_content
-        .iter()
-        .skip(start_idx)
-        .take(visible_lines)
-        .map(|s| {
-            if s.contains("(this device)") {
-                ListItem::new(Text::styled(
-                    s.clone(),
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-                ))
-            } else if s.starts_with("Device ID:") {
-                ListItem::new(Text::styled(s.clone(), Style::default().fg(Color::Yellow)))
-            } else if s.starts_with("  ") && s.len() > 10 {
-                // Fingerprint lines (indented)
-                ListItem::new(Text::styled(s.clone(), Style::default().fg(Color::Green)))
-            } else if s.starts_with("Your OMEMO") {
-                ListItem::new(Text::styled(
-                    s.clone(),
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ))
-            } else if s.starts_with("Contact fingerprints") {
-                ListItem::new(Text::styled(
-                    s.clone(),
-                    Style::default()
-                        .fg(Color::Magenta)
-                        .add_modifier(Modifier::BOLD),
-                ))
-            } else if s.starts_with("─") {
-                ListItem::new(Text::styled(
-                    s.clone(),
-                    Style::default().fg(Color::DarkGray),
-                ))
-            } else {
-                ListItem::new(s.as_str())
-            }
-        })
-        .collect();
-
-    // Display the fingerprints list
-    let fingerprints_list = List::new(items);
-    f.render_widget(fingerprints_list, inner_area);
+    // ── footer hint ───────────────────────────────────────────────────────────
+    if !sections[3].is_empty() {
+        let hint = Paragraph::new(
+            "Space/Enter to toggle trust for selected contact device  ·  Esc to close",
+        )
+        .style(Style::default().fg(Color::DarkGray));
+        f.render_widget(hint, sections[3]);
+    }
 }
 
 fn draw_friend_request_notification(
