@@ -64,6 +64,9 @@ pub trait OmemoPubSub: Send + Sync {
 
     /// Publish the OMEMO device list
     async fn publish_device_list(&self, device_ids: &[DeviceId]) -> Result<()>;
+
+    /// Delete the bundle PubSub node for a device (used for cleanup)
+    async fn delete_bundle(&self, device_id: DeviceId) -> Result<()>;
 }
 
 /// Errors that can occur in OMEMO operations
@@ -420,6 +423,9 @@ mod tests {
             Ok(())
         }
         async fn publish_device_list(&self, _device_ids: &[DeviceId]) -> Result<()> {
+            Ok(())
+        }
+        async fn delete_bundle(&self, _device_id: DeviceId) -> Result<()> {
             Ok(())
         }
     }

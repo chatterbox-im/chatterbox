@@ -141,6 +141,9 @@ mod tests {
         async fn publish_device_list(&self, _device_ids: &[DeviceId]) -> Result<()> {
             Ok(())
         }
+        async fn delete_bundle(&self, _device_id: DeviceId) -> Result<()> {
+            Ok(())
+        }
     }
 
     /// Create an OmemoManager with a temp directory for storage.

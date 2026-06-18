@@ -104,6 +104,10 @@ impl OmemoPubSub for XmppPubSubBridge {
         info!("Device list publish with publish-options failed, retrying without publish-options (node may already exist with different config)");
         self.send_device_list_iq(device_ids, false).await
     }
+
+    async fn delete_bundle(&self, device_id: DeviceId) -> Result<()> {
+        self.send_bundle_delete_iq(device_id).await
+    }
 }
 
 impl XmppPubSubBridge {
@@ -259,6 +263,71 @@ impl XmppPubSubBridge {
                 Err(anyhow!(
                     "Timeout waiting for device list publish acknowledgment"
                 ))
+            }
+        }
+    }
+
+    /// Send a PubSub owner `<delete>` IQ to remove the bundle node for a device.
+    async fn send_bundle_delete_iq(&self, device_id: DeviceId) -> Result<()> {
+        use crate::xmpp::transport;
+        use tokio::time::Duration;
+        use uuid::Uuid;
+
+        let node = format!(
+            "eu.siacs.conversations.axolotl.bundles:{}",
+            device_id
+        );
+        let iq_id = Uuid::new_v4().to_string();
+
+        let rx = {
+            let mut registry = self.iq_registry.lock().await;
+            registry.register(iq_id.clone())
+        };
+
+        let delete_element =
+            xmpp_parsers::Element::builder("delete", "http://jabber.org/protocol/pubsub#owner")
+                .attr("node", &node)
+                .build();
+
+        let pubsub_element =
+            xmpp_parsers::Element::builder("pubsub", "http://jabber.org/protocol/pubsub#owner")
+                .append(delete_element)
+                .build();
+
+        let iq = xmpp_parsers::Element::builder("iq", "jabber:client")
+            .attr("type", "set")
+            .attr("id", &iq_id)
+            .append(pubsub_element)
+            .build();
+
+        transport::send_stanza(&self.stanza_tx, iq)
+            .map_err(|e| anyhow!("Failed to send bundle delete stanza: {}", e))?;
+
+        match tokio::time::timeout(Duration::from_secs(10), rx).await {
+            Ok(Ok(response)) => {
+                match response.attr("type") {
+                    Some("result") => {
+                        debug!("Bundle node {} deleted from server", node);
+                        Ok(())
+                    }
+                    Some("error") => {
+                        // item-not-found is fine — the node was already gone
+                        let xml = element_to_xml_string(&response);
+                        if xml.contains("item-not-found") {
+                            debug!("Bundle node {} not found on server (already deleted)", node);
+                            Ok(())
+                        } else {
+                            warn!("Server returned error deleting bundle node {}: {}", node, &xml[..xml.len().min(300)]);
+                            Ok(()) // Non-fatal: best-effort cleanup
+                        }
+                    }
+                    _ => Ok(()),
+                }
+            }
+            Ok(Err(_)) => Ok(()), // Channel closed — non-fatal
+            Err(_) => {
+                warn!("Timeout waiting for bundle delete ack (node {})", node);
+                Ok(()) // Non-fatal: best-effort cleanup
             }
         }
     }
