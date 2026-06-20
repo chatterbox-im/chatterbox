@@ -6,12 +6,13 @@
 //! unreadable.
 //!
 //! Platforms:
-//! - **macOS**: a hand-written Seatbelt profile applied in-process via
-//!   `sandbox_init`. We roll our own (rather than use `birdcage`) because a TUI
-//!   needs `file-ioctl` on the terminal for raw mode and `user-preference-read`
-//!   for CoreFoundation/Security — neither of which birdcage's profile can
-//!   express. The base profile keeps `mach`/`ipc` open, so DNS (`mDNSResponder`)
-//!   and TLS trust evaluation (`securityd`/`trustd`) keep working.
+//! - **macOS**: a hand-written Seatbelt profile applied via `sandbox-exec`,
+//!   which re-execs the process inside a confined child (same pattern as Linux).
+//!   We roll our own profile (rather than use `birdcage`) because a TUI needs
+//!   `file-ioctl` on the terminal for raw mode and `user-preference-read` for
+//!   CoreFoundation/Security — neither of which birdcage's profile can express.
+//!   The base profile keeps `mach`/`ipc` open, so DNS (`mDNSResponder`) and TLS
+//!   trust evaluation (`securityd`/`trustd`) keep working.
 //! - **Linux**: `birdcage` (Landlock + seccomp). birdcage has no in-process
 //!   lock, so we re-exec a confined copy of ourselves as the sandboxee.
 //!
@@ -26,10 +27,9 @@ const DISABLE_VAR: &str = "CHATTERBOX_NO_SANDBOX";
 /// Confine the current process to `allow_dirs` (read+write), system locations,
 /// and the network. `allow_dirs` must already exist on disk.
 ///
-/// On macOS this confines the process in place and returns. On Linux it re-execs
-/// a sandboxed child and, on success, exits with the child's status (so it does
-/// not return). On unsupported platforms, or on any setup failure, it warns and
-/// returns so the app still runs (fail-open).
+/// On macOS and Linux this re-execs a sandboxed child and, on success, exits
+/// with the child's status (so it does not return). On unsupported platforms, or
+/// on any setup failure, it warns and returns so the app still runs (fail-open).
 pub fn install_and_reexec(allow_dirs: &[PathBuf]) {
     if std::env::var_os(DISABLE_VAR).is_some() {
         eprintln!("chatterbox: sandbox disabled via {DISABLE_VAR}");
@@ -51,20 +51,19 @@ pub fn install_and_reexec(allow_dirs: &[PathBuf]) {
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use std::ffi::{CStr, CString};
     use std::fmt::Write as _;
-    use std::os::raw::c_char;
     use std::path::PathBuf;
-    use std::ptr;
 
-    extern "C" {
-        fn sandbox_init(profile: *const c_char, flags: u64, errorbuf: *mut *mut c_char) -> i32;
-        fn sandbox_free_error(errorbuf: *mut c_char);
-    }
+    /// Marks the already-sandboxed child so it doesn't re-exec again.
+    const SANDBOX_MARKER: &str = "CHATTERBOX_SANDBOXED";
 
     pub fn install(allow_dirs: &[PathBuf]) {
-        match try_install(allow_dirs) {
-            Ok(()) => log::info!("macOS Seatbelt sandbox active"),
+        if std::env::var_os(SANDBOX_MARKER).is_some() {
+            log::info!("macOS Seatbelt sandbox active");
+            return; // we are the sandboxed child — run the app
+        }
+        match try_reexec(allow_dirs) {
+            Ok(code) => std::process::exit(code),
             Err(e) => eprintln!(
                 "chatterbox: WARNING — could not enable sandbox ({e}); running WITHOUT \
                  filesystem isolation. Set CHATTERBOX_NO_SANDBOX=1 to silence."
@@ -72,25 +71,26 @@ mod macos {
         }
     }
 
-    fn try_install(allow_dirs: &[PathBuf]) -> anyhow::Result<()> {
+    fn try_reexec(allow_dirs: &[PathBuf]) -> anyhow::Result<i32> {
+        let exe = std::env::current_exe()?;
         let profile = build_profile(allow_dirs);
-        let c_profile = CString::new(profile)?;
 
-        let mut err: *mut c_char = ptr::null_mut();
-        // flags = 0: `profile` is a literal SBPL string (not a named profile).
-        let rc = unsafe { sandbox_init(c_profile.as_ptr(), 0, &mut err) };
-        if rc == 0 {
-            return Ok(());
-        }
+        // Mark the child so it doesn't re-exec again.
+        std::env::set_var(SANDBOX_MARKER, "1");
 
-        let msg = if err.is_null() {
-            "sandbox_init failed".to_string()
-        } else {
-            let m = unsafe { CStr::from_ptr(err) }.to_string_lossy().into_owned();
-            unsafe { sandbox_free_error(err) };
-            m
-        };
-        anyhow::bail!("{msg}")
+        // Re-run ourselves under sandbox-exec with the same args; stdio is inherited
+        // (keeps the TTY). sandbox-exec applies the Seatbelt profile to the child.
+        let mut child = std::process::Command::new("sandbox-exec")
+            .arg("-p")
+            .arg(&profile)
+            .arg(&exe)
+            .args(std::env::args_os().skip(1))
+            .spawn()?;
+
+        // A sandboxed child is now running; never fall back to running the app in
+        // this (now-unsandboxed) parent. Always exit with the child's status.
+        let code = child.wait().ok().and_then(|s| s.code()).unwrap_or(1);
+        Ok(code)
     }
 
     /// Build the Seatbelt (SBPL) profile string.
@@ -104,6 +104,7 @@ mod macos {
              (allow mach*)\n\
              (allow ipc*)\n\
              (allow signal (target others))\n\
+             (allow process-exec*)\n\
              (allow process-fork)\n\
              (allow sysctl*)\n\
              (allow system*)\n\
