@@ -28,6 +28,30 @@ fn main() {
     update_readme_with_line_count();
 }
 
+fn count_unsafe_lines() -> u32 {
+    fn walk(dir: &std::path::Path) -> u32 {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return 0;
+        };
+        entries
+            .flatten()
+            .map(|e| {
+                let path = e.path();
+                if path.is_dir() {
+                    walk(&path)
+                } else if path.extension().and_then(|x| x.to_str()) == Some("rs") {
+                    std::fs::read_to_string(&path)
+                        .map(|s| s.lines().filter(|l| l.contains("unsafe")).count() as u32)
+                        .unwrap_or(0)
+                } else {
+                    0
+                }
+            })
+            .sum()
+    }
+    walk(std::path::Path::new("./src"))
+}
+
 fn update_readme_with_line_count() {
     // Run the command to count lines of Rust code
     let output = Command::new("sh")
@@ -75,6 +99,8 @@ fn update_readme_with_line_count() {
         }
     }
 
+    let unsafe_lines = count_unsafe_lines();
+
     // Read current README
     let mut readme_content = String::new();
     let mut file = File::open("README.md").expect("Failed to open README.md");
@@ -84,11 +110,12 @@ fn update_readme_with_line_count() {
     // Prepare stats section with formatted numbers and proper indentation
     let stats_section = format!(
         "## Project Stats\n\n\
-        - Total lines of Rust code: {} lines\n\
-          - OMEMO implementation: {} lines\n\
-          - XMPP integration: {} lines\n\
-          - UI and app logic: {} lines\n\n",
-        total_lines, omemo_lines, xmpp_lines, ui_and_other_lines
+         - Total lines of Rust code: {} lines\n  \
+         - OMEMO implementation: {} lines\n  \
+         - XMPP integration: {} lines\n  \
+         - UI and app logic: {} lines\n  \
+         - Unsafe Rust: {} lines\n\n",
+        total_lines, omemo_lines, xmpp_lines, ui_and_other_lines, unsafe_lines
     );
 
     // Fixed XEP-0384 section - move from planned to implemented list
