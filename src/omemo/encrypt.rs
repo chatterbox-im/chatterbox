@@ -502,11 +502,24 @@ impl OmemoManager {
         drop(storage_guard);
 
         // Add our own devices (for message carbons), but exclude our current device
+        // and any own device explicitly marked Untrusted (e.g. a revoked/compromised device).
+        let storage_guard = self.storage.lock().await;
         for device_id in own_device_ids {
             if device_id == self.device_id {
                 debug!(
                     "ENCRYPT_DEBUG: Skipping our current device {} for message encryption",
                     device_id
+                );
+                continue;
+            }
+
+            let trust_level = storage_guard
+                .get_trust_level(&user_bare_jid, device_id)
+                .unwrap_or(crate::omemo::storage::TrustLevel::Undecided);
+            if trust_level == crate::omemo::storage::TrustLevel::Untrusted {
+                warn!(
+                    "ENCRYPT_DEBUG: Skipping untrusted own device {}:{}",
+                    user_bare_jid, device_id
                 );
                 continue;
             }
@@ -524,6 +537,7 @@ impl OmemoManager {
                 );
             }
         }
+        drop(storage_guard);
 
         info!(
             "ENCRYPT_DEBUG: Final merged device list for encryption: {:?}",
