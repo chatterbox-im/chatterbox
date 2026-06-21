@@ -726,6 +726,9 @@ impl ChatUI {
                             )));
                         }
                     }
+                } else if let Tab::Messages = self.active_tab {
+                    let current = self.message_scroll_offset.unwrap_or(0);
+                    self.message_scroll_offset = Some(current + 3);
                 }
             }
             KeyCode::Down => {
@@ -744,6 +747,14 @@ impl ChatUI {
                                 self.contact.clone(),
                                 String::from("__CONTACT_CHANGED__"),
                             )));
+                        }
+                    }
+                } else if let Tab::Messages = self.active_tab {
+                    if let Some(offset) = self.message_scroll_offset {
+                        if offset <= 3 {
+                            self.message_scroll_offset = None;
+                        } else {
+                            self.message_scroll_offset = Some(offset - 3);
                         }
                     }
                 }
@@ -1873,6 +1884,10 @@ pub fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableFocusChange)?;
+    // Alternate scroll mode: the terminal converts scroll-wheel events into
+    // Up/Down arrow key sequences without consuming mouse button events, so
+    // normal text selection still works.
+    io::Write::write_all(&mut stdout, b"\x1b[?1007h")?;
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
     Ok(terminal)
@@ -1880,6 +1895,8 @@ pub fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
 
 pub fn restore_terminal(mut terminal: Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
     disable_raw_mode()?;
+    let _ = io::Write::write_all(terminal.backend_mut(), b"\x1b[?1007l");
+    let _ = io::Write::flush(terminal.backend_mut());
     execute!(
         terminal.backend_mut(),
         DisableFocusChange,
