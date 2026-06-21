@@ -21,7 +21,7 @@ use std::{
     thread,
     time::Duration,
 };
-use textwrap::wrap;
+use textwrap::{wrap, Options, WordSplitter};
 use tui_input::{backend::crossterm::EventHandler, Input};
 use uuid::Uuid;
 
@@ -1169,6 +1169,39 @@ impl ChatUI {
     }
 }
 
+/// Splits a text line into ratatui spans, styling any URLs with cyan + underline
+/// so Ghostty (and other terminals) can identify them as clickable links.
+fn spans_for_line(text: &str, base_style: Style) -> Line<'static> {
+    let link_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::UNDERLINED);
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut rest = text;
+    loop {
+        let url_start = match (rest.find("http://"), rest.find("https://")) {
+            (None, None) => {
+                if !rest.is_empty() {
+                    spans.push(Span::styled(rest.to_owned(), base_style));
+                }
+                break;
+            }
+            (Some(a), None) => a,
+            (None, Some(b)) => b,
+            (Some(a), Some(b)) => a.min(b),
+        };
+        if url_start > 0 {
+            spans.push(Span::styled(rest[..url_start].to_owned(), base_style));
+        }
+        let after = &rest[url_start..];
+        let url_len = after
+            .find(|c: char| c.is_ascii_whitespace())
+            .unwrap_or(after.len());
+        spans.push(Span::styled(after[..url_len].to_owned(), link_style));
+        rest = &rest[url_start + url_len..];
+    }
+    Line::from(spans)
+}
+
 fn draw_messages(f: &mut Frame, messages: &[Message], area: Rect, ui: &ChatUI) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -1220,11 +1253,15 @@ fn draw_messages(f: &mut Frame, messages: &[Message], area: Rect, ui: &ChatUI) {
 
             let full_content = format!("{}{}{}", prefix, m.content, status_indicator);
 
-            // Use textwrap to wrap the content, collecting into owned Strings
-            let wrapped_lines: Vec<String> = wrap(&full_content, wrap_width)
-                .into_iter()
-                .map(|l| l.into_owned())
-                .collect();
+            // Use textwrap to wrap the content. NoHyphenation prevents URLs from
+            // being broken at hyphens, which would defeat terminal URL detection.
+            let wrapped_lines: Vec<String> = wrap(
+                &full_content,
+                Options::new(wrap_width).word_splitter(WordSplitter::NoHyphenation),
+            )
+            .into_iter()
+            .map(|l| l.into_owned())
+            .collect();
 
             let style = if m.sender_id == "system" {
                 Style::default().fg(Color::Gray)
@@ -1244,9 +1281,13 @@ fn draw_messages(f: &mut Frame, messages: &[Message], area: Rect, ui: &ChatUI) {
                 Style::default()
             };
 
-            wrapped_lines
-                .into_iter()
-                .map(move |line| ListItem::new(Text::from(line)).style(style))
+            wrapped_lines.into_iter().map(move |line| {
+                if line.contains("http://") || line.contains("https://") {
+                    ListItem::new(Text::from(spans_for_line(&line, style)))
+                } else {
+                    ListItem::new(Text::from(line)).style(style)
+                }
+            })
         })
         .collect();
 
