@@ -314,7 +314,14 @@ impl super::XMPPClient {
                 if let Some(message_stanza) = forwarded.get_child("message", "jabber:client") {
                     if let Some(delay) = forwarded.get_child("delay", "urn:xmpp:delay") {
                         let from = message_stanza.attr("from").map(|s| s.to_string());
-                        let to = message_stanza.attr("to").map(|s| s.to_string());
+                        // Some archived messages (especially self-messages sent to
+                        // our own bare JID) omit the `to` attribute.  Fall back to
+                        // our own bare JID so that OMEMO processing is not silently
+                        // skipped for such messages.
+                        let our_bare_jid = self.jid.split('/').next().unwrap_or(&self.jid).to_string();
+                        let to = message_stanza.attr("to")
+                            .map(|s| s.to_string())
+                            .or_else(|| Some(our_bare_jid));
 
                         let timestamp_str = delay.attr("stamp").unwrap_or("");
                         let timestamp = if !timestamp_str.is_empty() {
