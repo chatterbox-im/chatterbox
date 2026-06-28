@@ -95,6 +95,13 @@ impl OmemoManager {
                     warn!("Failed to republish bundle after missing OPK: {}", e);
                 }
 
+                // Mark the sender's session for rebuild so that the next time we
+                // encrypt for them we force-fetch their current bundle and create a
+                // fresh session.  Without this, our stored (potentially stale) session
+                // for the sender would keep producing Signal messages that the sender
+                // cannot decrypt because they never received our key-agreement reply.
+                self.pending_session_rebuilds.insert((bare_jid.clone(), device_id));
+
                 return Err(OmemoError::SessionError(
                     session::SessionError::InvalidStateError(format!(
                         "Missing one-time prekey {} — sender must re-establish session with fresh bundle",

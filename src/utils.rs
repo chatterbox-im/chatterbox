@@ -75,9 +75,10 @@ pub fn setup_logging(log_file: Option<&str>, level: LevelFilter) -> Result<()> {
     // Log startup information
     log::info!("Logging initialized at level: {}", level);
     log::info!(
-        "App version: {} (built on {})",
+        "App version: {} (built on {}, git: {})",
         env!("CARGO_PKG_VERSION", "unknown"),
-        env!("CARGO_PKG_NAME", "chatterbox")
+        env!("CARGO_PKG_NAME", "chatterbox"),
+        env!("GIT_COMMIT_HASH", "unknown")
     );
 
     Ok(())
