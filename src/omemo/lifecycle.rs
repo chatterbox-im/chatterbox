@@ -980,16 +980,17 @@ impl OmemoManager {
 
         let bare_jid = Self::normalize_jid_to_bare(sender);
 
-        // If the device was previously Untrusted it was skipped during encryption,
-        // leaving our outgoing session stale.  Force a fresh X3DH exchange so that
-        // both sides start from a clean, synchronised ratchet state.
-        let was_untrusted = {
+        // If the device was previously Untrusted or Undecided it may have been
+        // skipped during encryption, or the session may be stale/de-synchronised
+        // (e.g. the remote re-installed and has a new identity key).
+        // Force a fresh X3DH exchange so both sides start from a clean ratchet state.
+        let was_not_trusted = {
             let storage_guard = self.storage.lock().await;
             storage_guard
                 .get_trust_level(&bare_jid, device_id)
                 .ok()
-                .map(|t| t == TrustLevel::Untrusted)
-                .unwrap_or(false)
+                .map(|t| t != TrustLevel::Trusted && t != TrustLevel::Verified)
+                .unwrap_or(true)
         };
 
         {
@@ -999,9 +1000,9 @@ impl OmemoManager {
                 .map_err(|e| OmemoError::StorageError(format!("Failed to set trust: {}", e)))?;
         }
 
-        if was_untrusted {
+        if was_not_trusted {
             info!(
-                "Device {}:{} was Untrusted — forcing session rebuild on next encrypt",
+                "Device {}:{} was not yet trusted — forcing session rebuild on next encrypt",
                 bare_jid, device_id
             );
             let key = (bare_jid.clone(), device_id);
@@ -1014,7 +1015,11 @@ impl OmemoManager {
                 let _ = storage_guard.delete_session(&session_key);
             }
             // Mark for full session rebuild (new X3DH / PreKeyMessage).
-            self.pending_session_rebuilds.insert(key);
+            self.pending_session_rebuilds.insert(key.clone());
+            // Remember to restore Trusted after the rebuild — this prevents
+            // identity-key-pinning in save_fetched_identity from resetting the
+            // trust back to Untrusted when the remote has a fresh identity key.
+            self.pending_trust_restorations.insert(key);
         }
 
         Ok(())

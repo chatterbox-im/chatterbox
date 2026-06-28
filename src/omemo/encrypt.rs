@@ -268,6 +268,24 @@ impl OmemoManager {
         self.sessions.insert(key.clone(), session);
         self.store_session_state(&bare_jid, remote_device_id, &ratchet_state)
             .await?;
+
+        // If the user explicitly trusted this device, restore that trust now.
+        // During a rebuild, save_fetched_identity may have reset trust to Untrusted
+        // because the remote has a new identity key (e.g. fresh re-install).
+        // The user has already decided to trust them, so we honour that.
+        if self.pending_trust_restorations.remove(&key) {
+            info!(
+                "Restoring Trusted status for {}:{} after session rebuild",
+                bare_jid, remote_device_id
+            );
+            let storage_guard = self.storage.lock().await;
+            let _ = storage_guard.set_trust_level(
+                &bare_jid,
+                remote_device_id,
+                crate::omemo::storage::TrustLevel::Trusted,
+            );
+        }
+
         return self.sessions.get_mut(&key).ok_or_else(|| {
             OmemoError::SessionError(session::SessionError::InvalidStateError(
                 "Session not found after check".to_string(),

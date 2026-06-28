@@ -194,6 +194,11 @@ pub struct OmemoManager {
     /// Set of devices that need fresh session establishment after reset
     pub pending_session_rebuilds: HashSet<(String, DeviceId)>,
 
+    /// Devices whose trust level should be restored to Trusted after a session rebuild.
+    /// This prevents identity-key-pinning from overriding an explicit user trust decision
+    /// when the remote device has a new identity (e.g. fresh install).
+    pub(crate) pending_trust_restorations: HashSet<(String, DeviceId)>,
+
     /// Devices that we've reset sessions with and need to send PreKey messages to.
     /// Value is the time when the entry was added (for TTL eviction).
     pub pending_prekey_sends: HashMap<(String, DeviceId), Instant>,
@@ -279,6 +284,7 @@ impl OmemoManager {
             sessions: HashMap::new(),
             prekey_rotation_config: PreKeyRotationConfig::default(),
             pending_session_rebuilds: HashSet::new(),
+            pending_trust_restorations: HashSet::new(),
             pending_prekey_sends: HashMap::new(),
             prekey_ephemeral_keys: HashMap::new(),
             remote_prekey_ids: HashMap::new(),
