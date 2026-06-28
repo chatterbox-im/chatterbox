@@ -90,6 +90,28 @@ impl OmemoManager {
             if prekey_msg.pre_key_id.is_some() && one_time_prekey_pair.is_none() {
                 warn!("PreKeyMessage references OPK id {:?} but we don't have it — cannot establish session (sender needs our fresh bundle)", prekey_msg.pre_key_id);
 
+                // Delete any existing session with this sender.  The sender has
+                // started a new X3DH exchange (evidenced by the PreKeyMessage) so
+                // whatever session state we hold is now stale — the sender's Double
+                // Ratchet root is derived from key material we never processed.
+                // Keeping the old session would cause every subsequent SignalMessage
+                // from the sender to fail with a MAC error.  Clearing it ensures
+                // that the next time we send to the sender (triggered by
+                // `pending_session_rebuilds` below) we create a fresh session that
+                // both sides can agree on.
+                let session_delete_key = (bare_jid.clone(), device_id);
+                self.sessions.remove(&session_delete_key);
+                {
+                    let storage_guard = self.storage.lock().await;
+                    let session_key_str = format!("{}:{}", bare_jid, device_id);
+                    if let Err(e) = storage_guard.delete_session(&session_key_str) {
+                        warn!(
+                            "Failed to delete stale session for {} after missing OPK: {}",
+                            session_key_str, e
+                        );
+                    }
+                }
+
                 // Republish our bundle so the sender can fetch fresh OPKs
                 if let Err(e) = self.publish_bundle_to_server().await {
                     warn!("Failed to republish bundle after missing OPK: {}", e);

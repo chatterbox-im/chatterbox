@@ -387,6 +387,11 @@ impl XMPPClient {
                         );
                         error!("Message ID: {}, Decryption failure details: {:?}", id, e);
 
+                        // Mark this message ID as failed so the carbon copy of the
+                        // same message is not also counted as a separate failure
+                        // (which would prematurely reset the OMEMO session).
+                        omemo_manager_guard.mark_message_failed(id);
+
                         debug!("OMEMO message structure - Sender device: {}, IV length: {}, Payload length: {}, Number of keys: {}", 
                             omemo_message.sender_device_id,
                             omemo_message.iv.len(),

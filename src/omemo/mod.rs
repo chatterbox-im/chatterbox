@@ -216,6 +216,12 @@ pub struct OmemoManager {
     /// stanza delivery and as a message-carbon copy (e.g. self-messages to als@).
     pub(crate) recently_decrypted_ids: std::collections::VecDeque<String>,
 
+    /// Message IDs whose decryption has already failed. Used to suppress the
+    /// carbon copy of a message from also incrementing the failure counter when
+    /// the direct delivery already failed — without this, a single bad message
+    /// counts as two failures and prematurely resets the session.
+    pub(crate) recently_failed_ids: std::collections::VecDeque<String>,
+
     /// PubSub operations — injected dependency instead of global access
     pub(crate) pubsub: Arc<dyn OmemoPubSub>,
 }
@@ -294,6 +300,7 @@ impl OmemoManager {
             prekey_ephemeral_keys: HashMap::new(),
             remote_prekey_ids: HashMap::new(),
             recently_decrypted_ids: std::collections::VecDeque::new(),
+            recently_failed_ids: std::collections::VecDeque::new(),
             pubsub,
         };
 
@@ -370,6 +377,31 @@ impl OmemoManager {
             return false;
         }
         self.recently_decrypted_ids.contains(&msg_id.to_string())
+    }
+
+    /// Maximum number of recently-failed message IDs to remember (ring buffer).
+    const RECENTLY_FAILED_CAP: usize = 200;
+
+    /// Record that decryption failed for this message ID. The carbon copy of the
+    /// same message will then be skipped so the failure is counted only once.
+    pub fn mark_message_failed(&mut self, msg_id: &str) {
+        if msg_id.is_empty() || msg_id == "unknown" {
+            return;
+        }
+        if !self.recently_failed_ids.contains(&msg_id.to_string()) {
+            if self.recently_failed_ids.len() >= Self::RECENTLY_FAILED_CAP {
+                self.recently_failed_ids.pop_front();
+            }
+            self.recently_failed_ids.push_back(msg_id.to_string());
+        }
+    }
+
+    /// Returns `true` if decryption of this message ID has already failed once.
+    pub fn was_message_failed(&self, msg_id: &str) -> bool {
+        if msg_id.is_empty() || msg_id == "unknown" {
+            return false;
+        }
+        self.recently_failed_ids.contains(&msg_id.to_string())
     }
 
     /// Maximum age for pending prekey entries before eviction (1 hour).

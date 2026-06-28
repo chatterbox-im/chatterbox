@@ -429,6 +429,17 @@ impl super::XMPPClient {
                     .send_carbon_to_ui(from, to, is_sent, message.attr("id"), "", true)
                     .await;
             }
+            // If the direct-delivery handler already failed for this message ID,
+            // skip retrying here.  Attempting again would increment the failure
+            // counter a second time for a single problematic message, which
+            // triggers a premature session reset after only one bad message.
+            if manager.was_message_failed(msg_id) {
+                debug!(
+                    "Skipping carbon decryption for already-failed message {} from {}:{}",
+                    msg_id, sender_jid, sender_device_id
+                );
+                return Ok(());
+            }
         }
 
         // Now we need to decrypt the message using the OMEMO manager
