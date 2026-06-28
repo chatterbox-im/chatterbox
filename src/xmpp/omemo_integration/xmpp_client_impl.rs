@@ -484,7 +484,7 @@ impl crate::xmpp::XMPPClient {
                 }
 
                 // Mark the device as trusted in the OMEMO manager
-                let manager_guard = omemo_manager.lock().await;
+                let mut manager_guard = omemo_manager.lock().await;
                 if let Err(e) = manager_guard
                     .trust_device_identity(contact, device_id)
                     .await
@@ -589,7 +589,7 @@ impl crate::xmpp::XMPPClient {
     /// Mark a device as trusted
     pub async fn mark_device_trusted(&self, jid: &str, device_id: DeviceId) -> Result<()> {
         if let Some(omemo_manager) = &self.omemo_manager {
-            let manager = omemo_manager.lock().await;
+            let mut manager = omemo_manager.lock().await;
             match manager.trust_device_identity(jid, device_id).await {
                 Ok(_) => Ok(()),
                 Err(e) => Err(anyhow!("Failed to mark device as trusted: {}", e)),

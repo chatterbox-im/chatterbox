@@ -578,7 +578,7 @@ impl XMPPClient {
                 // Double-check if this fingerprint is already trusted in the database
                 let fingerprint_trusted = storage.is_device_trusted(contact, device_id)?;
                 if fingerprint_trusted {
-                    let manager_guard = omemo_manager.lock().await;
+                    let mut manager_guard = omemo_manager.lock().await;
                     match tokio::time::timeout(
                         std::time::Duration::from_secs(5),
                         manager_guard.trust_device_identity(contact, device_id),
@@ -762,7 +762,7 @@ impl XMPPClient {
 
         for (device_id, current_trusted) in statuses {
             if current_trusted != set_trusted {
-                let manager_guard = omemo_manager.lock().await;
+                let mut manager_guard = omemo_manager.lock().await;
 
                 if set_trusted {
                     if let Err(e) = manager_guard
@@ -828,7 +828,7 @@ impl XMPPClient {
             .omemo_manager
             .as_ref()
             .ok_or_else(|| anyhow!("No OMEMO manager available"))?;
-        let guard = manager.lock().await;
+        let mut guard = manager.lock().await;
         if trusted {
             guard
                 .trust_device_identity(jid, device_id)

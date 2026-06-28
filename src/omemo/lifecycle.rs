@@ -969,7 +969,7 @@ impl OmemoManager {
 
     /// Mark a device identity as trusted
     pub async fn trust_device_identity(
-        &self,
+        &mut self,
         sender: &str,
         device_id: DeviceId,
     ) -> Result<(), OmemoError> {
@@ -978,10 +978,44 @@ impl OmemoManager {
             sender, device_id
         );
 
-        let storage_guard = self.storage.lock().await;
-        storage_guard
-            .set_trust_level(sender, device_id, TrustLevel::Trusted)
-            .map_err(|e| OmemoError::StorageError(format!("Failed to set trust: {}", e)))?;
+        let bare_jid = Self::normalize_jid_to_bare(sender);
+
+        // If the device was previously Untrusted it was skipped during encryption,
+        // leaving our outgoing session stale.  Force a fresh X3DH exchange so that
+        // both sides start from a clean, synchronised ratchet state.
+        let was_untrusted = {
+            let storage_guard = self.storage.lock().await;
+            storage_guard
+                .get_trust_level(&bare_jid, device_id)
+                .ok()
+                .map(|t| t == TrustLevel::Untrusted)
+                .unwrap_or(false)
+        };
+
+        {
+            let storage_guard = self.storage.lock().await;
+            storage_guard
+                .set_trust_level(&bare_jid, device_id, TrustLevel::Trusted)
+                .map_err(|e| OmemoError::StorageError(format!("Failed to set trust: {}", e)))?;
+        }
+
+        if was_untrusted {
+            info!(
+                "Device {}:{} was Untrusted — forcing session rebuild on next encrypt",
+                bare_jid, device_id
+            );
+            let key = (bare_jid.clone(), device_id);
+            // Remove any stale in-memory session so get_or_create_session starts fresh.
+            self.sessions.remove(&key);
+            // Delete the stale on-disk session state.
+            {
+                let session_key = format!("{}:{}", bare_jid, device_id);
+                let storage_guard = self.storage.lock().await;
+                let _ = storage_guard.delete_session(&session_key);
+            }
+            // Mark for full session rebuild (new X3DH / PreKeyMessage).
+            self.pending_session_rebuilds.insert(key);
+        }
 
         Ok(())
     }

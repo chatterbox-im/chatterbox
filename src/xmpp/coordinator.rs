@@ -1105,7 +1105,7 @@ async fn check_omemo_keys_inline(state: &mut CoordinatorState, contact: &str) ->
 
     let omemo_manager = state
         .omemo_manager
-        .as_ref()
+        .as_mut()
         .ok_or_else(|| anyhow!("OMEMO not initialized"))?;
 
     let device_ids = match tokio::time::timeout(
@@ -1157,13 +1157,11 @@ async fn check_omemo_keys_inline(state: &mut CoordinatorState, contact: &str) ->
             };
 
             if storage.is_device_trusted(contact, device_id)? {
-                if let Some(m) = state.omemo_manager.as_ref() {
-                    let _ = tokio::time::timeout(
-                        std::time::Duration::from_secs(5),
-                        m.trust_device_identity(contact, device_id),
-                    )
-                    .await;
-                }
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    omemo_manager.trust_device_identity(contact, device_id),
+                )
+                .await;
                 continue;
             }
 
@@ -1189,7 +1187,7 @@ async fn check_omemo_keys_inline(state: &mut CoordinatorState, contact: &str) ->
 async fn toggle_trust_inline(state: &mut CoordinatorState, contact: &str) -> Result<bool> {
     let omemo_manager = state
         .omemo_manager
-        .as_ref()
+        .as_mut()
         .ok_or_else(|| anyhow!("OMEMO not initialized"))?;
 
     let device_ids = omemo_manager
