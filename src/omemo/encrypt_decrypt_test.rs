@@ -18,7 +18,7 @@ mod tests {
 
     use crate::omemo::device_id::DeviceId;
     use crate::omemo::protocol::X3DHKeyBundle;
-    use crate::omemo::storage::OmemoStorage;
+    use crate::omemo::storage::{DeviceListEntry, OmemoStorage};
     use crate::omemo::wire::PreKeySignalMessage;
     use crate::omemo::{OmemoManager, OmemoPubSub, OMEMO_NAMESPACE};
 
@@ -154,8 +154,12 @@ mod tests {
         pubsub: Arc<dyn OmemoPubSub>,
     ) -> (OmemoManager, TempDir) {
         let temp_dir = TempDir::new().unwrap();
+        let metadata_dir = temp_dir.path().join("metadata");
+        std::fs::create_dir_all(&metadata_dir).unwrap();
+        std::fs::write(metadata_dir.join("device_id"), device_id.to_string()).unwrap();
+
         let storage = OmemoStorage::new(Some(temp_dir.path().to_path_buf())).unwrap();
-        let manager = OmemoManager::new(storage, jid.to_string(), Some(device_id), pubsub)
+        let manager = OmemoManager::new(storage, jid.to_string(), None, pubsub)
             .await
             .expect("Failed to create OmemoManager");
         (manager, temp_dir)
@@ -254,6 +258,70 @@ mod tests {
         assert!(
             !prekey_msg.base_key.is_empty(),
             "base_key (ephemeral) should be non-empty"
+        );
+    }
+
+    /// Test that sent messages remain decryptable by another owned device when
+    /// the fresh own-device lookup is empty but local cache still has the device.
+    #[tokio::test]
+    async fn test_encrypt_uses_cached_own_devices_for_carbons_when_fresh_list_empty() {
+        let _ = env_logger::builder().is_test(true).try_init();
+
+        let alice_jid = "alice@example.com";
+        let bob_jid = "bob@example.com";
+        let alice_device_id: u32 = 1001;
+        let alice_second_device_id: u32 = 1002;
+        let bob_device_id: u32 = 2001;
+
+        let pubsub = Arc::new(MockPubSub::new());
+
+        let (mut alice, _alice_dir) =
+            create_manager(alice_jid, alice_device_id, pubsub.clone()).await;
+        let (alice_second, _alice_second_dir) =
+            create_manager(alice_jid, alice_second_device_id, pubsub.clone()).await;
+        let (bob, _bob_dir) = create_manager(bob_jid, bob_device_id, pubsub.clone()).await;
+
+        pubsub.add_device_list(bob_jid, &[bob_device_id]).await;
+        pubsub
+            .add_bundle(bob_jid, bob_device_id, bob.key_bundle.as_ref().unwrap())
+            .await;
+        pubsub
+            .add_bundle(
+                alice_jid,
+                alice_second_device_id,
+                alice_second.key_bundle.as_ref().unwrap(),
+            )
+            .await;
+
+        {
+            let storage = alice.storage.lock().await;
+            storage
+                .save_device_list(&DeviceListEntry {
+                    jid: alice_jid.to_string(),
+                    device_ids: vec![alice_device_id, alice_second_device_id],
+                    last_update: chrono::Utc::now().timestamp(),
+                })
+                .expect("cached own device list should be saved");
+        }
+
+        let omemo_msg = alice
+            .encrypt_message(bob_jid, "Hello Bob from Alice device 1")
+            .await
+            .expect("Encryption should succeed");
+
+        assert!(
+            omemo_msg.encrypted_keys.contains_key(&bob_device_id),
+            "Recipient device should receive a message key"
+        );
+        assert!(
+            omemo_msg
+                .encrypted_keys
+                .contains_key(&alice_second_device_id),
+            "Second owned device should receive a message key for sent carbons"
+        );
+        assert!(
+            !omemo_msg.encrypted_keys.contains_key(&alice_device_id),
+            "Current sender device should not receive its own message key"
         );
     }
 

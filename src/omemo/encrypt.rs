@@ -13,6 +13,25 @@ use crate::omemo::session::{self, OmemoSession};
 use crate::omemo::{EncryptionVerificationError, OmemoError, OmemoManager, OMEMO_NAMESPACE};
 
 impl OmemoManager {
+    async fn cached_or_session_device_ids_for(&self, bare_jid: &str) -> Vec<DeviceId> {
+        let mut device_ids = Vec::new();
+
+        {
+            let storage_guard = self.storage.lock().await;
+            if let Ok(entry) = storage_guard.load_device_list(bare_jid) {
+                device_ids.extend(entry.device_ids);
+            }
+        }
+
+        for (jid, device_id) in self.sessions.keys() {
+            if jid == bare_jid && !device_ids.contains(device_id) {
+                device_ids.push(*device_id);
+            }
+        }
+
+        device_ids
+    }
+
     /// Get or create a session with a remote device (with consistent initiator/recipient roles)
     pub async fn get_or_create_session(
         &mut self,
@@ -393,10 +412,20 @@ impl OmemoManager {
             recipient_device_ids
         };
 
-        // Get our own device IDs (important for message carbons) with timeout
-        let local_username = self.local_jid.split('@').next().unwrap_or(&self.local_jid);
-        let local_domain = self.local_jid.split('@').nth(1).unwrap_or("");
-        let user_bare_jid = format!("{}@{}", local_username, local_domain);
+        // Get our own device IDs (important for message carbons) with timeout.
+        // Keep a local snapshot first: some servers transiently return an empty
+        // own-device list, and sending without own-device keys makes sent carbons
+        // unreadable on the user's other clients.
+        let user_bare_jid = Self::normalize_jid_to_bare(&self.local_jid);
+        let cached_own_device_ids = self.cached_or_session_device_ids_for(&user_bare_jid).await;
+        let merge_cached_own_device_ids = |mut devices: Vec<DeviceId>| {
+            for device_id in &cached_own_device_ids {
+                if !devices.contains(device_id) {
+                    devices.push(*device_id);
+                }
+            }
+            devices
+        };
         info!(
             "Forcing fresh device list fetch for own JID {} (NO CACHE FALLBACK)",
             user_bare_jid
@@ -407,14 +436,38 @@ impl OmemoManager {
         )
         .await
         {
+            Ok(Ok(devices)) if !devices.is_empty() => merge_cached_own_device_ids(devices),
+            Ok(Ok(_)) if !cached_own_device_ids.is_empty() => {
+                warn!(
+                    "Fresh own device list for {} was empty; using cached/session devices {:?}",
+                    user_bare_jid, cached_own_device_ids
+                );
+                cached_own_device_ids.clone()
+            }
             Ok(Ok(devices)) => devices,
             Ok(Err(e)) => {
-                warn!("Failed to get fresh own device list: {} - continuing with recipient devices only", e);
-                Vec::new()
+                if cached_own_device_ids.is_empty() {
+                    warn!("Failed to get fresh own device list: {} - continuing with recipient devices only", e);
+                    Vec::new()
+                } else {
+                    warn!(
+                        "Failed to get fresh own device list: {}; using cached/session devices {:?}",
+                        e, cached_own_device_ids
+                    );
+                    cached_own_device_ids.clone()
+                }
             }
             Err(_) => {
-                warn!("Timeout while fetching fresh own device list - continuing with recipient devices only");
-                Vec::new()
+                if cached_own_device_ids.is_empty() {
+                    warn!("Timeout while fetching fresh own device list - continuing with recipient devices only");
+                    Vec::new()
+                } else {
+                    warn!(
+                        "Timeout while fetching fresh own device list; using cached/session devices {:?}",
+                        cached_own_device_ids
+                    );
+                    cached_own_device_ids.clone()
+                }
             }
         };
 

@@ -315,6 +315,12 @@ mod req4_bundle_format {
                 ) -> anyhow::Result<()> {
                     Ok(())
                 }
+                async fn delete_bundle(
+                    &self,
+                    _: chatterbox::omemo::device_id::DeviceId,
+                ) -> anyhow::Result<()> {
+                    Ok(())
+                }
             }
 
             let pubsub: Arc<dyn chatterbox::omemo::OmemoPubSub> = Arc::new(NoOpPubSub);
