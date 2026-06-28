@@ -328,6 +328,30 @@ impl OmemoManager {
         // Load existing sessions from storage
         manager.load_sessions().await?;
 
+        // Restore in-memory flags from persistent storage so they survive restarts.
+        // Collect all data while holding the lock, then release it before the
+        // mutable `mark_message_failed` call (which also tries to lock storage).
+        const FAILED_ID_TTL_SECS: u64 = 24 * 3600;
+        let (rebuild_pending, prekey_pending, failed_ids) = {
+            let storage_guard = manager.storage.lock().await;
+            (
+                storage_guard.load_all_rebuild_pending(),
+                storage_guard.load_all_prekey_pending(),
+                storage_guard.load_recent_failed_message_ids(FAILED_ID_TTL_SECS),
+            )
+        };
+        for (jid, device_id) in rebuild_pending {
+            manager.pending_session_rebuilds.insert((jid, device_id));
+        }
+        for (jid, device_id) in prekey_pending {
+            manager
+                .pending_prekey_sends
+                .insert((jid, device_id), std::time::Instant::now());
+        }
+        for msg_id in failed_ids {
+            manager.mark_message_failed(&msg_id);
+        }
+
         // Immediately check if PreKeys need rotation
         if manager.check_and_rotate_prekeys().await? {
             info!("PreKeys were rotated during initialization");
@@ -384,6 +408,8 @@ impl OmemoManager {
 
     /// Record that decryption failed for this message ID. The carbon copy of the
     /// same message will then be skipped so the failure is counted only once.
+    /// The ID is also persisted to storage so MAM replays after a restart do
+    /// not re-count the same failure.
     pub fn mark_message_failed(&mut self, msg_id: &str) {
         if msg_id.is_empty() || msg_id == "unknown" {
             return;
@@ -393,6 +419,13 @@ impl OmemoManager {
                 self.recently_failed_ids.pop_front();
             }
             self.recently_failed_ids.push_back(msg_id.to_string());
+            // Best-effort persist; failure here only means the TTL-window
+            // deduplication won't survive a restart for this message.
+            if let Ok(storage_guard) = self.storage.try_lock() {
+                if let Err(e) = storage_guard.persist_failed_message_id(msg_id) {
+                    warn!("Failed to persist failed message id {}: {}", msg_id, e);
+                }
+            }
         }
     }
 

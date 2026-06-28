@@ -96,6 +96,7 @@ impl OmemoManager {
             signed_pre_key_pair,
             signed_pre_key_signature,
             one_time_pre_key_pairs,
+            signed_pre_key_history: std::collections::HashMap::new(),
         };
 
         let storage_guard = self.storage.lock().await;
@@ -527,6 +528,25 @@ impl OmemoManager {
             signed_pre_key_pair,
             signed_pre_key_signature,
             one_time_pre_key_pairs,
+        signed_pre_key_history: {
+            // Move the outgoing SPK into history so peers that built a
+            // PreKeySignalMessage against it before the rotation can still
+            // establish a session.  Trim to the last SPK_HISTORY_DEPTH entries.
+            const SPK_HISTORY_DEPTH: usize = 5;
+            let mut history = current_bundle.signed_pre_key_history.clone();
+            history.insert(
+                current_bundle.signed_pre_key_id,
+                current_bundle.signed_pre_key_pair.clone(),
+            );
+            if history.len() > SPK_HISTORY_DEPTH {
+                let mut ids: Vec<u32> = history.keys().copied().collect();
+                ids.sort_unstable();
+                for old_id in ids.iter().take(ids.len() - SPK_HISTORY_DEPTH) {
+                    history.remove(old_id);
+                }
+            }
+            history
+        },
         };
 
         let storage_guard = self.storage.lock().await;
@@ -929,6 +949,21 @@ impl OmemoManager {
                 bare_jid, remote_device_id, e
             );
         }
+
+        // Clear persistent rebuild / prekey-pending flags so they are not
+        // mistakenly re-loaded on the next restart.
+        if let Err(e) = storage_guard.clear_session_rebuild_needed(&bare_jid, remote_device_id) {
+            warn!(
+                "Failed to clear rebuild flag for {}:{}: {}",
+                bare_jid, remote_device_id, e
+            );
+        }
+        if let Err(e) = storage_guard.clear_prekey_pending(&bare_jid, remote_device_id) {
+            warn!(
+                "Failed to clear prekey-pending flag for {}:{}: {}",
+                bare_jid, remote_device_id, e
+            );
+        }
         drop(storage_guard);
 
         // Clear pending flags
@@ -1019,6 +1054,14 @@ impl OmemoManager {
             }
             // Mark for full session rebuild (new X3DH / PreKeyMessage).
             self.pending_session_rebuilds.insert(key.clone());
+            {
+                let storage_guard = self.storage.lock().await;
+                if let Err(e) = storage_guard
+                    .set_session_rebuild_needed(&bare_jid, device_id)
+                {
+                    warn!("Failed to persist rebuild flag for {}:{}: {}", bare_jid, device_id, e);
+                }
+            }
             // Remember to restore Trusted after the rebuild — this prevents
             // identity-key-pinning in save_fetched_identity from resetting the
             // trust back to Untrusted when the remote has a fresh identity key.

@@ -58,6 +58,14 @@ impl OmemoManager {
             self.sessions.remove(&key);
             // Remove from rebuild set since we're rebuilding now
             self.pending_session_rebuilds.remove(&key);
+            {
+                let storage_guard = self.storage.lock().await;
+                if let Err(e) = storage_guard
+                    .clear_session_rebuild_needed(&key.0, key.1)
+                {
+                    warn!("Failed to clear rebuild flag for {:?}: {}", key, e);
+                }
+            }
         }
 
         // Check if we already have a session (early return, no borrow held)
@@ -747,34 +755,56 @@ impl OmemoManager {
 
                 // Re-acquire the session (it's in self.sessions now)
                 let session_key = (jid.clone(), device_id);
-                let session = self.sessions.get_mut(&session_key).unwrap();
 
-                let encrypt_result = if let Some((
-                    identity_key,
-                    base_key_opt,
-                    registration_id,
-                    remote_spk_id,
-                    remote_opk_id,
-                )) = prekey_params
-                {
-                    let base_key = base_key_opt.unwrap_or_else(|| {
-                        session.ratchet_state.ratchet_key_pair.public_key.clone()
-                    });
+                // Perform encryption and capture a ratchet-state snapshot in the
+                // same borrow, then release the borrow before the async
+                // store_session_state call (which needs &mut self).
+                let (encrypt_result, ratchet_snapshot) = {
+                    let session = self.sessions.get_mut(&session_key).unwrap();
 
-                    session.encrypt_key_prekey(
-                        &message_key,
+                    let result = if let Some((
+                        identity_key,
+                        base_key_opt,
                         registration_id,
-                        remote_opk_id,
                         remote_spk_id,
-                        &base_key,
-                        &identity_key,
-                    )
-                } else {
-                    session.encrypt_key(&message_key)
+                        remote_opk_id,
+                    )) = prekey_params
+                    {
+                        let base_key = base_key_opt.unwrap_or_else(|| {
+                            session.ratchet_state.ratchet_key_pair.public_key.clone()
+                        });
+
+                        session.encrypt_key_prekey(
+                            &message_key,
+                            registration_id,
+                            remote_opk_id,
+                            remote_spk_id,
+                            &base_key,
+                            &identity_key,
+                        )
+                    } else {
+                        session.encrypt_key(&message_key)
+                    };
+
+                    let snapshot = session.ratchet_state.clone();
+                    (result, snapshot)
                 };
 
                 match encrypt_result {
                     Ok(encrypted_key) => {
+                        // Persist the advanced ratchet state so that the send
+                        // counter survives a process restart.  Without this the
+                        // stored counter is stale and the peer sees counter reuse,
+                        // which produces a MAC failure on their side.
+                        if let Err(e) = self
+                            .store_session_state(&jid, device_id, &ratchet_snapshot)
+                            .await
+                        {
+                            warn!(
+                                "Failed to persist ratchet state after encrypt for {}:{}: {}",
+                                jid, device_id, e
+                            );
+                        }
                         encrypted_keys.insert(device_id, encrypted_key);
                         if use_prekey_format {
                             prekey_device_set.insert(device_id);
@@ -783,6 +813,14 @@ impl OmemoManager {
 
                         if needs_prekey {
                             self.pending_prekey_sends.remove(&device_key);
+                            {
+                                let storage_guard = self.storage.lock().await;
+                                if let Err(e) = storage_guard
+                                    .clear_prekey_pending(&device_key.0, device_key.1)
+                                {
+                                    warn!("Failed to clear prekey-pending flag for {}:{}: {}", device_key.0, device_key.1, e);
+                                }
+                            }
                             info!("ENCRYPT_DEBUG: Sent PreKey message to {}:{}, removing from pending list", jid, device_id);
                         }
                     }
@@ -798,6 +836,27 @@ impl OmemoManager {
 
         if let Err(_) = timeout(overall_timeout, session_creation_future).await {
             warn!("Overall timeout while creating sessions for message encryption");
+        }
+
+        // Require at least one key for a recipient device.  Sending a message
+        // with only own-device (carbon) keys — or with no keys at all — means
+        // the actual recipient can never decrypt it.
+        let recipient_bare_jid = Self::normalize_jid_to_bare(recipient);
+        let has_recipient_key = device_list_copy
+            .iter()
+            .filter(|(jid, _)| *jid == recipient_bare_jid)
+            .any(|(_, did)| encrypted_keys.contains_key(did));
+        if !has_recipient_key {
+            return Err(OmemoError::ProtocolError(if encrypted_keys.is_empty() {
+                "All per-device key encryptions failed — message cannot be delivered".to_string()
+            } else {
+                format!(
+                    "No recipient-device key encrypted for {} \
+                     (only {} own-device carbon key(s) produced)",
+                    recipient_bare_jid,
+                    encrypted_keys.len()
+                )
+            }));
         }
 
         info!(

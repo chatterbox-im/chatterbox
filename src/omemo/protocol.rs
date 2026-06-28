@@ -69,6 +69,12 @@ pub struct X3DHKeyBundle {
 
     /// One-time pre-key pairs
     pub one_time_pre_key_pairs: std::collections::HashMap<u32, KeyPair>,
+
+    /// History of recently-rotated signed prekeys keyed by their ID.
+    /// Retained so that a `PreKeySignalMessage` built against a rotated-but-recent
+    /// SPK can still be decrypted.  Bounded to `SPK_HISTORY_DEPTH` entries.
+    #[serde(default)]
+    pub signed_pre_key_history: std::collections::HashMap<u32, KeyPair>,
 }
 
 /// A pre-key bundle format for OMEMO
@@ -255,6 +261,7 @@ impl X3DHProtocol {
             signed_pre_key_pair,
             signed_pre_key_signature,
             one_time_pre_key_pairs,
+            signed_pre_key_history: std::collections::HashMap::new(),
         })
     }
 

@@ -70,12 +70,14 @@ impl XMPPClient {
             }
         };
 
-        // Verification (temporarily disabled for PreKey testing)
-        let omemo_verified: Result<(), crate::omemo::EncryptionVerificationError> = Ok(());
-        match &omemo_verified {
-            Ok(_) => debug!("OMEMO encryption verification passed - no plaintext leaked"),
-            Err(e) => {
-                error!("OMEMO encryption verification failed: {}", e);
+// Verify that the serialised OMEMO payload does not contain the plaintext.
+    // This is a defence-in-depth check; a real encryption bug would be caught
+    // here before the stanza reaches the network.
+    let omemo_xml = omemo_manager_guard.message_to_xml(&encrypted_message);
+    match omemo_manager_guard.verify_message_encryption(&omemo_xml, content) {
+        Ok(_) => debug!("OMEMO encryption verification passed"),
+        Err(e) => {
+            error!("OMEMO encryption verification FAILED — aborting send: {}", e);
                 return Err(anyhow!("OMEMO encryption verification failed: {}", e));
             }
         }

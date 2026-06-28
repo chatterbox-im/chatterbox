@@ -990,6 +990,185 @@ impl OmemoStorage {
         Ok(device_dir)
     }
 
+    // --- Session rebuild / prekey-pending persistence -----------------------
+
+    /// Mark that the session with `(jid, device_id)` needs to be rebuilt the
+    /// next time we encrypt for that device.  Survives process restarts.
+    pub fn set_session_rebuild_needed(&self, jid: &str, device_id: DeviceId) -> Result<()> {
+        let dir = self.get_device_metadata_dir(jid, device_id)?;
+        fs::create_dir_all(&dir)?;
+        fs::write(dir.join("rebuild_needed"), "1")?;
+        Ok(())
+    }
+
+    /// Clear the rebuild-needed flag once the rebuild has been performed.
+    pub fn clear_session_rebuild_needed(&self, jid: &str, device_id: DeviceId) -> Result<()> {
+        let dir = self.get_device_metadata_dir(jid, device_id)?;
+        let f = dir.join("rebuild_needed");
+        if f.exists() {
+            fs::remove_file(&f)?;
+        }
+        Ok(())
+    }
+
+    /// Mark that a PreKey message is pending for `(jid, device_id)`.
+    pub fn set_prekey_pending(&self, jid: &str, device_id: DeviceId) -> Result<()> {
+        let dir = self.get_device_metadata_dir(jid, device_id)?;
+        fs::create_dir_all(&dir)?;
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        fs::write(dir.join("prekey_pending_since"), ts.to_string())?;
+        Ok(())
+    }
+
+    /// Clear the prekey-pending flag once the PreKey message has been sent.
+    pub fn clear_prekey_pending(&self, jid: &str, device_id: DeviceId) -> Result<()> {
+        let dir = self.get_device_metadata_dir(jid, device_id)?;
+        let f = dir.join("prekey_pending_since");
+        if f.exists() {
+            fs::remove_file(&f)?;
+        }
+        Ok(())
+    }
+
+    /// Return the unix timestamp (seconds) at which the prekey-pending flag was
+    /// set, or `None` if the flag is not set.
+    pub fn get_prekey_pending_since(&self, jid: &str, device_id: DeviceId) -> Option<u64> {
+        let dir = self.get_device_metadata_dir(jid, device_id).ok()?;
+        let f = dir.join("prekey_pending_since");
+        if !f.exists() {
+            return None;
+        }
+        let s = fs::read_to_string(&f).ok()?;
+        s.trim().parse().ok()
+    }
+
+    /// Return all (jid, device_id) pairs that have the rebuild-needed flag set,
+    /// so they can be loaded back into `pending_session_rebuilds` on startup.
+    pub fn load_all_rebuild_pending(&self) -> Vec<(String, DeviceId)> {
+        let metadata_dir = self.base_path.join("metadata");
+        if !metadata_dir.exists() {
+            return vec![];
+        }
+        let mut result = Vec::new();
+        let jid_entries = match fs::read_dir(&metadata_dir) {
+            Ok(e) => e,
+            Err(_) => return vec![],
+        };
+        for jid_entry in jid_entries.flatten() {
+            let encoded = jid_entry.file_name().to_string_lossy().to_string();
+            let jid = self.alphanumeric_to_jid(&encoded);
+            let device_entries = match fs::read_dir(jid_entry.path()) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            for device_entry in device_entries.flatten() {
+                if device_entry.path().join("rebuild_needed").exists() {
+                    if let Ok(id) =
+                        device_entry.file_name().to_string_lossy().parse::<u32>()
+                    {
+                        result.push((jid.clone(), id));
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    /// Return all (jid, device_id) pairs that have the prekey-pending flag set.
+    pub fn load_all_prekey_pending(&self) -> Vec<(String, DeviceId)> {
+        let metadata_dir = self.base_path.join("metadata");
+        if !metadata_dir.exists() {
+            return vec![];
+        }
+        let mut result = Vec::new();
+        let jid_entries = match fs::read_dir(&metadata_dir) {
+            Ok(e) => e,
+            Err(_) => return vec![],
+        };
+        for jid_entry in jid_entries.flatten() {
+            let encoded = jid_entry.file_name().to_string_lossy().to_string();
+            let jid = self.alphanumeric_to_jid(&encoded);
+            let device_entries = match fs::read_dir(jid_entry.path()) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            for device_entry in device_entries.flatten() {
+                if device_entry.path().join("prekey_pending_since").exists() {
+                    if let Ok(id) =
+                        device_entry.file_name().to_string_lossy().parse::<u32>()
+                    {
+                        result.push((jid.clone(), id));
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    // --- Failed-message-ID persistence (TTL: 24 h) --------------------------
+
+    /// Persist a message ID as "decryption failed".  Used on startup to seed the
+    /// in-memory `recently_failed_ids` deque so that MAM replays of
+    /// previously-failed messages do not double-count as new failures.
+    pub fn persist_failed_message_id(&self, msg_id: &str) -> Result<()> {
+        if msg_id.is_empty() || msg_id == "unknown" {
+            return Ok(());
+        }
+        let dir = self.base_path.join("failed_messages");
+        fs::create_dir_all(&dir)?;
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        // Sanitise the msg_id so it is safe as a filename.
+        let safe_name: String = msg_id
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c.to_string()
+                } else {
+                    format!("{:02x}", c as u8)
+                }
+            })
+            .collect();
+        fs::write(dir.join(&safe_name), ts.to_string())?;
+        Ok(())
+    }
+
+    /// Load message IDs whose failure was recorded within `ttl_secs`.
+    /// Entries older than the TTL are pruned from disk during this call.
+    pub fn load_recent_failed_message_ids(&self, ttl_secs: u64) -> Vec<String> {
+        let dir = self.base_path.join("failed_messages");
+        if !dir.exists() {
+            return vec![];
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let mut ids = Vec::new();
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if let Ok(ts_str) = fs::read_to_string(&path) {
+                    if let Ok(ts) = ts_str.trim().parse::<u64>() {
+                        if now.saturating_sub(ts) < ttl_secs {
+                            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                                ids.push(name.to_string());
+                            }
+                        } else {
+                            let _ = fs::remove_file(&path);
+                        }
+                    }
+                }
+            }
+        }
+        ids
+    }
+
     // ...existing code...
 }
 

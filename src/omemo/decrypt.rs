@@ -64,7 +64,67 @@ impl OmemoManager {
                 }
             };
             let our_signed_prekey_pair = match &self.key_bundle {
-                Some(bundle) => bundle.signed_pre_key_pair.clone(),
+                Some(bundle) => {
+                    if bundle.signed_pre_key_id == prekey_msg.signed_pre_key_id {
+                        // Current SPK — common path
+                        bundle.signed_pre_key_pair.clone()
+                    } else if let Some(historic) =
+                        bundle.signed_pre_key_history.get(&prekey_msg.signed_pre_key_id)
+                    {
+                        // Sender built this PreKey against a recently-rotated SPK that
+                        // we still have in our history — use it.
+                        info!(
+                            "Using historic SPK id {} (current id={}) for PreKeyMessage from {}:{}",
+                            prekey_msg.signed_pre_key_id,
+                            bundle.signed_pre_key_id,
+                            sender,
+                            device_id
+                        );
+                        historic.clone()
+                    } else {
+                        // SPK id is unknown — we cannot reconstruct the X3DH shared
+                        // secret.  Treat this like the stale-OPK path: delete any
+                        // existing session and force a fresh exchange.
+                        warn!(
+                            "Unknown SPK id {} from {}:{} (current id={}, history ids={:?}) — \
+                             session cannot be established; sender must fetch our fresh bundle",
+                            prekey_msg.signed_pre_key_id,
+                            sender,
+                            device_id,
+                            bundle.signed_pre_key_id,
+                            bundle.signed_pre_key_history.keys().collect::<Vec<_>>()
+                        );
+                        let spk_session_key = (bare_jid.clone(), device_id);
+                        self.sessions.remove(&spk_session_key);
+                        {
+                            let storage_guard = self.storage.lock().await;
+                            let sk = format!("{}:{}", bare_jid, device_id);
+                            if let Err(e) = storage_guard.delete_session(&sk) {
+                                warn!("Failed to delete session after unknown SPK: {}", e);
+                            }
+                        }
+                        if let Err(e) = self.publish_bundle_to_server().await {
+                            warn!("Failed to republish bundle after unknown SPK: {}", e);
+                        }
+                        self.pending_session_rebuilds
+                            .insert((bare_jid.clone(), device_id));
+                        {
+                            let storage_guard = self.storage.lock().await;
+                            if let Err(e) = storage_guard
+                                .set_session_rebuild_needed(&bare_jid, device_id)
+                            {
+                                warn!("Failed to persist rebuild flag for {}:{}: {}", bare_jid, device_id, e);
+                            }
+                        }
+                        return Err(OmemoError::SessionError(
+                            session::SessionError::InvalidStateError(format!(
+                                "Unknown signed prekey id {} — sender must re-establish \
+                                 session with our fresh bundle",
+                                prekey_msg.signed_pre_key_id
+                            )),
+                        ));
+                    }
+                }
                 None => {
                     return Err(OmemoError::SessionError(
                         session::SessionError::InvalidStateError(
@@ -123,6 +183,14 @@ impl OmemoManager {
                 // for the sender would keep producing Signal messages that the sender
                 // cannot decrypt because they never received our key-agreement reply.
                 self.pending_session_rebuilds.insert((bare_jid.clone(), device_id));
+                {
+                    let storage_guard = self.storage.lock().await;
+                    if let Err(e) = storage_guard
+                        .set_session_rebuild_needed(&bare_jid, device_id)
+                    {
+                        warn!("Failed to persist rebuild flag for {}:{}: {}", bare_jid, device_id, e);
+                    }
+                }
 
                 return Err(OmemoError::SessionError(
                     session::SessionError::InvalidStateError(format!(
@@ -503,6 +571,12 @@ impl OmemoManager {
         let key = (bare_jid.clone(), device_id);
         self.pending_prekey_sends
             .insert(key.clone(), Instant::now());
+        {
+            let storage_guard = self.storage.lock().await;
+            if let Err(e) = storage_guard.set_prekey_pending(&bare_jid, device_id) {
+                warn!("Failed to persist prekey-pending flag for {}:{}: {}", bare_jid, device_id, e);
+            }
+        }
 
         self.sessions.remove(&key);
 
@@ -541,6 +615,12 @@ impl OmemoManager {
             let device_key = (bare_jid.clone(), target_device_id);
             self.pending_prekey_sends
                 .insert(device_key.clone(), Instant::now());
+            {
+                let storage_guard = self.storage.lock().await;
+                if let Err(e) = storage_guard.set_prekey_pending(&bare_jid, target_device_id) {
+                    warn!("Failed to persist prekey-pending flag for {}:{}: {}", bare_jid, target_device_id, e);
+                }
+            }
             info!(
                 "Marked device {}:{} for PreKey message sending after session reset",
                 bare_jid, target_device_id
