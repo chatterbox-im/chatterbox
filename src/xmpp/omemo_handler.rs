@@ -331,6 +331,11 @@ impl XMPPClient {
                             plaintext.len()
                         );
 
+                        // Record this message ID so that a duplicate delivery (e.g. a
+                        // message-carbon copy of a direct stanza) skips re-decryption
+                        // and avoids double-advancing the ratchet.
+                        omemo_manager_guard.mark_message_decrypted(id);
+
                         // Strip resource from sender JID to get bare JID
                         let sender_bare_jid = from.split('/').next().unwrap_or(from).to_string();
 

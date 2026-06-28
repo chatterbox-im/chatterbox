@@ -211,6 +211,11 @@ pub struct OmemoManager {
     /// (jid, device_id) → (signed_pre_key_id, Option<one_time_pre_key_id>, insertion_time)
     pub(crate) remote_prekey_ids: HashMap<(String, DeviceId), (u32, Option<u32>, Instant)>,
 
+    /// Message IDs that have been successfully decrypted. Used to skip duplicate
+    /// decryption attempts when the same OMEMO message arrives both as a direct
+    /// stanza delivery and as a message-carbon copy (e.g. self-messages to als@).
+    pub(crate) recently_decrypted_ids: std::collections::VecDeque<String>,
+
     /// PubSub operations — injected dependency instead of global access
     pub(crate) pubsub: Arc<dyn OmemoPubSub>,
 }
@@ -288,6 +293,7 @@ impl OmemoManager {
             pending_prekey_sends: HashMap::new(),
             prekey_ephemeral_keys: HashMap::new(),
             remote_prekey_ids: HashMap::new(),
+            recently_decrypted_ids: std::collections::VecDeque::new(),
             pubsub,
         };
 
@@ -338,6 +344,32 @@ impl OmemoManager {
     /// Get a reference to the storage Arc
     pub fn get_storage(&self) -> Arc<Mutex<OmemoStorage>> {
         self.storage.clone()
+    }
+
+    /// Maximum number of recently-decrypted message IDs to remember (ring buffer).
+    const RECENTLY_DECRYPTED_CAP: usize = 200;
+
+    /// Record that a message was successfully decrypted. Subsequent decryption
+    /// attempts for the same ID (e.g. a carbon copy of a direct delivery) will
+    /// be short-circuited to avoid advancing the ratchet a second time.
+    pub fn mark_message_decrypted(&mut self, msg_id: &str) {
+        if msg_id.is_empty() || msg_id == "unknown" {
+            return;
+        }
+        if !self.recently_decrypted_ids.contains(&msg_id.to_string()) {
+            if self.recently_decrypted_ids.len() >= Self::RECENTLY_DECRYPTED_CAP {
+                self.recently_decrypted_ids.pop_front();
+            }
+            self.recently_decrypted_ids.push_back(msg_id.to_string());
+        }
+    }
+
+    /// Returns `true` if we already successfully decrypted this message ID.
+    pub fn was_message_decrypted(&self, msg_id: &str) -> bool {
+        if msg_id.is_empty() || msg_id == "unknown" {
+            return false;
+        }
+        self.recently_decrypted_ids.contains(&msg_id.to_string())
     }
 
     /// Maximum age for pending prekey entries before eviction (1 hour).

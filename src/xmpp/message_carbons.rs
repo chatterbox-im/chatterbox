@@ -413,6 +413,24 @@ impl super::XMPPClient {
 
         debug!("Decrypting carbon from sender JID: {}", sender_jid);
 
+        // Deduplication: if the same OMEMO message was already successfully decrypted
+        // by the direct-delivery handler (which runs concurrently), skip re-decryption
+        // here. Advancing the Double Ratchet twice for the same message would corrupt
+        // the session state and cause subsequent MAC verification failures.
+        let msg_id = message.attr("id").unwrap_or("unknown");
+        {
+            let manager = omemo_manager.lock().await;
+            if manager.was_message_decrypted(msg_id) {
+                debug!(
+                    "Skipping carbon decryption for already-decrypted message {} from {}:{}",
+                    msg_id, sender_jid, sender_device_id
+                );
+                return self
+                    .send_carbon_to_ui(from, to, is_sent, message.attr("id"), "", true)
+                    .await;
+            }
+        }
+
         // Now we need to decrypt the message using the OMEMO manager
         let decrypted_content = {
             let mut manager = omemo_manager.lock().await;
@@ -445,7 +463,12 @@ impl super::XMPPClient {
                 .decrypt_message(&sender_jid, sender_device_id, &omemo_message)
                 .await
             {
-                Ok(content) => content,
+                Ok(content) => {
+                    // Record the ID so a future duplicate (direct delivery racing
+                    // ahead of this carbon) does not re-decrypt the same message.
+                    manager.mark_message_decrypted(msg_id);
+                    content
+                }
                 Err(e) => {
                     error!("Failed to decrypt OMEMO carbon message: {}", e);
                     return Err(anyhow!("Failed to decrypt OMEMO carbon message: {}", e));

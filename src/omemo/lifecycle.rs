@@ -980,17 +980,20 @@ impl OmemoManager {
 
         let bare_jid = Self::normalize_jid_to_bare(sender);
 
-        // If the device was previously Untrusted or Undecided it may have been
-        // skipped during encryption, or the session may be stale/de-synchronised
-        // (e.g. the remote re-installed and has a new identity key).
-        // Force a fresh X3DH exchange so both sides start from a clean ratchet state.
+        // Only force a session rebuild when the device was **explicitly** Untrusted.
+        // An Undecided device still has a valid session (it was never deliberately
+        // rejected), so a rebuild is unnecessary and would disrupt the ratchet
+        // state — causing carbon-decode failures when the remote sends self-messages.
+        // Untrusted → Trusted means the user previously rejected the device and is
+        // now re-trusting it; the old session may be stale/de-synchronised and must
+        // be rebuilt with a fresh X3DH exchange.
         let was_not_trusted = {
             let storage_guard = self.storage.lock().await;
             storage_guard
                 .get_trust_level(&bare_jid, device_id)
                 .ok()
-                .map(|t| t != TrustLevel::Trusted && t != TrustLevel::Verified)
-                .unwrap_or(true)
+                .map(|t| t == TrustLevel::Untrusted)
+                .unwrap_or(false)
         };
 
         {
