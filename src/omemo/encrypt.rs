@@ -103,15 +103,17 @@ impl OmemoManager {
             "SESSION_DEBUG: Getting device identity for {}:{}",
             bare_jid, remote_device_id
         );
-        // When rebuilding a session (e.g. after re-trusting a previously Untrusted
-        // device), always fetch the bundle fresh from the server so we pick up
-        // current OPKs rather than the stale cached ones which may already have been
-        // consumed by the remote.
-        let mut remote_identity = if needs_rebuild {
-            info!(
-                "SESSION_DEBUG: Session rebuild — force-fetching bundle from server for {}:{}",
-                bare_jid, remote_device_id
-            );
+        // When creating any new initiator session (whether a rebuild or a first-time
+        // session), always fetch the bundle fresh from the server.  The cached copy
+        // may reference an OPK that the remote has already consumed in a previous
+        // session; using a stale OPK causes an irrecoverable "missing one-time
+        // prekey" failure on the receiver.
+        let label = if needs_rebuild { "Session rebuild" } else { "New session" };
+        info!(
+            "SESSION_DEBUG: {} — force-fetching bundle from server for {}:{}",
+            label, bare_jid, remote_device_id
+        );
+        let mut remote_identity =
             match self
                 .fetch_device_identity_from_server(&bare_jid, remote_device_id)
                 .await
@@ -119,15 +121,12 @@ impl OmemoManager {
                 Ok(identity) => identity,
                 Err(e) => {
                     warn!(
-                        "Failed to fetch fresh bundle for rebuild of {}:{}: {} — falling back to cache",
-                        bare_jid, remote_device_id, e
+                        "Failed to fetch fresh bundle for {} of {}:{}: {} — falling back to cache",
+                        label.to_lowercase(), bare_jid, remote_device_id, e
                     );
                     self.get_device_identity(&bare_jid, remote_device_id).await?
                 }
-            }
-        } else {
-            self.get_device_identity(&bare_jid, remote_device_id).await?
-        };
+            };
         info!(
             "SESSION_DEBUG: Successfully retrieved device identity for {}:{}",
             bare_jid, remote_device_id
