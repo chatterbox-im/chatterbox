@@ -37,7 +37,7 @@ pub enum DoubleRatchetError {
 }
 
 /// A key pair for OMEMO operations
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct KeyPair {
     /// The public key
     pub public_key: Vec<u8>,
@@ -117,7 +117,7 @@ pub struct DeviceIdentity {
 }
 
 /// State for the Double Ratchet
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RatchetState {
     /// Flag indicating if the state is initialized
     pub initialized: bool,

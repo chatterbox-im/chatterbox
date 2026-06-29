@@ -59,6 +59,7 @@ impl Default for PreKeyRotationConfig {
 }
 
 /// A session for an OMEMO Double Ratchet
+#[derive(Debug)]
 pub struct OmemoSession {
     /// Remote JID
     pub remote_jid: String,
@@ -71,6 +72,82 @@ pub struct OmemoSession {
 
     /// Ratchet state
     pub ratchet_state: RatchetState,
+}
+
+/// FSM state for a single device-pair OMEMO session.
+///
+/// This enum is the single source of truth for a session entry in the sessions
+/// HashMap. It replaces the old `pending_session_rebuilds: HashSet<…>` pattern
+/// by encoding the "needs rebuild" state directly in the map value rather than
+/// as an out-of-band side-channel field.
+#[derive(Debug)]
+pub enum OmemoSessionState {
+    /// An established, active session (both sides have ratcheted at least once,
+    /// or we are the recipient and have just processed the initiator's PreKey).
+    Active(OmemoSession),
+    /// We sent the first PreKey as X3DH initiator; the peer has not yet replied.
+    /// `sent_at` enables timeout: the first successful incoming DH-ratchet step
+    /// transitions this to `Active`.  If the peer hasn't replied within
+    /// `INITIATOR_AWAIT_TIMEOUT`, the next outbound discards the stale ephemeral
+    /// material and creates a fresh PreKey (transitions back through `Empty`).
+    InitiatorAwaitingReply {
+        session: OmemoSession,
+        /// When the PreKey was sent — used for timeout detection.
+        sent_at: std::time::Instant,
+    },
+    /// The peer's last PreKey referenced an OPK or SPK we no longer hold.
+    /// The entry exists as a marker: the next outbound call to
+    /// `get_or_create_session` will see this, force-fetch a fresh bundle, and
+    /// create a new initiator session (transitioning to `InitiatorAwaitingReply`).
+    PeerResetPending,
+    /// Repeated AEAD/MAC failures were detected; we reset the session and will
+    /// send a fresh PreKey on the next outbound message.  `attempt` counts how
+    /// many recovery cycles have occurred for this device pair without a
+    /// successful decrypt, letting callers surface a "session broken" prompt
+    /// once the limit is reached.
+    RecoveryPreKeySent { attempt: u8 },
+}
+
+impl OmemoSessionState {
+    /// Return a shared reference to the inner session, if any.
+    pub fn as_session(&self) -> Option<&OmemoSession> {
+        match self {
+            Self::Active(s) => Some(s),
+            Self::InitiatorAwaitingReply { session: s, .. } => Some(s),
+            Self::PeerResetPending | Self::RecoveryPreKeySent { .. } => None,
+        }
+    }
+
+    /// Return a mutable reference to the inner session, if any.
+    pub fn as_session_mut(&mut self) -> Option<&mut OmemoSession> {
+        match self {
+            Self::Active(s) => Some(s),
+            Self::InitiatorAwaitingReply { session: s, .. } => Some(s),
+            Self::PeerResetPending | Self::RecoveryPreKeySent { .. } => None,
+        }
+    }
+
+    /// True when the inner session has been cryptographically initialised.
+    pub fn is_initialized(&self) -> bool {
+        self.as_session().map(|s| s.is_initialized()).unwrap_or(false)
+    }
+
+    /// True when the entry needs a fresh outbound PreKey — either because the
+    /// peer's last PreKey used a stale key of ours (`PeerResetPending`) or
+    /// because we are proactively recovering from repeated MAC failures
+    /// (`RecoveryPreKeySent`).
+    pub fn needs_rebuild(&self) -> bool {
+        matches!(self, Self::PeerResetPending | Self::RecoveryPreKeySent { .. })
+    }
+
+    /// True when this entry represents an in-progress recovery attempt.
+    pub fn recovery_attempt(&self) -> Option<u8> {
+        if let Self::RecoveryPreKeySent { attempt } = self {
+            Some(*attempt)
+        } else {
+            None
+        }
+    }
 }
 
 impl OmemoSession {
@@ -230,6 +307,21 @@ impl OmemoSession {
         self.ratchet_state = state;
 
         Ok(())
+    }
+
+    /// Create a fully-initialized session directly from a persisted `RatchetState`.
+    ///
+    /// Prefer this over `new()` + `restore_from_state()` when loading sessions
+    /// from storage: the result is always initialized and ready to use, with no
+    /// intermediate uninitialized-session window.  The JID and device-ID fields
+    /// are taken from the `RatchetState` itself, so mismatches are impossible.
+    pub fn from_state(local_device_id: DeviceId, state: RatchetState) -> Self {
+        Self {
+            remote_jid: state.remote_jid.clone(),
+            remote_device_id: state.remote_device_id,
+            local_device_id,
+            ratchet_state: state,
+        }
     }
 
     /// Normalize a JID for comparison purposes

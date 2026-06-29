@@ -170,19 +170,43 @@ impl OmemoStorage {
         Ok(())
     }
 
-    /// Write binary content to a file atomically
+    /// Write binary content to a file crash-safely.
+    ///
+    /// The sequence is:
+    ///   1. Serialise `data` to a `.tmp` sibling file.
+    ///   2. `fsync` the temp file — guarantees the data bytes reach persistent
+    ///      storage before the rename.
+    ///   3. `rename` the temp file over the target — atomic on POSIX; after any
+    ///      crash the target is either the old file or the fully-written new one.
+    ///   4. `fsync` the parent directory — makes the new directory entry itself
+    ///      durable (required on some Linux configurations to survive a power cut).
     fn write_binary_file<T: serde::Serialize>(path: &Path, data: &T) -> Result<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
 
-        // Serialize with bincode
         let encoded = bincode::serialize(data)?;
 
-        // Write to temporary file first, then rename for atomicity
         let temp_path = path.with_extension("tmp");
-        fs::write(&temp_path, encoded)?;
+
+        // Step 1+2: write and fsync the temp file
+        {
+            use std::io::Write as _;
+            let mut file = fs::File::create(&temp_path)?;
+            file.write_all(&encoded)?;
+            file.sync_all()?;
+        }
+
+        // Step 3: atomic rename
         fs::rename(&temp_path, path)?;
+
+        // Step 4: fsync the parent directory so the new dir-entry is durable
+        if let Some(parent) = path.parent() {
+            if let Ok(dir) = fs::File::open(parent) {
+                let _ = dir.sync_all(); // best-effort; not fatal if unsupported (e.g. some VMs)
+            }
+        }
+
         Ok(())
     }
 

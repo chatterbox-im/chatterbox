@@ -15,7 +15,7 @@ use tokio::sync::Mutex;
 
 use crate::omemo::crypto::CryptoError;
 use crate::omemo::device_id::DeviceId;
-use crate::omemo::session::{OmemoSession, SessionError};
+use crate::omemo::session::{OmemoSessionState, SessionError};
 use crate::omemo::storage::OmemoStorage;
 pub use crate::omemo::storage::TrustLevel;
 
@@ -27,6 +27,8 @@ pub mod device_id;
 mod encrypt;
 #[cfg(test)]
 mod encrypt_decrypt_test;
+#[cfg(test)]
+mod session_proptest;
 mod lifecycle;
 pub mod protocol;
 pub mod session;
@@ -185,23 +187,19 @@ pub struct OmemoManager {
     /// The key bundle for this device
     pub(crate) key_bundle: Option<protocol::X3DHKeyBundle>,
 
-    /// Active sessions with other devices
-    pub(crate) sessions: HashMap<(String, u32), OmemoSession>,
+    /// Active sessions with other devices.
+    /// Each entry is an `OmemoSessionState` rather than a bare `OmemoSession` so
+    /// that pending-rebuild markers (`PeerResetPending`) can be stored in the same
+    /// map, eliminating the old `pending_session_rebuilds: HashSet` side-channel.
+    pub(crate) sessions: HashMap<(String, u32), OmemoSessionState>,
 
     /// PreKey rotation configuration
     pub prekey_rotation_config: PreKeyRotationConfig,
-
-    /// Set of devices that need fresh session establishment after reset
-    pub pending_session_rebuilds: HashSet<(String, DeviceId)>,
 
     /// Devices whose trust level should be restored to Trusted after a session rebuild.
     /// This prevents identity-key-pinning from overriding an explicit user trust decision
     /// when the remote device has a new identity (e.g. fresh install).
     pub(crate) pending_trust_restorations: HashSet<(String, DeviceId)>,
-
-    /// Devices that we've reset sessions with and need to send PreKey messages to.
-    /// Value is the time when the entry was added (for TTL eviction).
-    pub pending_prekey_sends: HashMap<(String, DeviceId), Instant>,
 
     /// Ephemeral keys for pending PreKey messages to specific devices.
     /// Value is (key_bytes, insertion_time) for TTL eviction.
@@ -294,9 +292,7 @@ impl OmemoManager {
             key_bundle: None,
             sessions: HashMap::new(),
             prekey_rotation_config: PreKeyRotationConfig::default(),
-            pending_session_rebuilds: HashSet::new(),
             pending_trust_restorations: HashSet::new(),
-            pending_prekey_sends: HashMap::new(),
             prekey_ephemeral_keys: HashMap::new(),
             remote_prekey_ids: HashMap::new(),
             recently_decrypted_ids: std::collections::VecDeque::new(),
@@ -341,12 +337,20 @@ impl OmemoManager {
             )
         };
         for (jid, device_id) in rebuild_pending {
-            manager.pending_session_rebuilds.insert((jid, device_id));
+            // Represent "needs rebuild" directly in the sessions map so it
+            // survives restarts without a separate HashSet.
+            manager
+                .sessions
+                .insert((jid, device_id), OmemoSessionState::PeerResetPending);
         }
         for (jid, device_id) in prekey_pending {
+            // Load recovery state: any device with a prekey-pending-since file
+            // was in RecoveryPreKeySent before the last restart.
+            // `PeerResetPending` takes priority if already set by rebuild_pending.
             manager
-                .pending_prekey_sends
-                .insert((jid, device_id), std::time::Instant::now());
+                .sessions
+                .entry((jid, device_id))
+                .or_insert(OmemoSessionState::RecoveryPreKeySent { attempt: 0 });
         }
         for msg_id in failed_ids {
             manager.mark_message_failed(&msg_id);
@@ -449,19 +453,17 @@ impl OmemoManager {
         let ttl = Duration::from_secs(Self::PENDING_TTL_SECS);
         let now = Instant::now();
 
-        self.pending_prekey_sends
-            .retain(|_, inserted| now.duration_since(*inserted) < ttl);
         self.prekey_ephemeral_keys
             .retain(|_, (_, inserted)| now.duration_since(*inserted) < ttl);
         self.remote_prekey_ids
             .retain(|_, (_, _, inserted)| now.duration_since(*inserted) < ttl);
 
-        // Hard cap: if still over limit, drop oldest entries
-        if self.pending_prekey_sends.len() > Self::PENDING_CAP {
-            let mut entries: Vec<_> = self.pending_prekey_sends.drain().collect();
-            entries.sort_by_key(|(_, t)| *t);
+        // Hard cap: drop oldest prekey_ephemeral_keys entries if over limit
+        if self.prekey_ephemeral_keys.len() > Self::PENDING_CAP {
+            let mut entries: Vec<_> = self.prekey_ephemeral_keys.drain().collect();
+            entries.sort_by_key(|(_, (_, t))| *t);
             entries.truncate(Self::PENDING_CAP);
-            self.pending_prekey_sends = entries.into_iter().collect();
+            self.prekey_ephemeral_keys = entries.into_iter().collect();
         }
     }
 
@@ -649,32 +651,29 @@ mod tests {
         )
         .await?;
 
-        // Insert an entry with a fake old timestamp (simulate expired)
         let old_time = Instant::now() - std::time::Duration::from_secs(7200); // 2 hours ago
         let fresh_time = Instant::now();
 
-        manager
-            .pending_prekey_sends
-            .insert(("old@peer.com".to_string(), 1u32), old_time);
-        manager
-            .pending_prekey_sends
-            .insert(("fresh@peer.com".to_string(), 2u32), fresh_time);
+        // prekey_ephemeral_keys and remote_prekey_ids are TTL-evicted
         manager.prekey_ephemeral_keys.insert(
             ("old@peer.com".to_string(), 1u32),
             (vec![0xAA; 32], old_time),
+        );
+        manager.prekey_ephemeral_keys.insert(
+            ("fresh@peer.com".to_string(), 2u32),
+            (vec![0xBB; 32], fresh_time),
         );
         manager
             .remote_prekey_ids
             .insert(("old@peer.com".to_string(), 1u32), (1, Some(2), old_time));
 
-        assert_eq!(manager.pending_prekey_sends.len(), 2);
+        assert_eq!(manager.prekey_ephemeral_keys.len(), 2);
         manager.evict_stale_entries();
 
-        assert_eq!(manager.pending_prekey_sends.len(), 1);
+        assert_eq!(manager.prekey_ephemeral_keys.len(), 1);
         assert!(manager
-            .pending_prekey_sends
+            .prekey_ephemeral_keys
             .contains_key(&("fresh@peer.com".to_string(), 2u32)));
-        assert!(manager.prekey_ephemeral_keys.is_empty());
         assert!(manager.remote_prekey_ids.is_empty());
 
         Ok(())
@@ -686,19 +685,20 @@ mod tests {
         let mut manager =
             OmemoManager::new(storage, "cap@test.com".to_string(), Some(99), test_pubsub()).await?;
 
-        // Insert more than PENDING_CAP entries, all fresh
+        // Insert more than PENDING_CAP prekey_ephemeral_keys entries
         let now = Instant::now();
         for i in 0..1050u32 {
-            manager
-                .pending_prekey_sends
-                .insert((format!("peer{}@test.com", i), DeviceId::from(i)), now);
+            manager.prekey_ephemeral_keys.insert(
+                (format!("peer{}@test.com", i), DeviceId::from(i)),
+                (vec![0u8; 32], now),
+            );
         }
-        assert_eq!(manager.pending_prekey_sends.len(), 1050);
+        assert_eq!(manager.prekey_ephemeral_keys.len(), 1050);
 
         manager.evict_stale_entries();
 
         assert_eq!(
-            manager.pending_prekey_sends.len(),
+            manager.prekey_ephemeral_keys.len(),
             OmemoManager::PENDING_CAP
         );
         Ok(())

@@ -8,7 +8,7 @@ use tokio::time::{timeout, Duration};
 use crate::omemo::device_discovery;
 use crate::omemo::device_id::DeviceId;
 use crate::omemo::protocol::{self, RatchetState, X3DHProtocol};
-use crate::omemo::session::OmemoSession;
+use crate::omemo::session::{OmemoSession, OmemoSessionState};
 use crate::omemo::storage::{self, TrustLevel};
 use crate::omemo::{OmemoError, OmemoManager, OMEMO_NAMESPACE};
 use base64::Engine;
@@ -143,9 +143,11 @@ impl OmemoManager {
             debug!("Restoring session with {}:{}", jid, device_id);
 
             let bare_jid = Self::normalize_jid_to_bare(&jid);
-            let mut session = OmemoSession::new(bare_jid.clone(), device_id, self.device_id);
-            session.restore_from_state(state)?;
-            self.sessions.insert((bare_jid, device_id), session);
+            // Use `from_state` rather than `new()` + `restore_from_state()` so the
+            // session is fully initialized in a single step — no uninitialized window.
+            let session = OmemoSession::from_state(self.device_id, state);
+            self.sessions
+                .insert((bare_jid, device_id), OmemoSessionState::Active(session));
         }
 
         info!("Loaded {} existing sessions", self.sessions.len());
@@ -573,7 +575,19 @@ impl OmemoManager {
     pub async fn force_reset_broken_sessions(&mut self) -> Result<Vec<String>, OmemoError> {
         let mut reset_sessions = Vec::new();
 
-        let stuck_sessions: Vec<_> = self.pending_prekey_sends.keys().cloned().collect();
+        // Find all devices currently in recovery state (RecoveryPreKeySent) — these
+        // are the "stuck" sessions that replaced the old pending_prekey_sends map.
+        let stuck_sessions: Vec<_> = self
+            .sessions
+            .iter()
+            .filter_map(|(key, state)| {
+                if matches!(state, crate::omemo::session::OmemoSessionState::RecoveryPreKeySent { .. }) {
+                    Some(key.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
 
         for (bare_jid, device_id) in stuck_sessions {
             warn!(
@@ -966,9 +980,8 @@ impl OmemoManager {
         }
         drop(storage_guard);
 
-        // Clear pending flags
-        self.pending_session_rebuilds.remove(&key);
-        self.pending_prekey_sends.remove(&key);
+        // Clear pending flags (the sessions map entry was already removed above).
+        // pending_trust_restorations is cleared separately.
 
         info!(
             "Completely reset session with {}:{} - fresh start on next encryption/decryption",
@@ -1044,16 +1057,16 @@ impl OmemoManager {
                 bare_jid, device_id
             );
             let key = (bare_jid.clone(), device_id);
-            // Remove any stale in-memory session so get_or_create_session starts fresh.
-            self.sessions.remove(&key);
             // Delete the stale on-disk session state.
             {
                 let session_key = format!("{}:{}", bare_jid, device_id);
                 let storage_guard = self.storage.lock().await;
                 let _ = storage_guard.delete_session(&session_key);
             }
-            // Mark for full session rebuild (new X3DH / PreKeyMessage).
-            self.pending_session_rebuilds.insert(key.clone());
+            // Mark for full session rebuild by writing `PeerResetPending` directly
+            // into the sessions map (replaces the old `pending_session_rebuilds` HashSet).
+            self.sessions
+                .insert(key.clone(), OmemoSessionState::PeerResetPending);
             {
                 let storage_guard = self.storage.lock().await;
                 if let Err(e) = storage_guard
@@ -1062,9 +1075,7 @@ impl OmemoManager {
                     warn!("Failed to persist rebuild flag for {}:{}: {}", bare_jid, device_id, e);
                 }
             }
-            // Remember to restore Trusted after the rebuild — this prevents
-            // identity-key-pinning in save_fetched_identity from resetting the
-            // trust back to Untrusted when the remote has a fresh identity key.
+            // Remember to restore Trusted after the rebuild
             self.pending_trust_restorations.insert(key);
         }
 

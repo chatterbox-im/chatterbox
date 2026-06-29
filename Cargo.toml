@@ -51,6 +51,9 @@ regex = "1.11.1"
 rusqlite = { version = "0.31", features = ["bundled"] }
 notify-rust = "4.11"
 
+[dev-dependencies]
+proptest = "1"
+
 [build-dependencies]
 regex = "1.11.1"
 

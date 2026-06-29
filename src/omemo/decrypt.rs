@@ -3,11 +3,10 @@
 
 use hex;
 use log::{debug, error, info, warn};
-use std::time::Instant;
 
 use crate::omemo::crypto;
 use crate::omemo::protocol::{self, OmemoMessage};
-use crate::omemo::session::{self, OmemoSession};
+use crate::omemo::session::{self, OmemoSession, OmemoSessionState};
 use crate::omemo::{OmemoError, OmemoManager};
 
 impl OmemoManager {
@@ -95,26 +94,26 @@ impl OmemoManager {
                             bundle.signed_pre_key_history.keys().collect::<Vec<_>>()
                         );
                         let spk_session_key = (bare_jid.clone(), device_id);
-                        self.sessions.remove(&spk_session_key);
+                        // Replace any existing session entry with PeerResetPending so
+                        // the next outbound to this sender creates a fresh PreKey.
+                        self.sessions
+                            .insert(spk_session_key, OmemoSessionState::PeerResetPending);
+                        // Persist the marker and republish our bundle so the sender
+                        // can fetch the fresh bundle on their next connection.
                         {
                             let storage_guard = self.storage.lock().await;
                             let sk = format!("{}:{}", bare_jid, device_id);
                             if let Err(e) = storage_guard.delete_session(&sk) {
-                                warn!("Failed to delete session after unknown SPK: {}", e);
+                                warn!("Failed to delete on-disk session after unknown SPK: {}", e);
                             }
-                        }
-                        if let Err(e) = self.publish_bundle_to_server().await {
-                            warn!("Failed to republish bundle after unknown SPK: {}", e);
-                        }
-                        self.pending_session_rebuilds
-                            .insert((bare_jid.clone(), device_id));
-                        {
-                            let storage_guard = self.storage.lock().await;
                             if let Err(e) = storage_guard
                                 .set_session_rebuild_needed(&bare_jid, device_id)
                             {
                                 warn!("Failed to persist rebuild flag for {}:{}: {}", bare_jid, device_id, e);
                             }
+                        }
+                        if let Err(e) = self.publish_bundle_to_server().await {
+                            warn!("Failed to republish bundle after unknown SPK: {}", e);
                         }
                         return Err(OmemoError::SessionError(
                             session::SessionError::InvalidStateError(format!(
@@ -150,17 +149,12 @@ impl OmemoManager {
             if prekey_msg.pre_key_id.is_some() && one_time_prekey_pair.is_none() {
                 warn!("PreKeyMessage references OPK id {:?} but we don't have it — cannot establish session (sender needs our fresh bundle)", prekey_msg.pre_key_id);
 
-                // Delete any existing session with this sender.  The sender has
-                // started a new X3DH exchange (evidenced by the PreKeyMessage) so
-                // whatever session state we hold is now stale — the sender's Double
-                // Ratchet root is derived from key material we never processed.
-                // Keeping the old session would cause every subsequent SignalMessage
-                // from the sender to fail with a MAC error.  Clearing it ensures
-                // that the next time we send to the sender (triggered by
-                // `pending_session_rebuilds` below) we create a fresh session that
-                // both sides can agree on.
-                let session_delete_key = (bare_jid.clone(), device_id);
-                self.sessions.remove(&session_delete_key);
+                // Replace any existing session entry for this sender with
+                // PeerResetPending so that our next outbound message creates a
+                // fresh PreKey session.  The old stale entry (if any) is gone.
+                let stale_key = (bare_jid.clone(), device_id);
+                self.sessions
+                    .insert(stale_key, OmemoSessionState::PeerResetPending);
                 {
                     let storage_guard = self.storage.lock().await;
                     let session_key_str = format!("{}:{}", bare_jid, device_id);
@@ -177,12 +171,7 @@ impl OmemoManager {
                     warn!("Failed to republish bundle after missing OPK: {}", e);
                 }
 
-                // Mark the sender's session for rebuild so that the next time we
-                // encrypt for them we force-fetch their current bundle and create a
-                // fresh session.  Without this, our stored (potentially stale) session
-                // for the sender would keep producing Signal messages that the sender
-                // cannot decrypt because they never received our key-agreement reply.
-                self.pending_session_rebuilds.insert((bare_jid.clone(), device_id));
+                // Persist the rebuild marker so it survives a restart.
                 {
                     let storage_guard = self.storage.lock().await;
                     if let Err(e) = storage_guard
@@ -233,10 +222,12 @@ impl OmemoManager {
                 self.device_id,
             )?;
 
-            // Store the session
+            // Store the session wrapped in Active (we're the recipient; the
+            // session is immediately usable in both directions).
             let key = (bare_jid.clone(), device_id);
             let ratchet_state = session.ratchet_state.clone();
-            self.sessions.insert(key.clone(), session);
+            self.sessions
+                .insert(key.clone(), OmemoSessionState::Active(session));
             self.store_session_state(&bare_jid, device_id, &ratchet_state)
                 .await?;
 
@@ -257,9 +248,19 @@ impl OmemoManager {
 
         let key = (bare_jid.clone(), device_id);
 
-        if self.pending_prekey_sends.contains_key(&key) {
-            info!("Receiving message from {}:{} while waiting to send PreKey message - processing normally", bare_jid, device_id);
+        if matches!(
+            self.sessions.get(&key),
+            Some(OmemoSessionState::RecoveryPreKeySent { .. })
+        ) {
+            info!("Receiving message from {}:{} while recovery PreKey is pending — processing normally", bare_jid, device_id);
         }
+
+        // Remember whether we were waiting for the peer's first reply — if so,
+        // a successful decrypt means the session is now fully established.
+        let was_awaiting_reply = matches!(
+            self.sessions.get(&key),
+            Some(OmemoSessionState::InitiatorAwaitingReply { .. })
+        );
 
         // Get the session for the sender device
         let sender_str = sender.to_string();
@@ -368,6 +369,21 @@ impl OmemoManager {
         if let Some(ratchet_state) = session_state_to_store {
             self.store_session_state(&sender_str, device_id, &ratchet_state)
                 .await?;
+        }
+
+        // Transition InitiatorAwaitingReply → Active on the first successful
+        // incoming message: the peer has replied and the session is fully live.
+        if was_awaiting_reply {
+            if let Some(old_entry) = self.sessions.remove(&key) {
+                if let OmemoSessionState::InitiatorAwaitingReply { session, .. } = old_entry {
+                    info!(
+                        "Session with {}:{} advanced from InitiatorAwaitingReply to Active",
+                        bare_jid, device_id
+                    );
+                    self.sessions
+                        .insert(key.clone(), OmemoSessionState::Active(session));
+                }
+            }
         }
 
         let content = String::from_utf8(plaintext)
@@ -559,6 +575,15 @@ impl OmemoManager {
             bare_jid, device_id
         );
 
+        // Save the existing recovery attempt count BEFORE reset_session removes the
+        // sessions entry — otherwise prev_attempt would always read 0.
+        let key = (bare_jid.clone(), device_id);
+        let prev_attempt = self
+            .sessions
+            .get(&key)
+            .and_then(|s| s.recovery_attempt())
+            .unwrap_or(0);
+
         // Immediately reset the session
         if let Err(e) = self.reset_session(&bare_jid, device_id).await {
             error!(
@@ -567,18 +592,35 @@ impl OmemoManager {
             );
         }
 
-        // Mark this device as needing a fresh PreKey exchange
-        let key = (bare_jid.clone(), device_id);
-        self.pending_prekey_sends
-            .insert(key.clone(), Instant::now());
+        // Insert a RecoveryPreKeySent marker so the next outbound to this device
+        // creates a fresh PreKey.  Increment the attempt counter each time so
+        // callers can detect a persistent recovery loop.
+        let new_attempt = prev_attempt.saturating_add(1);
+
+        /// Maximum number of recovery PreKey cycles before surfacing a
+        /// user-facing "session permanently broken" error.
+        const MAX_RECOVERY_ATTEMPTS: u8 = 5;
+
+        if new_attempt > MAX_RECOVERY_ATTEMPTS {
+            warn!(
+                "Session with {}:{} has failed to recover after {} consecutive attempts -- \
+                 the session appears permanently broken and may require manual intervention.",
+                bare_jid, device_id, new_attempt
+            );
+            // Keep the RecoveryPreKeySent state so the next send still tries a fresh
+            // PreKey (better than giving up entirely), but return an error that the UI
+            // can render as a clear, actionable "session broken" prompt.
+        }
+
+        self.sessions
+            .insert(key.clone(), OmemoSessionState::RecoveryPreKeySent { attempt: new_attempt });
+        // Persist so the recovery state survives a process restart.
         {
             let storage_guard = self.storage.lock().await;
             if let Err(e) = storage_guard.set_prekey_pending(&bare_jid, device_id) {
                 warn!("Failed to persist prekey-pending flag for {}:{}: {}", bare_jid, device_id, e);
             }
         }
-
-        self.sessions.remove(&key);
 
         // Clear our own session with this contact to force mutual session reset
         let our_device_ids = match self.get_own_device_ids().await {
@@ -613,8 +655,19 @@ impl OmemoManager {
 
         for target_device_id in target_device_ids {
             let device_key = (bare_jid.clone(), target_device_id);
-            self.pending_prekey_sends
-                .insert(device_key.clone(), Instant::now());
+            // Keep existing attempt counts: if the device is already in a recovery
+            // cycle, don't reset its counter.
+            let prev = self
+                .sessions
+                .get(&device_key)
+                .and_then(|s| s.recovery_attempt())
+                .unwrap_or(0);
+            self.sessions.insert(
+                device_key.clone(),
+                OmemoSessionState::RecoveryPreKeySent {
+                    attempt: prev.saturating_add(1),
+                },
+            );
             {
                 let storage_guard = self.storage.lock().await;
                 if let Err(e) = storage_guard.set_prekey_pending(&bare_jid, target_device_id) {

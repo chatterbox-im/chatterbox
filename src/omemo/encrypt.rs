@@ -9,7 +9,7 @@ use tokio::time::{timeout, Duration};
 use crate::omemo::crypto;
 use crate::omemo::device_id::DeviceId;
 use crate::omemo::protocol::{self, DeviceIdentity, OmemoMessage};
-use crate::omemo::session::{self, OmemoSession};
+use crate::omemo::session::{self, OmemoSession, OmemoSessionState};
 use crate::omemo::{EncryptionVerificationError, OmemoError, OmemoManager, OMEMO_NAMESPACE};
 
 impl OmemoManager {
@@ -47,23 +47,51 @@ impl OmemoManager {
             bare_jid, remote_device_id
         );
 
-        // Check if this device is marked for session rebuild due to previous reset
-        let needs_rebuild = self.pending_session_rebuilds.contains(&key);
-        if needs_rebuild {
+        // Check if this device has a PeerResetPending or RecoveryPreKeySent marker —
+        // the peer's last PreKey referenced a key we no longer hold, or we are
+        // proactively recovering from AEAD failures, so we must rebuild.
+        let needs_rebuild = self
+            .sessions
+            .get(&key)
+            .map(|s| s.needs_rebuild())
+            .unwrap_or(false);
+
+        // Also force a rebuild if InitiatorAwaitingReply has timed out: the peer
+        // may never receive (or process) our PreKey, so we generate fresh key
+        // material rather than continuing to send against the same ephemeral key.
+        const INITIATOR_AWAIT_TIMEOUT: std::time::Duration =
+            std::time::Duration::from_secs(24 * 3600); // 24 h
+        let awaiting_timed_out = matches!(
+            self.sessions.get(&key),
+            Some(OmemoSessionState::InitiatorAwaitingReply { sent_at, .. })
+                if sent_at.elapsed() > INITIATOR_AWAIT_TIMEOUT
+        );
+        if awaiting_timed_out {
+            info!(
+                "SESSION_DEBUG: InitiatorAwaitingReply timed out for {}:{}, re-keying",
+                bare_jid, remote_device_id
+            );
+            self.sessions.remove(&key);
+        }
+
+        let needs_rebuild = needs_rebuild || awaiting_timed_out;
+        if needs_rebuild && !awaiting_timed_out {
             info!(
                 "SESSION_DEBUG: Forcing fresh session rebuild for {}:{} after previous reset",
                 bare_jid, remote_device_id
             );
-            // Remove any existing session
+            // Clear the PeerResetPending or RecoveryPreKeySent marker.
             self.sessions.remove(&key);
-            // Remove from rebuild set since we're rebuilding now
-            self.pending_session_rebuilds.remove(&key);
             {
                 let storage_guard = self.storage.lock().await;
                 if let Err(e) = storage_guard
                     .clear_session_rebuild_needed(&key.0, key.1)
                 {
                     warn!("Failed to clear rebuild flag for {:?}: {}", key, e);
+                }
+                // Also clear prekey-pending (set by RecoveryPreKeySent path).
+                if let Err(e) = storage_guard.clear_prekey_pending(&key.0, key.1) {
+                    warn!("Failed to clear prekey-pending flag for {:?}: {}", key, e);
                 }
             }
         }
@@ -79,11 +107,15 @@ impl OmemoManager {
                 "SESSION_DEBUG: Reusing existing session for {}:{}",
                 bare_jid, remote_device_id
             );
-            return self.sessions.get_mut(&key).ok_or_else(|| {
-                OmemoError::SessionError(session::SessionError::InvalidStateError(
-                    "Session not found after check".to_string(),
-                ))
-            });
+            return self
+                .sessions
+                .get_mut(&key)
+                .and_then(|s| s.as_session_mut())
+                .ok_or_else(|| {
+                    OmemoError::SessionError(session::SessionError::InvalidStateError(
+                        "Session not found after check".to_string(),
+                    ))
+                });
         }
 
         info!(
@@ -271,8 +303,16 @@ impl OmemoManager {
             }
         }
 
-        // Now, after all awaits, mutably borrow self and insert
-        self.sessions.insert(key.clone(), session);
+        // Now, after all awaits, mutably borrow self and insert.
+        // Wrap in InitiatorAwaitingReply — the session transitions to Active once
+        // the peer replies with their first DH-ratchet message.
+        self.sessions.insert(
+            key.clone(),
+            OmemoSessionState::InitiatorAwaitingReply {
+                session,
+                sent_at: std::time::Instant::now(),
+            },
+        );
         self.store_session_state(&bare_jid, remote_device_id, &ratchet_state)
             .await?;
 
@@ -293,11 +333,15 @@ impl OmemoManager {
             );
         }
 
-        return self.sessions.get_mut(&key).ok_or_else(|| {
-            OmemoError::SessionError(session::SessionError::InvalidStateError(
-                "Session not found after check".to_string(),
-            ))
-        });
+        return self
+            .sessions
+            .get_mut(&key)
+            .and_then(|s| s.as_session_mut())
+            .ok_or_else(|| {
+                OmemoError::SessionError(session::SessionError::InvalidStateError(
+                    "Session not found after check".to_string(),
+                ))
+            });
     }
 
     /// Get a device identity from storage or fetch it
@@ -666,7 +710,13 @@ impl OmemoManager {
                 info!("ENCRYPT_DEBUG: Processing device {}:{}", jid, device_id);
                 let device_key = (jid.clone(), device_id);
 
-                let needs_prekey = self.pending_prekey_sends.contains_key(&device_key);
+                // True when we need to force a PreKey exchange for recovery —
+                // this is now encoded as `RecoveryPreKeySent` in the sessions map,
+                // replacing the old `pending_prekey_sends` HashSet.
+                let needs_prekey = matches!(
+                    self.sessions.get(&device_key),
+                    Some(OmemoSessionState::RecoveryPreKeySent { .. })
+                );
                 info!(
                     "ENCRYPT_DEBUG: Device {}:{} needs_prekey: {}",
                     jid, device_id, needs_prekey
@@ -760,7 +810,11 @@ impl OmemoManager {
                 // same borrow, then release the borrow before the async
                 // store_session_state call (which needs &mut self).
                 let (encrypt_result, ratchet_snapshot) = {
-                    let session = self.sessions.get_mut(&session_key).unwrap();
+                    let session = self
+                        .sessions
+                        .get_mut(&session_key)
+                        .and_then(|s| s.as_session_mut())
+                        .unwrap();
 
                     let result = if let Some((
                         identity_key,
@@ -812,7 +866,10 @@ impl OmemoManager {
                         info!("ENCRYPT_DEBUG: Successfully encrypted message key for {}:{} (prekey={})", jid, device_id, use_prekey_format);
 
                         if needs_prekey {
-                            self.pending_prekey_sends.remove(&device_key);
+                            // The RecoveryPreKeySent state was already replaced by
+                            // InitiatorAwaitingReply when get_or_create_session created
+                            // the new session.  Clear the persistent prekey-pending flag
+                            // so the recovery marker does not resurface on the next restart.
                             {
                                 let storage_guard = self.storage.lock().await;
                                 if let Err(e) = storage_guard
@@ -821,7 +878,7 @@ impl OmemoManager {
                                     warn!("Failed to clear prekey-pending flag for {}:{}: {}", device_key.0, device_key.1, e);
                                 }
                             }
-                            info!("ENCRYPT_DEBUG: Sent PreKey message to {}:{}, removing from pending list", jid, device_id);
+                            info!("ENCRYPT_DEBUG: Sent recovery PreKey to {}:{}", jid, device_id);
                         }
                     }
                     Err(e) => {

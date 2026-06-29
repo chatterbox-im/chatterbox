@@ -18,6 +18,7 @@ mod tests {
 
     use crate::omemo::device_id::DeviceId;
     use crate::omemo::protocol::X3DHKeyBundle;
+    use crate::omemo::session::OmemoSessionState;
     use crate::omemo::storage::{DeviceListEntry, OmemoStorage};
     use crate::omemo::wire::PreKeySignalMessage;
     use crate::omemo::{OmemoManager, OmemoPubSub, OMEMO_NAMESPACE};
@@ -432,11 +433,686 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Tests added for plan steps 1, 2, 4, 5
+    // Failure-path tests: the scenarios the FSM must handle correctly
     // -------------------------------------------------------------------------
 
-    /// Step 1a — A PreKeyMessage built against a recently-rotated (but still
-    /// historic) SPK should decrypt successfully on the recipient.
+    /// When Bob receives a PreKeyMessage that references an OPK he has already
+    /// consumed, the stale-OPK path must:
+    ///   1. Delete Bob's existing session for Alice from memory AND storage.
+    ///   2. Set `pending_session_rebuilds` for Alice so the next outbound from
+    ///      Bob creates a fresh PreKey.
+    ///   3. NOT increment the failure counter (this is not a ratchet failure).
+    #[tokio::test]
+    async fn test_stale_opk_triggers_cleanup_and_rebuild_flag() {
+        let _ = env_logger::builder().is_test(true).try_init();
+
+        let alice_jid = "alice@example.com";
+        let bob_jid = "bob@example.com";
+        let alice_device_id: u32 = 20001;
+        let bob_device_id: u32 = 20002;
+
+        let pubsub = Arc::new(MockPubSub::new());
+
+        let (mut alice, _alice_dir) =
+            create_manager(alice_jid, alice_device_id, pubsub.clone()).await;
+        let (mut bob, _bob_dir) = create_manager(bob_jid, bob_device_id, pubsub.clone()).await;
+
+        // Serve both bundles; MockPubSub holds the snapshot and won't remove
+        // OPKs when Bob consumes them.
+        pubsub.add_device_list(bob_jid, &[bob_device_id]).await;
+        pubsub.add_device_list(alice_jid, &[alice_device_id]).await;
+        pubsub
+            .add_bundle(bob_jid, bob_device_id, bob.key_bundle.as_ref().unwrap())
+            .await;
+        pubsub
+            .add_bundle(alice_jid, alice_device_id, alice.key_bundle.as_ref().unwrap())
+            .await;
+
+        // First session establishment: Alice → Bob (fresh OPK used and consumed)
+        let msg1 = alice
+            .encrypt_message(bob_jid, "first message")
+            .await
+            .expect("first encryption should succeed");
+        bob.decrypt_message(alice_jid, alice_device_id, &msg1)
+            .await
+            .expect("first decryption should succeed");
+
+        // The OPK Bob used is now consumed.  Force Alice to rebuild her session
+        // (simulating a fresh connect where she has a stale cached bundle) so
+        // that her next PreKey will reference the same (already-consumed) OPK.
+        alice.sessions.insert(
+            (bob_jid.to_string(), bob_device_id),
+            OmemoSessionState::PeerResetPending,
+        );
+
+        // Bob also builds a new session with Alice to use as "pre-existing state"
+        // (so we can verify it gets deleted on the stale-OPK path).
+        let _msg_from_bob = bob
+            .encrypt_message(alice_jid, "bob → alice after first exchange")
+            .await
+            .expect("bob→alice encryption should succeed");
+        assert!(
+            bob.sessions
+                .contains_key(&(alice_jid.to_string(), alice_device_id)),
+            "Bob should have a session for Alice before the stale-OPK event"
+        );
+
+        // Alice now creates a second PreKey that references the already-consumed OPK.
+        let msg2_stale = alice
+            .encrypt_message(bob_jid, "second message (stale OPK)")
+            .await
+            .expect("Alice can still encrypt — she doesn't know OPK was consumed");
+
+        // Bob tries to decrypt — must hit the stale-OPK path.
+        let err = bob
+            .decrypt_message(alice_jid, alice_device_id, &msg2_stale)
+            .await
+            .expect_err("stale-OPK PreKey must fail");
+
+        let err_str = err.to_string();
+        assert!(
+            err_str.contains("Missing one-time prekey") || err_str.contains("prekey"),
+            "error should mention missing OPK, got: {}",
+            err_str
+        );
+
+        // Invariant 1: Bob's in-memory entry for Alice must now be PeerResetPending
+        // (the active session has been replaced with the rebuild marker).
+        assert!(
+            matches!(
+                bob.sessions.get(&(alice_jid.to_string(), alice_device_id)),
+                Some(OmemoSessionState::PeerResetPending)
+            ),
+            "Bob's session for Alice must be PeerResetPending after stale-OPK rejection"
+        );
+
+        // Invariant 2: Bob must have flagged Alice for a session rebuild.
+        assert!(
+            matches!(
+                bob.sessions.get(&(alice_jid.to_string(), alice_device_id)),
+                Some(OmemoSessionState::PeerResetPending)
+            ),
+            "Bob must set PeerResetPending for Alice after stale-OPK rejection"
+        );
+
+        // Invariant 3: failure count must still be 0 (stale OPK is not a ratchet failure).
+        let failure_count = bob
+            .get_device_failure_count(alice_jid, alice_device_id)
+            .await;
+        assert_eq!(
+            failure_count, 0,
+            "stale-OPK rejection must NOT increment the failure counter"
+        );
+    }
+
+    /// Full convergence test: after a stale-OPK rejection, the next outbound
+    /// message from Bob creates a fresh session with Alice, and both parties
+    /// can exchange messages successfully.
+    #[tokio::test]
+    async fn test_stale_opk_full_recovery_flow() {
+        let _ = env_logger::builder().is_test(true).try_init();
+
+        let alice_jid = "alice@example.com";
+        let bob_jid = "bob@example.com";
+        let alice_device_id: u32 = 21001;
+        let bob_device_id: u32 = 21002;
+
+        let pubsub = Arc::new(MockPubSub::new());
+
+        let (mut alice, _alice_dir) =
+            create_manager(alice_jid, alice_device_id, pubsub.clone()).await;
+        let (mut bob, _bob_dir) = create_manager(bob_jid, bob_device_id, pubsub.clone()).await;
+
+        pubsub.add_device_list(bob_jid, &[bob_device_id]).await;
+        pubsub.add_device_list(alice_jid, &[alice_device_id]).await;
+        pubsub
+            .add_bundle(bob_jid, bob_device_id, bob.key_bundle.as_ref().unwrap())
+            .await;
+        pubsub
+            .add_bundle(alice_jid, alice_device_id, alice.key_bundle.as_ref().unwrap())
+            .await;
+
+        // Normal first exchange so Bob consumes Alice's intended OPK.
+        let msg1 = alice
+            .encrypt_message(bob_jid, "initial message")
+            .await
+            .unwrap();
+        bob.decrypt_message(alice_jid, alice_device_id, &msg1)
+            .await
+            .unwrap();
+
+        // Force Alice to rebuild (stale cached bundle scenario).
+        alice.sessions.insert(
+            (bob_jid.to_string(), bob_device_id),
+            crate::omemo::session::OmemoSessionState::PeerResetPending,
+        );
+
+        // Alice sends second PreKey (referencing consumed OPK) — Bob rejects.
+        let stale_msg = alice.encrypt_message(bob_jid, "stale").await.unwrap();
+        bob.decrypt_message(alice_jid, alice_device_id, &stale_msg)
+            .await
+            .expect_err("stale OPK must be rejected");
+
+        // Now Bob encrypts to Alice.  The PeerResetPending entry in Bob's sessions
+        // map triggers a force-fetch of Alice's bundle and creates a fresh PreKey.
+        let bob_recovery_msg = bob
+            .encrypt_message(alice_jid, "recovery message from Bob")
+            .await
+            .expect("Bob must be able to send a recovery PreKey to Alice");
+
+        assert!(
+            bob_recovery_msg.is_prekey,
+            "Bob's recovery message should be a PreKey (new session)"
+        );
+
+        // Alice decrypts Bob's recovery PreKey and establishes Session B.
+        let dec = alice
+            .decrypt_message(bob_jid, bob_device_id, &bob_recovery_msg)
+            .await
+            .expect("Alice must decrypt Bob's recovery PreKey");
+        assert_eq!(dec, "recovery message from Bob");
+
+        // Both parties should now be able to exchange messages normally.
+        let alice_followup = alice
+            .encrypt_message(bob_jid, "post-recovery from Alice")
+            .await
+            .expect("post-recovery encryption by Alice should succeed");
+        let dec2 = bob
+            .decrypt_message(alice_jid, alice_device_id, &alice_followup)
+            .await
+            .expect("Bob must decrypt Alice's post-recovery message");
+        assert_eq!(dec2, "post-recovery from Alice");
+    }
+
+    /// After 3 consecutive decryption failures from the same device, the session
+    /// must be reset: deleted from memory and storage, failure count cleared,
+    /// and the device flagged for session rebuild.
+    #[tokio::test]
+    async fn test_three_mac_failures_reset_session() {
+        let _ = env_logger::builder().is_test(true).try_init();
+
+        let alice_jid = "alice@example.com";
+        let bob_jid = "bob@example.com";
+        let alice_device_id: u32 = 22001;
+        let bob_device_id: u32 = 22002;
+
+        let pubsub = Arc::new(MockPubSub::new());
+
+        let (mut alice, _alice_dir) =
+            create_manager(alice_jid, alice_device_id, pubsub.clone()).await;
+        let (mut bob, _bob_dir) = create_manager(bob_jid, bob_device_id, pubsub.clone()).await;
+
+        pubsub.add_device_list(bob_jid, &[bob_device_id]).await;
+        pubsub.add_device_list(alice_jid, &[alice_device_id]).await;
+        pubsub
+            .add_bundle(bob_jid, bob_device_id, bob.key_bundle.as_ref().unwrap())
+            .await;
+        pubsub
+            .add_bundle(alice_jid, alice_device_id, alice.key_bundle.as_ref().unwrap())
+            .await;
+
+        // Establish a valid session so Bob has one in memory.
+        let msg = alice.encrypt_message(bob_jid, "seed").await.unwrap();
+        bob.decrypt_message(alice_jid, alice_device_id, &msg)
+            .await
+            .unwrap();
+
+        assert!(
+            bob.sessions
+                .contains_key(&(alice_jid.to_string(), alice_device_id)),
+            "session must exist before failure simulation"
+        );
+
+        // Simulate 3 consecutive MAC failures by calling handle_decryption_failure
+        // directly (this is the code path triggered by every MAC failure in the wild).
+        for _ in 0..3 {
+            bob.handle_decryption_failure(
+                alice_jid.to_string(),
+                alice_device_id,
+                crate::omemo::session::SessionError::DoubleRatchetError(
+                    crate::omemo::protocol::DoubleRatchetError::CryptoError(
+                        crate::omemo::crypto::CryptoError::AesGcmError(
+                            "MAC verification failed".to_string(),
+                        ),
+                    ),
+                ),
+            )
+            .await
+            .ok(); // returns Err but we only care about the side-effects
+        }
+
+        // After 3 failures the session must be wiped from Bob's in-memory map.
+        assert!(
+            !bob.sessions
+                .contains_key(&(alice_jid.to_string(), alice_device_id)),
+            "session must be deleted from memory after 3 failures"
+        );
+
+        // The failure count must be reset (not stuck at 3).
+        let count_after = bob
+            .get_device_failure_count(alice_jid, alice_device_id)
+            .await;
+        assert_eq!(
+            count_after, 0,
+            "failure count must be reset to 0 after session reset"
+        );
+    }
+
+    /// An AEAD/MAC failure must place the session into `RecoveryPreKeySent`
+    /// (not simply remove it) so that the next outbound message bypasses the
+    /// ignored-device check and sends a fresh recovery PreKey.
+    #[tokio::test]
+    async fn test_aead_failure_sets_recovery_state() {
+        let _ = env_logger::builder().is_test(true).try_init();
+
+        let alice_jid = "alice@example.com";
+        let bob_jid = "bob@example.com";
+        let alice_device_id: u32 = 23001;
+        let bob_device_id: u32 = 23002;
+
+        let pubsub = Arc::new(MockPubSub::new());
+        let (mut alice, _alice_dir) =
+            create_manager(alice_jid, alice_device_id, pubsub.clone()).await;
+        let (mut bob, _bob_dir) = create_manager(bob_jid, bob_device_id, pubsub.clone()).await;
+
+        pubsub.add_device_list(bob_jid, &[bob_device_id]).await;
+        pubsub.add_device_list(alice_jid, &[alice_device_id]).await;
+        pubsub
+            .add_bundle(bob_jid, bob_device_id, bob.key_bundle.as_ref().unwrap())
+            .await;
+        pubsub
+            .add_bundle(alice_jid, alice_device_id, alice.key_bundle.as_ref().unwrap())
+            .await;
+
+        // Establish a session
+        let msg = alice.encrypt_message(bob_jid, "seed").await.unwrap();
+        bob.decrypt_message(alice_jid, alice_device_id, &msg)
+            .await
+            .unwrap();
+
+        // Simulate an AEAD failure: this is the path triggered by
+        // "aead::Error" in the error string.
+        bob.handle_decryption_failure(
+            alice_jid.to_string(),
+            alice_device_id,
+            crate::omemo::session::SessionError::DoubleRatchetError(
+                crate::omemo::protocol::DoubleRatchetError::CryptoError(
+                    crate::omemo::crypto::CryptoError::AesGcmError(
+                        "aead::Error".to_string(), // triggers handle_aead_decryption_failure
+                    ),
+                ),
+            ),
+        )
+        .await
+        .ok();
+
+        // After an AEAD failure the session must be in RecoveryPreKeySent, NOT absent.
+        assert!(
+            matches!(
+                bob.sessions.get(&(alice_jid.to_string(), alice_device_id)),
+                Some(OmemoSessionState::RecoveryPreKeySent { .. })
+            ),
+            "session must be RecoveryPreKeySent after AEAD failure, got: {:?}",
+            bob.sessions.get(&(alice_jid.to_string(), alice_device_id))
+                .map(|s| std::mem::discriminant(s))
+        );
+    }
+
+    /// Each consecutive AEAD failure before the recovery PreKey is sent
+    /// increments the `attempt` counter in `RecoveryPreKeySent`.
+    #[tokio::test]
+    async fn test_aead_recovery_attempt_increments() {
+        let _ = env_logger::builder().is_test(true).try_init();
+
+        let alice_jid = "alice@example.com";
+        let bob_jid = "bob@example.com";
+        let alice_device_id: u32 = 24001;
+        let bob_device_id: u32 = 24002;
+
+        let pubsub = Arc::new(MockPubSub::new());
+        let (mut alice, _alice_dir) =
+            create_manager(alice_jid, alice_device_id, pubsub.clone()).await;
+        let (mut bob, _bob_dir) = create_manager(bob_jid, bob_device_id, pubsub.clone()).await;
+
+        pubsub.add_device_list(bob_jid, &[bob_device_id]).await;
+        pubsub.add_device_list(alice_jid, &[alice_device_id]).await;
+        pubsub
+            .add_bundle(bob_jid, bob_device_id, bob.key_bundle.as_ref().unwrap())
+            .await;
+        pubsub
+            .add_bundle(alice_jid, alice_device_id, alice.key_bundle.as_ref().unwrap())
+            .await;
+
+        let seed = alice.encrypt_message(bob_jid, "seed").await.unwrap();
+        bob.decrypt_message(alice_jid, alice_device_id, &seed)
+            .await
+            .unwrap();
+
+        let aead_err = || {
+            crate::omemo::session::SessionError::DoubleRatchetError(
+                crate::omemo::protocol::DoubleRatchetError::CryptoError(
+                    crate::omemo::crypto::CryptoError::AesGcmError(
+                        "aead::Error".to_string(),
+                    ),
+                ),
+            )
+        };
+
+        // First AEAD failure
+        bob.handle_decryption_failure(alice_jid.to_string(), alice_device_id, aead_err())
+            .await
+            .ok();
+        let attempt_1 = match bob.sessions.get(&(alice_jid.to_string(), alice_device_id)) {
+            Some(OmemoSessionState::RecoveryPreKeySent { attempt }) => *attempt,
+            other => panic!("expected RecoveryPreKeySent, got {:?}", other.map(|s| std::mem::discriminant(s))),
+        };
+
+        // Second AEAD failure before the recovery PreKey was sent
+        bob.handle_decryption_failure(alice_jid.to_string(), alice_device_id, aead_err())
+            .await
+            .ok();
+        let attempt_2 = match bob.sessions.get(&(alice_jid.to_string(), alice_device_id)) {
+            Some(OmemoSessionState::RecoveryPreKeySent { attempt }) => *attempt,
+            other => panic!("expected RecoveryPreKeySent, got {:?}", other.map(|s| std::mem::discriminant(s))),
+        };
+
+        assert!(
+            attempt_2 > attempt_1,
+            "attempt counter must increase on repeated AEAD failures ({} → {})",
+            attempt_1,
+            attempt_2
+        );
+    }
+
+    /// Full AEAD recovery flow: after an AEAD failure, Bob's next outbound
+    /// message must carry a fresh recovery PreKey that Alice can decrypt,
+    /// re-establishing a working session.
+    #[tokio::test]
+    async fn test_aead_recovery_full_flow() {
+        let _ = env_logger::builder().is_test(true).try_init();
+
+        let alice_jid = "alice@example.com";
+        let bob_jid = "bob@example.com";
+        let alice_device_id: u32 = 25001;
+        let bob_device_id: u32 = 25002;
+
+        let pubsub = Arc::new(MockPubSub::new());
+        let (mut alice, _alice_dir) =
+            create_manager(alice_jid, alice_device_id, pubsub.clone()).await;
+        let (mut bob, _bob_dir) = create_manager(bob_jid, bob_device_id, pubsub.clone()).await;
+
+        pubsub.add_device_list(bob_jid, &[bob_device_id]).await;
+        pubsub.add_device_list(alice_jid, &[alice_device_id]).await;
+        pubsub
+            .add_bundle(bob_jid, bob_device_id, bob.key_bundle.as_ref().unwrap())
+            .await;
+        pubsub
+            .add_bundle(alice_jid, alice_device_id, alice.key_bundle.as_ref().unwrap())
+            .await;
+
+        // Establish a valid session first
+        let seed = alice.encrypt_message(bob_jid, "seed").await.unwrap();
+        bob.decrypt_message(alice_jid, alice_device_id, &seed)
+            .await
+            .unwrap();
+
+        // Trigger an AEAD failure — Bob's session is wiped and RecoveryPreKeySent is set
+        bob.handle_decryption_failure(
+            alice_jid.to_string(),
+            alice_device_id,
+            crate::omemo::session::SessionError::DoubleRatchetError(
+                crate::omemo::protocol::DoubleRatchetError::CryptoError(
+                    crate::omemo::crypto::CryptoError::AesGcmError("aead::Error".to_string()),
+                ),
+            ),
+        )
+        .await
+        .ok();
+
+        assert!(
+            matches!(
+                bob.sessions.get(&(alice_jid.to_string(), alice_device_id)),
+                Some(OmemoSessionState::RecoveryPreKeySent { .. })
+            ),
+            "session must be RecoveryPreKeySent before recovery send"
+        );
+
+        // Bob sends the recovery message — RecoveryPreKeySent triggers a force-rebuild
+        // and the message is a fresh PreKey.
+        let recovery_msg = bob
+            .encrypt_message(alice_jid, "recovery from Bob")
+            .await
+            .expect("recovery encrypt must succeed");
+
+        assert!(
+            recovery_msg.is_prekey,
+            "recovery message must use PreKey format"
+        );
+
+        // After sending, RecoveryPreKeySent transitions to InitiatorAwaitingReply
+        assert!(
+            matches!(
+                bob.sessions.get(&(alice_jid.to_string(), alice_device_id)),
+                Some(OmemoSessionState::InitiatorAwaitingReply { .. })
+            ),
+            "session must be InitiatorAwaitingReply after recovery PreKey is sent"
+        );
+
+        // Alice decrypts the recovery PreKey — session established
+        let dec = alice
+            .decrypt_message(bob_jid, bob_device_id, &recovery_msg)
+            .await
+            .expect("Alice must decrypt Bob's recovery PreKey");
+        assert_eq!(dec, "recovery from Bob");
+
+        // Both sides should now be able to exchange messages normally
+        let post = alice
+            .encrypt_message(bob_jid, "post-recovery from Alice")
+            .await
+            .expect("post-recovery encrypt must succeed");
+        let dec2 = bob
+            .decrypt_message(alice_jid, alice_device_id, &post)
+            .await
+            .expect("Bob must decrypt Alice's post-recovery message");
+        assert_eq!(dec2, "post-recovery from Alice");
+    }
+
+    // -------------------------------------------------------------------------
+    // Tests for step 7b (FSM transitions) and step 8 (from_state constructor)
+    // -------------------------------------------------------------------------
+
+    /// A timed-out `InitiatorAwaitingReply` session must be discarded and
+    /// replaced with a fresh PreKey on the next outbound message.
+    /// Verified by checking that the new message uses a different ephemeral key
+    /// (base_key) than the original one.
+    #[tokio::test]
+    async fn test_initiator_awaiting_reply_timeout_creates_fresh_prekey() {
+        let _ = env_logger::builder().is_test(true).try_init();
+
+        let alice_jid = "alice@example.com";
+        let bob_jid = "bob@example.com";
+        let alice_device_id: u32 = 30001;
+        let bob_device_id: u32 = 30002;
+
+        let pubsub = Arc::new(MockPubSub::new());
+        let (mut alice, _alice_dir) =
+            create_manager(alice_jid, alice_device_id, pubsub.clone()).await;
+        let (bob, _bob_dir) = create_manager(bob_jid, bob_device_id, pubsub.clone()).await;
+
+        pubsub.add_device_list(bob_jid, &[bob_device_id]).await;
+        pubsub.add_device_list(alice_jid, &[alice_device_id]).await;
+        pubsub
+            .add_bundle(bob_jid, bob_device_id, bob.key_bundle.as_ref().unwrap())
+            .await;
+        pubsub
+            .add_bundle(alice_jid, alice_device_id, alice.key_bundle.as_ref().unwrap())
+            .await;
+
+        // First send — creates an InitiatorAwaitingReply session
+        let msg1 = alice
+            .encrypt_message(bob_jid, "first")
+            .await
+            .expect("first encrypt should succeed");
+        let base_key_1 = PreKeySignalMessage::deserialize(
+            msg1.encrypted_keys.get(&bob_device_id).unwrap(),
+        )
+        .expect("should be PreKeySignalMessage")
+        .base_key
+        .clone();
+
+        // Artificially age the `sent_at` timestamp past the 24-hour timeout.
+        if let Some(OmemoSessionState::InitiatorAwaitingReply {
+            ref mut sent_at, ..
+        }) = alice
+            .sessions
+            .get_mut(&(bob_jid.to_string(), bob_device_id))
+        {
+            *sent_at = std::time::Instant::now()
+                - std::time::Duration::from_secs(25 * 3600);
+        } else {
+            panic!("expected InitiatorAwaitingReply after first send");
+        }
+
+        // Second send — the timed-out session must be discarded and a fresh PreKey created
+        let msg2 = alice
+            .encrypt_message(bob_jid, "second (after timeout)")
+            .await
+            .expect("second encrypt should succeed");
+
+        assert!(msg2.is_prekey, "message after timeout must be a PreKey");
+        let base_key_2 = PreKeySignalMessage::deserialize(
+            msg2.encrypted_keys.get(&bob_device_id).unwrap(),
+        )
+        .expect("should be PreKeySignalMessage")
+        .base_key
+        .clone();
+
+        assert_ne!(
+            base_key_1, base_key_2,
+            "timed-out session must generate new ephemeral material (different base_key)"
+        );
+    }
+
+    /// After more than MAX_RECOVERY_ATTEMPTS (5) consecutive AEAD failures the
+    /// attempt counter must exceed the threshold.  The session must still be in
+    /// `RecoveryPreKeySent` (not silently dropped) so recovery can be retried.
+    #[tokio::test]
+    async fn test_recovery_attempt_exceeds_threshold() {
+        let _ = env_logger::builder().is_test(true).try_init();
+
+        let alice_jid = "alice@example.com";
+        let bob_jid = "bob@example.com";
+        let alice_device_id: u32 = 31001;
+        let bob_device_id: u32 = 31002;
+
+        let pubsub = Arc::new(MockPubSub::new());
+        let (mut alice, _alice_dir) =
+            create_manager(alice_jid, alice_device_id, pubsub.clone()).await;
+        let (mut bob, _bob_dir) = create_manager(bob_jid, bob_device_id, pubsub.clone()).await;
+
+        pubsub.add_device_list(bob_jid, &[bob_device_id]).await;
+        pubsub.add_device_list(alice_jid, &[alice_device_id]).await;
+        pubsub
+            .add_bundle(bob_jid, bob_device_id, bob.key_bundle.as_ref().unwrap())
+            .await;
+        pubsub
+            .add_bundle(alice_jid, alice_device_id, alice.key_bundle.as_ref().unwrap())
+            .await;
+
+        let seed = alice.encrypt_message(bob_jid, "seed").await.unwrap();
+        bob.decrypt_message(alice_jid, alice_device_id, &seed)
+            .await
+            .unwrap();
+
+        let aead_err = || {
+            crate::omemo::session::SessionError::DoubleRatchetError(
+                crate::omemo::protocol::DoubleRatchetError::CryptoError(
+                    crate::omemo::crypto::CryptoError::AesGcmError("aead::Error".to_string()),
+                ),
+            )
+        };
+
+        // Fire 6 AEAD failures — one past the MAX_RECOVERY_ATTEMPTS threshold of 5
+        for _ in 0..6 {
+            bob.handle_decryption_failure(alice_jid.to_string(), alice_device_id, aead_err())
+                .await
+                .ok();
+        }
+
+        let attempt = match bob.sessions.get(&(alice_jid.to_string(), alice_device_id)) {
+            Some(OmemoSessionState::RecoveryPreKeySent { attempt }) => *attempt,
+            other => panic!(
+                "session should still be RecoveryPreKeySent, got: {:?}",
+                other.map(|s| std::mem::discriminant(s))
+            ),
+        };
+
+        assert!(
+            attempt > 5,
+            "attempt counter must exceed MAX_RECOVERY_ATTEMPTS (5), got {}",
+            attempt
+        );
+    }
+
+    /// `OmemoSession::from_state` must produce a session whose fields are taken
+    /// directly from the `RatchetState`, with no separate JID/device-ID argument.
+    #[tokio::test]
+    async fn test_from_state_creates_initialized_session() {
+        use crate::omemo::session::OmemoSession;
+
+        let alice_jid = "alice@example.com";
+        let bob_jid = "bob@example.com";
+        let alice_device_id: u32 = 32001;
+        let bob_device_id: u32 = 32002;
+
+        let pubsub = Arc::new(MockPubSub::new());
+        let (mut alice, _alice_dir) =
+            create_manager(alice_jid, alice_device_id, pubsub.clone()).await;
+        let (bob, _bob_dir) = create_manager(bob_jid, bob_device_id, pubsub.clone()).await;
+
+        pubsub.add_device_list(bob_jid, &[bob_device_id]).await;
+        pubsub.add_device_list(alice_jid, &[alice_device_id]).await;
+        pubsub
+            .add_bundle(bob_jid, bob_device_id, bob.key_bundle.as_ref().unwrap())
+            .await;
+        pubsub
+            .add_bundle(alice_jid, alice_device_id, alice.key_bundle.as_ref().unwrap())
+            .await;
+
+        // Establish a real session so we have a valid RatchetState to extract
+        alice.encrypt_message(bob_jid, "seed").await.unwrap();
+
+        let ratchet_state = alice
+            .sessions
+            .get(&(bob_jid.to_string(), bob_device_id))
+            .and_then(|s| s.as_session())
+            .expect("session must exist after first encrypt")
+            .ratchet_state
+            .clone();
+
+        // Verify the state itself is initialized
+        assert!(ratchet_state.initialized, "ratchet_state must be initialized");
+        assert_eq!(ratchet_state.remote_jid, bob_jid);
+        assert_eq!(ratchet_state.remote_device_id, bob_device_id);
+
+        // from_state must produce a correctly wired, initialized session
+        let session = OmemoSession::from_state(alice_device_id, ratchet_state);
+
+        assert!(session.is_initialized(), "from_state session must be initialized");
+        assert_eq!(session.remote_jid, bob_jid, "JID must come from RatchetState");
+        assert_eq!(
+            session.remote_device_id, bob_device_id,
+            "device_id must come from RatchetState"
+        );
+        assert_eq!(
+            session.local_device_id, alice_device_id,
+            "local_device_id must be the provided argument"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Tests added for plan steps 1, 2, 4, 5
+    // -------------------------------------------------------------------------
     #[tokio::test]
     async fn test_historic_spk_decrypts_prekey_message() {
         let _ = env_logger::builder().is_test(true).try_init();

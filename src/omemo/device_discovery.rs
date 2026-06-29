@@ -24,10 +24,12 @@ fn parse_device_list_response_static(response: &str) -> Result<Vec<u32>, OmemoEr
     debug!("Static parsing device list response - starting");
     debug!(
         "Raw XML response (first 500 chars): {}",
-        if response.len() > 500 {
-            &response[..500]
-        } else {
-            response
+        // Slicing a &str at a byte offset can panic if it falls inside a
+        // multi-byte UTF-8 sequence.  Use char_indices to find the exact byte
+        // position of the 500th character instead.
+        match response.char_indices().nth(500).map(|(i, _)| i) {
+            Some(n) => &response[..n],
+            None => response,
         }
     );
 
