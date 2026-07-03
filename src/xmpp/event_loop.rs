@@ -27,7 +27,7 @@ impl XMPPClient {
         pending_receipts: Arc<TokioMutex<std::collections::HashMap<String, PendingMessage>>>,
         iq_registry: Arc<TokioMutex<crate::xmpp::iq_registry::IqResponseRegistry>>,
         late_state: LateStateRx,
-        online_tx: Option<tokio::sync::oneshot::Sender<()>>,
+        online_tx: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
     ) {
         let mut seen_online_event = false;
         let mut online_tx = online_tx;
@@ -448,12 +448,24 @@ impl XMPPClient {
                         }
 
                         if let Some(tx) = online_tx.take() {
-                            let _ = tx.send(());
+                            let _ = tx.send(Ok(()));
                         }
                     }
                 }
                 XMPPEvent::Disconnected(reason) => {
-                    error!("XMPP client is disconnected: {:?}", reason);
+                    let reason_str = format!("{:?}", reason);
+                    error!("XMPP client is disconnected: {}", reason_str);
+                    if let Some(tx) = online_tx.take() {
+                        let msg = if reason_str.contains("not trusted")
+                            || reason_str.contains("certificate")
+                            || reason_str.contains("Certificate")
+                        {
+                            "TLS certificate is not trusted by this system".to_string()
+                        } else {
+                            format!("Connection failed: {}", reason_str)
+                        };
+                        let _ = tx.send(Err(msg));
+                    }
                     break;
                 }
             }

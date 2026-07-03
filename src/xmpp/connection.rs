@@ -174,10 +174,14 @@ impl XMPPClient {
     async fn wait_for_connection(
         &self,
         timeout: Duration,
-        online_rx: tokio::sync::oneshot::Receiver<()>,
+        online_rx: tokio::sync::oneshot::Receiver<Result<(), String>>,
     ) -> Result<bool> {
         match tokio::time::timeout(timeout, online_rx).await {
-            Ok(Ok(())) => Ok(true),
+            Ok(Ok(Ok(()))) => Ok(true),
+            Ok(Ok(Err(msg))) => {
+                error!("Connection failed before online: {}", msg);
+                Err(anyhow!("{}", msg))
+            }
             Ok(Err(_)) => {
                 error!("Connection event handler dropped before signaling online");
                 Err(anyhow!("Connection handler terminated unexpectedly"))
