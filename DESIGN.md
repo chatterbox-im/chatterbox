@@ -42,8 +42,8 @@ The application follows a modular, asynchronous, and event-driven architecture:
     *   Manages UI state (active tab, selected contact, input buffer, dialogs, notification toggle, terminal focus).
 *   **`xmpp/` (Module Root: `xmpp/mod.rs`):**
     *   Encapsulates all XMPP communication logic using `tokio-xmpp` and `xmpp-parsers`.
-    *   Manages the connection lifecycle (connect, disconnect, reconnect attempts).
-    *   Spawns `transport.rs`, a transport actor that owns `tokio_xmpp::AsyncClient` exclusively and multiplexes inbound XMPP events with outbound stanza sends through channels.
+    *   Manages the connection lifecycle (connect, disconnect). Reconnection and Stream Management (XEP-0198) are handled transparently by the `tokio_xmpp::Client`.
+    *   Spawns `transport.rs`, a thin transport actor that owns `tokio_xmpp::Client` exclusively and multiplexes inbound XMPP events with outbound stanza sends through channels.
     *   Handles the XMPP event stream in `event_loop.rs` via `XMPPClient::handle_incoming_messages`.
     *   Provides methods for core XMPP actions (sending messages, fetching roster, sending presence/chat states) by sending stanzas through `transport::StanzaTx`.
     *   Contains submodules for specific XEP implementations:
@@ -80,14 +80,16 @@ The application follows a modular, asynchronous, and event-driven architecture:
 *   **Chat State Notifications (XEP-0085):** Displaying typing indicators.
 *   **Message Archive Management (XEP-0313):** Retrieving message history from the server (used for catch-up only; local store is primary).
 *   **Message Carbons (XEP-0280):** Synchronizing messages sent/received by other clients for the same account.
+*   **Stream Management (XEP-0198):** Transparent session resumption after TCP drops, negotiated automatically by `tokio_xmpp::Client`. Eliminates delivery failures when the TCP connection is interrupted.
+*   **Service Discovery (XEP-0030):** Queries server and peer capabilities on connect.
 *   **OMEMO Encryption (XEP-0384):** End-to-end encryption for messages (implementation details in `omemo/`).
 *   **Local Message Persistence:** SQLite-backed per-account message storage for instant history access offline.
-*   **Optional OS Notifications:** Desktop notifications for incoming messages using `notify-rust`, disabled by default, persisted in app settings, and suppressed while the terminal is focused.
+*   **Filesystem Sandbox:** On macOS the process is confined with a Seatbelt profile (via `sandbox-exec`) that restricts filesystem access to the app's data directories and the network. On Linux, `birdcage` (Landlock + seccomp) is used instead.
 
 ## 5. Concurrency and State Management
 
 *   **`tokio`:** Used for the asynchronous runtime, managing tasks for network I/O, UI events, and background processing (like history loading).
-*   **Transport actor:** `xmpp/transport.rs` owns `XMPPAsyncClient` exclusively. Outbound stanzas are sent to it through `StanzaTx`; inbound XMPP events are sent back over an event channel. The raw XMPP client is not shared behind a mutex.
+*   **Transport actor:** `xmpp/transport.rs` owns `tokio_xmpp::Client` exclusively. Outbound stanzas (as `minidom::Element`) are sent to it through `StanzaTx`; inbound XMPP events are forwarded over an event channel. The client is not shared behind a mutex.
 *   **Event-driven UI loop:** `app.rs` waits on terminal events, incoming messages, presence updates, friend requests, typing notifications, and periodic timers with `tokio::select!`. The UI redraws only when state changes.
 *   **Terminal event reader:** `ui.rs` uses a small blocking reader thread for `crossterm` events and forwards them to the async loop over a Tokio channel.
 *   **Shared state:** `Arc<TokioMutex<T>>` is still used for scoped mutable state such as pending delivery receipts, IQ response routing, and the OMEMO manager, but not for the XMPP transport itself.
@@ -104,8 +106,8 @@ The application follows a modular, asynchronous, and event-driven architecture:
 *   **`tokio`:** Asynchronous runtime.
 *   **`ratatui`:** Terminal UI rendering.
 *   **`crossterm`:** Terminal manipulation and event handling backend for `ratatui`.
-*   **`tokio-xmpp`:** Core XMPP client library.
-*   **`xmpp-parsers`:** Parsing XMPP XML stanzas.
+*   **`tokio-xmpp` (v6):** Core XMPP client library. Handles connection, SASL, resource binding, and Stream Management (XEP-0198) transparently.
+*   **`xmpp-parsers` (v0.23):** Parsing and constructing XMPP XML stanzas; provides typed stanza enums.
 *   **`log`:** Logging facade, backed by the custom logger in `utils.rs`.
 *   **`clap`:** Command-line argument parsing.
 *   **`anyhow`:** Error handling.
@@ -281,18 +283,56 @@ All ~35 production construction sites across `send.rs`, `omemo_handler.rs`, `mes
 
 ## 10. Transport and Coordinator Architecture
 
-`xmpp/transport.rs` is part of the current runtime path. When `XMPPClient::connect()` succeeds, it spawns a transport actor that owns `tokio_xmpp::AsyncClient` and exposes channel handles for the rest of the XMPP layer:
+`xmpp/transport.rs` is part of the current runtime path. When `XMPPClient::connect()` succeeds, it spawns a transport actor that owns a `tokio_xmpp::Client` (v6) and exposes channel handles for the rest of the XMPP layer:
 
-*   **`StanzaTx`:** Cloneable sender for outbound XML stanzas.
-*   **Transport event receiver:** Delivers `tokio_xmpp::Event` values (`Online`, `Stanza`, `Disconnected`) to `event_loop.rs`.
-*   **No shared raw client mutex:** Senders never lock `XMPPAsyncClient`; they enqueue stanzas to the transport actor.
-*   **Optional reconnect variants:** `spawn_transport_with_reconnect()` and bounded-channel variants exist for coordinator-style use.
+*   **`StanzaTx`:** Cloneable sender for outbound XML stanzas (as raw `minidom::Element`). The transport converts them to the typed `Stanza` enum required by the v6 API before sending.
+*   **Transport event receiver:** Delivers `tokio_xmpp::Event` values (`Online`, `Stanza`, `Disconnected`) to `event_loop.rs`. `Stanza` events carry a typed `Stanza` enum; the event loop converts them back to raw `Element` at the entry point.
+*   **No shared raw client mutex:** Senders never lock the client; they enqueue elements to the transport actor.
+*   **Reconnection and Stream Management:** Handled transparently by `tokio_xmpp::Client` (v6). On a TCP drop the client attempts SM resumption; if the server accepts, the session continues without our code seeing a `Disconnected` event. If resumption fails, a new session is established and our `reconnecting` flag triggers carbons re-enable and presence re-send.
 
 `xmpp/coordinator.rs` remains an additional single-threaded coordinator pattern and testbed for a more command-oriented XMPP architecture. It provides:
 
 *   **`CoordinatorState`:** All mutable state in one struct (no `Arc<Mutex<>>` needed).
 *   **`send_to_ui()` helper:** Non-blocking `try_send()` to prevent channel backpressure from deadlocking the event loop.
-*   **`TransportHandle`:** Bounded channels for stanza send/receive with automatic reconnection and exponential backoff.
 *   **Command dispatch:** `CoordinatorCommand` enum for type-safe app→XMPP communication.
 
-The current `main.rs` path still uses `XMPPClient`, `transport.rs`, and `event_loop.rs`; the coordinator is exported and heavily tested but is not the app entry point.
+The current `main.rs` path uses `XMPPClient`, `transport.rs`, and `event_loop.rs`; the coordinator is exported and heavily tested but is not the app entry point.
+
+## 11. Sandbox File-Access Policy
+
+The sandbox is installed at startup (before the async runtime) via `src/sandbox.rs`. Both platforms use a re-exec model: the parent process sets a marker env-var and spawns itself under the sandbox, then exits with the child's status. Set `CHATTERBOX_NO_SANDBOX=1` to disable.
+
+### Read-only paths
+
+These paths are accessible for reading but not writing:
+
+| Path | Reason |
+|------|--------|
+| `/usr`, `/bin`, `/sbin`, `/opt` | System binaries and libraries |
+| `/System`, `/Library`, `/Applications` | macOS frameworks and shared resources |
+| `/private/etc`, `/private/var` | DNS config, shared caches, temp metadata |
+| `/dev` | Device nodes (metadata only; `/dev/tty` and `/dev/null` get read+write, see below) |
+| `/usr/lib`, `/lib`, `/lib64`, `/usr/share`, `/etc`, `/proc`, `/sys`, `/run/systemd/resolve` | Linux equivalents of the above |
+| The app binary's own directory | Required by the dynamic linker and backtrace support |
+
+### Read+write paths
+
+These paths are accessible for both reading and writing:
+
+| Path | Reason |
+|------|--------|
+| `~/.config/chatterbox/` (macOS: `~/Library/Application Support/chatterbox/`) | Credentials (`credentials.json`), app settings (`settings.json`) |
+| `~/.local/share/chatterbox/` (macOS: `~/Library/Application Support/chatterbox/`) | OMEMO keys, session state, device identity, local message database |
+| `--omemo-dir <path>` (if supplied) | Custom OMEMO storage directory passed on the command line |
+| `$TMPDIR` / `/tmp` | Temporary files used by Tokio and Rust's standard library |
+| `/dev/tty`, `/dev/null` | Terminal raw-mode I/O (`crossterm` opens `/dev/tty` O_RDWR) |
+
+### What is blocked
+
+Everything not listed above is denied. In practice this means:
+
+*   The user's home directory outside the two `chatterbox/` subdirectories (documents, `~/.ssh`, other apps' data, etc.)
+*   Other applications' config and data directories
+*   The filesystem root and any removable or network volumes
+
+Network access is permitted without restriction on both platforms (TCP/UDP) so that XMPP and DNS can work.
