@@ -6,9 +6,9 @@ edition = "2021"
 [dependencies]
 ratatui = "0.29"
 crossterm = "0.28"
-xmpp-parsers = "0.19.1"
+xmpp-parsers = "0.23.0"
 tokio = { version = "1.28.2", features = ["full"] }
-tokio-xmpp = "3.5.0"
+tokio-xmpp = { version = "6.0.0", default-features = false, features = ["native-tls", "starttls"] }
 futures = "0.3.28"
 tokio-stream = "0.1.14"
 anyhow = "1.0.75"

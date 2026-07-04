@@ -114,7 +114,7 @@ impl XMPPClient {
     /// Handle an encrypted message using OMEMO
     pub async fn handle_message_encrypted(
         &mut self,
-        element: &xmpp_parsers::Element,
+        element: &xmpp_parsers::minidom::Element,
     ) -> Result<()> {
         // Extract important attributes
         let from = element.attr("from").unwrap_or("unknown@server.example");
@@ -361,15 +361,15 @@ impl XMPPClient {
                         if element.has_child("request", custom_ns::RECEIPTS) {
                             if let Some(stanza_tx) = &self.stanza_tx {
                                 let receipt =
-                                    xmpp_parsers::Element::builder("message", NS_JABBER_CLIENT)
-                                        .attr("to", from)
-                                        .attr("id", &uuid::Uuid::new_v4().to_string())
+                                    xmpp_parsers::minidom::Element::builder("message", NS_JABBER_CLIENT)
+                                        .attr("to".try_into().unwrap(), from)
+                                        .attr("id".try_into().unwrap(), &uuid::Uuid::new_v4().to_string())
                                         .append(
-                                            xmpp_parsers::Element::builder(
+                                            xmpp_parsers::minidom::Element::builder(
                                                 "received",
                                                 custom_ns::RECEIPTS,
                                             )
-                                            .attr("id", id)
+                                            .attr("id".try_into().unwrap(), id)
                                             .build(),
                                         )
                                         .build();

@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 // Import the core xmpp libraries
 #[allow(unused_imports)]
-use tokio_xmpp::AsyncClient as XMPPAsyncClient;
+use tokio_xmpp::Client as XMPPAsyncClient;
 
 // Import our submodules - making them public
 pub mod chat_states;
@@ -178,7 +178,7 @@ impl XMPPClient {
     }
 
     /// Send a stanza via the transport channel.
-    pub(crate) fn send_stanza(&self, stanza: xmpp_parsers::Element) -> anyhow::Result<()> {
+    pub(crate) fn send_stanza(&self, stanza: xmpp_parsers::minidom::Element) -> anyhow::Result<()> {
         let tx = self
             .stanza_tx
             .as_ref()
@@ -194,9 +194,9 @@ impl XMPPClient {
     pub(crate) async fn send_iq_and_await(
         &self,
         iq_type: &str,
-        child: xmpp_parsers::Element,
+        child: xmpp_parsers::minidom::Element,
         timeout_secs: u64,
-    ) -> Result<xmpp_parsers::Element> {
+    ) -> Result<xmpp_parsers::minidom::Element> {
         let id = Uuid::new_v4().to_string();
 
         let rx = {
@@ -204,9 +204,9 @@ impl XMPPClient {
             registry.register(id.clone())
         };
 
-        let iq = xmpp_parsers::Element::builder("iq", "jabber:client")
-            .attr("type", iq_type)
-            .attr("id", &id)
+        let iq = xmpp_parsers::minidom::Element::builder("iq", "jabber:client")
+            .attr("type".try_into().unwrap(), iq_type)
+            .attr("id".try_into().unwrap(), &id)
             .append(child)
             .build();
 
@@ -280,7 +280,7 @@ impl XMPPClient {
     }
 
     /// Process an OMEMO message carbon (sent or received via XEP-0280)
-    pub async fn process_omemo_carbon(&self, stanza: &xmpp_parsers::Element) -> Result<()> {
+    pub async fn process_omemo_carbon(&self, stanza: &xmpp_parsers::minidom::Element) -> Result<()> {
         self.process_carbon(stanza).await
     }
 
@@ -342,7 +342,7 @@ pub fn publish_late_state(client: &XMPPClient) {
 }
 
 /// Verify OMEMO stanza structure for security
-pub fn verify_omemo_stanza(stanza: &xmpp_parsers::Element, _content: &str) -> Result<(), String> {
+pub fn verify_omemo_stanza(stanza: &xmpp_parsers::minidom::Element, _content: &str) -> Result<(), String> {
     debug!("Verifying OMEMO stanza structure for security compliance");
 
     let mut missing_elements = Vec::new();

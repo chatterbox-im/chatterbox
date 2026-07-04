@@ -18,7 +18,7 @@ use base64::Engine;
 use log::{debug, error, info, warn};
 use std::collections::HashMap;
 use tokio::sync::{mpsc, oneshot};
-use xmpp_parsers::Element;
+use xmpp_parsers::minidom::Element;
 
 use super::custom_ns;
 use super::iq_registry::IqResponseRegistry;
@@ -375,6 +375,12 @@ async fn handle_transport_event(
 
     match event {
         XMPPEvent::Stanza(stanza) => {
+            // Convert typed Stanza to raw Element for the existing handlers.
+            let stanza: Element = match stanza {
+                tokio_xmpp::Stanza::Message(m) => m.into(),
+                tokio_xmpp::Stanza::Presence(p) => p.into(),
+                tokio_xmpp::Stanza::Iq(i) => i.into(),
+            };
             if stanza.name() == "presence" {
                 handle_presence(state, &stanza).await;
             } else if stanza.name() == "message" {
@@ -385,6 +391,7 @@ async fn handle_transport_event(
         }
         XMPPEvent::Online {
             bound_jid,
+            features: _,
             resumed: _,
         } => {
             if !*seen_online {
@@ -707,11 +714,11 @@ async fn handle_omemo_message(state: &mut CoordinatorState, stanza: &Element) {
             // Send receipt if requested
             if stanza.has_child("request", custom_ns::RECEIPTS) {
                 let receipt = Element::builder("message", "jabber:client")
-                    .attr("to", from)
-                    .attr("id", &uuid::Uuid::new_v4().to_string())
+                    .attr("to".try_into().unwrap(), from)
+                    .attr("id".try_into().unwrap(), &uuid::Uuid::new_v4().to_string())
                     .append(
                         Element::builder("received", custom_ns::RECEIPTS)
-                            .attr("id", id)
+                            .attr("id".try_into().unwrap(), id)
                             .build(),
                     )
                     .build();
@@ -869,9 +876,9 @@ async fn send_plaintext(state: &mut CoordinatorState, to: &str, content: &str) -
     let id = uuid::Uuid::new_v4().to_string();
 
     let message_element = Element::builder("message", "jabber:client")
-        .attr("id", &id)
-        .attr("to", to)
-        .attr("type", "chat")
+        .attr("id".try_into().unwrap(), &id)
+        .attr("to".try_into().unwrap(), to)
+        .attr("type".try_into().unwrap(), "chat")
         .append(
             Element::builder("body", "jabber:client")
                 .append(content)
@@ -908,9 +915,9 @@ fn build_omemo_stanza(
     encrypted_message: &crate::omemo::protocol::OmemoMessage,
 ) -> Element {
     let mut message_element = Element::builder("message", "jabber:client").build();
-    message_element.set_attr("id", id);
-    message_element.set_attr("to", to);
-    message_element.set_attr("type", "chat");
+    message_element.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, "id".try_into().unwrap(), id);
+    message_element.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, "to".try_into().unwrap(), to);
+    message_element.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, "type".try_into().unwrap(), "chat");
 
     // Receipt request
     message_element.append_child(Element::builder("request", custom_ns::RECEIPTS).build());
@@ -920,13 +927,13 @@ fn build_omemo_stanza(
     // Encrypted element
     let mut encrypted_element = Element::builder("encrypted", custom_ns::OMEMO_V1).build();
     let mut header_element = Element::builder("header", custom_ns::OMEMO_V1).build();
-    header_element.set_attr("sid", &encrypted_message.sender_device_id.to_string());
+    header_element.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, "sid".try_into().unwrap(), &encrypted_message.sender_device_id.to_string());
 
     for (device_id, encrypted_key) in &encrypted_message.encrypted_keys {
         let mut key_element = Element::builder("key", custom_ns::OMEMO_V1).build();
-        key_element.set_attr("rid", &device_id.to_string());
+        key_element.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, "rid".try_into().unwrap(), &device_id.to_string());
         if encrypted_message.prekey_devices.contains(device_id) {
-            key_element.set_attr("prekey", "true");
+            key_element.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, "prekey".try_into().unwrap(), "true");
         }
         key_element
             .append_text_node(&base64::engine::general_purpose::STANDARD.encode(encrypted_key));
@@ -949,8 +956,8 @@ fn build_omemo_stanza(
 
     // EME indicator
     let mut eme_element = Element::builder("encryption", "urn:xmpp:eme:0").build();
-    eme_element.set_attr("namespace", custom_ns::OMEMO_V1);
-    eme_element.set_attr("name", "OMEMO");
+    eme_element.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, "namespace".try_into().unwrap(), custom_ns::OMEMO_V1);
+    eme_element.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, "name".try_into().unwrap(), "OMEMO");
     message_element.append_child(eme_element);
 
     // Body fallback
@@ -1202,9 +1209,9 @@ fn send_chat_state_inline(
     };
 
     let message = Element::builder("message", "jabber:client")
-        .attr("to", recipient)
-        .attr("type", "chat")
-        .attr("id", &uuid::Uuid::new_v4().to_string())
+        .attr("to".try_into().unwrap(), recipient)
+        .attr("type".try_into().unwrap(), "chat")
+        .attr("id".try_into().unwrap(), &uuid::Uuid::new_v4().to_string())
         .append(Element::builder(state_name, custom_ns::CHATSTATES).build())
         .build();
 
@@ -1473,10 +1480,10 @@ mod tests {
 
         // Simulate an inbound message from the transport
         let inbound = Element::builder("message", "jabber:client")
-            .attr("from", "alice@example.org/phone")
-            .attr("to", "test@example.org/res")
-            .attr("type", "chat")
-            .attr("id", "msg-001")
+            .attr("from".try_into().unwrap(), "alice@example.org/phone")
+            .attr("to".try_into().unwrap(), "test@example.org/res")
+            .attr("type".try_into().unwrap(), "chat")
+            .attr("id".try_into().unwrap(), "msg-001")
             .append(
                 Element::builder("body", "jabber:client")
                     .append("Hey there!")
@@ -1484,7 +1491,7 @@ mod tests {
             )
             .build();
 
-        event_tx.send(tokio_xmpp::Event::Stanza(inbound)).unwrap();
+        event_tx.send(tokio_xmpp::Event::Stanza(xmpp_parsers::stanza::Stanza::try_from(inbound).unwrap())).unwrap();
 
         // Wait for coordinator to process and deliver to UI
         let ui_msg = timeout(Duration::from_millis(200), msg_rx.recv())
@@ -1521,12 +1528,12 @@ mod tests {
 
         // Message with no body (e.g., just a chat state)
         let inbound = Element::builder("message", "jabber:client")
-            .attr("from", "alice@example.org/phone")
-            .attr("type", "chat")
+            .attr("from".try_into().unwrap(), "alice@example.org/phone")
+            .attr("type".try_into().unwrap(), "chat")
             .append(Element::builder("composing", custom_ns::CHATSTATES).build())
             .build();
 
-        event_tx.send(tokio_xmpp::Event::Stanza(inbound)).unwrap();
+        event_tx.send(tokio_xmpp::Event::Stanza(xmpp_parsers::stanza::Stanza::try_from(inbound).unwrap())).unwrap();
 
         // Should NOT produce a UI message
         let result = timeout(Duration::from_millis(100), msg_rx.recv()).await;
@@ -1568,17 +1575,17 @@ mod tests {
 
         // Now simulate a delivery receipt arriving from transport
         let receipt_stanza = Element::builder("message", "jabber:client")
-            .attr("from", "bob@example.org/laptop")
-            .attr("to", "test@example.org/res")
+            .attr("from".try_into().unwrap(), "bob@example.org/laptop")
+            .attr("to".try_into().unwrap(), "test@example.org/res")
             .append(
                 Element::builder("received", custom_ns::RECEIPTS)
-                    .attr("id", msg_id.as_str())
+                    .attr("id".try_into().unwrap(), msg_id.as_str())
                     .build(),
             )
             .build();
 
         event_tx
-            .send(tokio_xmpp::Event::Stanza(receipt_stanza))
+            .send(tokio_xmpp::Event::Stanza(xmpp_parsers::stanza::Stanza::try_from(receipt_stanza).unwrap()))
             .unwrap();
 
         // Should receive a UI update with Delivered status
@@ -1614,16 +1621,16 @@ mod tests {
 
         // Receipt for a message we never sent
         let receipt_stanza = Element::builder("message", "jabber:client")
-            .attr("from", "bob@example.org/laptop")
+            .attr("from".try_into().unwrap(), "bob@example.org/laptop")
             .append(
                 Element::builder("received", custom_ns::RECEIPTS)
-                    .attr("id", "nonexistent-msg-id")
+                    .attr("id".try_into().unwrap(), "nonexistent-msg-id")
                     .build(),
             )
             .build();
 
         event_tx
-            .send(tokio_xmpp::Event::Stanza(receipt_stanza))
+            .send(tokio_xmpp::Event::Stanza(xmpp_parsers::stanza::Stanza::try_from(receipt_stanza).unwrap()))
             .unwrap();
 
         // Should NOT produce a UI message
@@ -1666,16 +1673,16 @@ mod tests {
 
         // Now send a receipt for it — should be found
         let receipt_stanza = Element::builder("message", "jabber:client")
-            .attr("from", "bob@example.org/laptop")
+            .attr("from".try_into().unwrap(), "bob@example.org/laptop")
             .append(
                 Element::builder("received", custom_ns::RECEIPTS)
-                    .attr("id", "manual-msg-123")
+                    .attr("id".try_into().unwrap(), "manual-msg-123")
                     .build(),
             )
             .build();
 
         event_tx
-            .send(tokio_xmpp::Event::Stanza(receipt_stanza))
+            .send(tokio_xmpp::Event::Stanza(xmpp_parsers::stanza::Stanza::try_from(receipt_stanza).unwrap()))
             .unwrap();
 
         let ui_msg = timeout(Duration::from_millis(200), msg_rx.recv())
@@ -1747,12 +1754,12 @@ mod tests {
         );
 
         let inbound = Element::builder("message", "jabber:client")
-            .attr("from", "alice@example.org/phone")
-            .attr("type", "chat")
+            .attr("from".try_into().unwrap(), "alice@example.org/phone")
+            .attr("type".try_into().unwrap(), "chat")
             .append(Element::builder("composing", custom_ns::CHATSTATES).build())
             .build();
 
-        event_tx.send(tokio_xmpp::Event::Stanza(inbound)).unwrap();
+        event_tx.send(tokio_xmpp::Event::Stanza(xmpp_parsers::stanza::Stanza::try_from(inbound).unwrap())).unwrap();
 
         let (jid, status) = timeout(Duration::from_millis(200), typing_rx.recv())
             .await
@@ -1789,10 +1796,10 @@ mod tests {
         );
 
         // Simulate Online event
-        let bound_jid: tokio_xmpp::Jid = "test@example.org/resource123".parse().unwrap();
+        let bound_jid: tokio_xmpp::jid::Jid = "test@example.org/resource123".parse().unwrap();
         event_tx
-            .send(tokio_xmpp::Event::Online {
-                bound_jid,
+            .send(
+            tokio_xmpp::Event::Online { features: Default::default(), bound_jid,
                 resumed: false,
             })
             .unwrap();
@@ -1819,10 +1826,10 @@ mod tests {
             Some(online_tx),
         );
 
-        let bound_jid: tokio_xmpp::Jid = "test@example.org/res1".parse().unwrap();
+        let bound_jid: tokio_xmpp::jid::Jid = "test@example.org/res1".parse().unwrap();
         event_tx
-            .send(tokio_xmpp::Event::Online {
-                bound_jid: bound_jid.clone(),
+            .send(
+            tokio_xmpp::Event::Online { features: Default::default(), bound_jid: bound_jid.clone(),
                 resumed: false,
             })
             .unwrap();
@@ -1832,8 +1839,8 @@ mod tests {
 
         // Send another Online — should not panic or error
         event_tx
-            .send(tokio_xmpp::Event::Online {
-                bound_jid,
+            .send(
+            tokio_xmpp::Event::Online { features: Default::default(), bound_jid,
                 resumed: true,
             })
             .unwrap();
@@ -1869,12 +1876,12 @@ mod tests {
         // We can't easily test IQ routing directly without accessing the internal
         // iq_registry. But we can test that IQ stanzas don't cause panics.
         let iq_result = Element::builder("iq", "jabber:client")
-            .attr("type", "result")
-            .attr("id", "some-iq-id")
-            .attr("from", "server.example.org")
+            .attr("type".try_into().unwrap(), "result")
+            .attr("id".try_into().unwrap(), "some-iq-id")
+            .attr("from".try_into().unwrap(), "server.example.org")
             .build();
 
-        event_tx.send(tokio_xmpp::Event::Stanza(iq_result)).unwrap();
+        event_tx.send(tokio_xmpp::Event::Stanza(xmpp_parsers::stanza::Stanza::try_from(iq_result).unwrap())).unwrap();
 
         // Give coordinator time to process without panic
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1906,10 +1913,10 @@ mod tests {
 
         // Build a received carbon
         let forwarded_msg = Element::builder("message", "jabber:client")
-            .attr("from", "alice@example.org/phone")
-            .attr("to", "test@example.org/res")
-            .attr("type", "chat")
-            .attr("id", "carbon-msg-001")
+            .attr("from".try_into().unwrap(), "alice@example.org/phone")
+            .attr("to".try_into().unwrap(), "test@example.org/res")
+            .attr("type".try_into().unwrap(), "chat")
+            .attr("id".try_into().unwrap(), "carbon-msg-001")
             .append(
                 Element::builder("body", "jabber:client")
                     .append("Carbon message!")
@@ -1926,13 +1933,13 @@ mod tests {
             .build();
 
         let carbon_wrapper = Element::builder("message", "jabber:client")
-            .attr("from", "test@example.org") // from our bare JID
-            .attr("to", "test@example.org/res")
+            .attr("from".try_into().unwrap(), "test@example.org") // from our bare JID
+            .attr("to".try_into().unwrap(), "test@example.org/res")
             .append(received)
             .build();
 
         event_tx
-            .send(tokio_xmpp::Event::Stanza(carbon_wrapper))
+            .send(tokio_xmpp::Event::Stanza(xmpp_parsers::stanza::Stanza::try_from(carbon_wrapper).unwrap()))
             .unwrap();
 
         let ui_msg = timeout(Duration::from_millis(200), msg_rx.recv())
@@ -1967,10 +1974,10 @@ mod tests {
 
         // Build a sent carbon
         let forwarded_msg = Element::builder("message", "jabber:client")
-            .attr("from", "test@example.org/other-device")
-            .attr("to", "bob@example.org")
-            .attr("type", "chat")
-            .attr("id", "sent-carbon-001")
+            .attr("from".try_into().unwrap(), "test@example.org/other-device")
+            .attr("to".try_into().unwrap(), "bob@example.org")
+            .attr("type".try_into().unwrap(), "chat")
+            .attr("id".try_into().unwrap(), "sent-carbon-001")
             .append(
                 Element::builder("body", "jabber:client")
                     .append("Sent from other device")
@@ -1987,13 +1994,13 @@ mod tests {
             .build();
 
         let carbon_wrapper = Element::builder("message", "jabber:client")
-            .attr("from", "test@example.org")
-            .attr("to", "test@example.org/res")
+            .attr("from".try_into().unwrap(), "test@example.org")
+            .attr("to".try_into().unwrap(), "test@example.org/res")
             .append(sent)
             .build();
 
         event_tx
-            .send(tokio_xmpp::Event::Stanza(carbon_wrapper))
+            .send(tokio_xmpp::Event::Stanza(xmpp_parsers::stanza::Stanza::try_from(carbon_wrapper).unwrap()))
             .unwrap();
 
         let ui_msg = timeout(Duration::from_millis(200), msg_rx.recv())
@@ -2061,10 +2068,10 @@ mod tests {
         );
 
         let inbound = Element::builder("message", "jabber:client")
-            .attr("from", "alice@example.org/phone")
-            .attr("to", "test@example.org/res")
-            .attr("type", "chat")
-            .attr("id", "msg-with-receipt")
+            .attr("from".try_into().unwrap(), "alice@example.org/phone")
+            .attr("to".try_into().unwrap(), "test@example.org/res")
+            .attr("type".try_into().unwrap(), "chat")
+            .attr("id".try_into().unwrap(), "msg-with-receipt")
             .append(
                 Element::builder("body", "jabber:client")
                     .append("Please receipt me")
@@ -2073,7 +2080,7 @@ mod tests {
             .append(Element::builder("request", custom_ns::RECEIPTS).build())
             .build();
 
-        event_tx.send(tokio_xmpp::Event::Stanza(inbound)).unwrap();
+        event_tx.send(tokio_xmpp::Event::Stanza(xmpp_parsers::stanza::Stanza::try_from(inbound).unwrap())).unwrap();
 
         // Drain the UI message
         let _ = timeout(Duration::from_millis(100), msg_rx.recv()).await;
@@ -2222,11 +2229,10 @@ mod tests {
         );
 
         let presence = Element::builder("presence", "jabber:client")
-            .attr("from", "alice@example.org/phone")
-            .attr("type", "available")
+            .attr("from".try_into().unwrap(), "alice@example.org/phone")
             .build();
 
-        event_tx.send(tokio_xmpp::Event::Stanza(presence)).unwrap();
+        event_tx.send(tokio_xmpp::Event::Stanza(xmpp_parsers::stanza::Stanza::try_from(presence).unwrap())).unwrap();
 
         // Give it time to process
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -2262,16 +2268,16 @@ mod tests {
         // Send 5 messages to the coordinator — only 1 can fit in msg_rx
         for i in 0..5 {
             let inbound = Element::builder("message", "jabber:client")
-                .attr("from", "alice@example.org/phone")
-                .attr("type", "chat")
-                .attr("id", &format!("flood-{}", i))
+                .attr("from".try_into().unwrap(), "alice@example.org/phone")
+                .attr("type".try_into().unwrap(), "chat")
+                .attr("id".try_into().unwrap(), &format!("flood-{}", i))
                 .append(
                     Element::builder("body", "jabber:client")
                         .append(format!("Message {}", i))
                         .build(),
                 )
                 .build();
-            event_tx.send(tokio_xmpp::Event::Stanza(inbound)).unwrap();
+            event_tx.send(tokio_xmpp::Event::Stanza(xmpp_parsers::stanza::Stanza::try_from(inbound).unwrap())).unwrap();
         }
 
         // Give coordinator time to process all 5 events
@@ -2325,16 +2331,16 @@ mod tests {
         // Send 4 messages
         for i in 0..4 {
             let inbound = Element::builder("message", "jabber:client")
-                .attr("from", "alice@example.org/phone")
-                .attr("type", "chat")
-                .attr("id", &format!("msg-{}", i))
+                .attr("from".try_into().unwrap(), "alice@example.org/phone")
+                .attr("type".try_into().unwrap(), "chat")
+                .attr("id".try_into().unwrap(), &format!("msg-{}", i))
                 .append(
                     Element::builder("body", "jabber:client")
                         .append(format!("Hello {}", i))
                         .build(),
                 )
                 .build();
-            event_tx.send(tokio_xmpp::Event::Stanza(inbound)).unwrap();
+            event_tx.send(tokio_xmpp::Event::Stanza(xmpp_parsers::stanza::Stanza::try_from(inbound).unwrap())).unwrap();
         }
 
         // Wait for processing

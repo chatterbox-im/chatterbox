@@ -4,8 +4,8 @@ use log::{debug, error, info, trace, warn};
 use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
 
-use tokio_xmpp::Element;
-use xmpp_parsers::BareJid as JidBare;
+use xmpp_parsers::minidom::Element;
+use xmpp_parsers::jid::BareJid as JidBare;
 
 use crate::omemo::crypto;
 use crate::omemo::OmemoError;
@@ -205,7 +205,7 @@ pub fn create_omemo_header(
 ) -> Result<Element, OmemoError> {
     // Create the header element
     let mut header = Element::builder("header", "eu.siacs.conversations.axolotl")
-        .attr("sid", sender_device_id.to_string())
+        .attr("sid".try_into().unwrap(), sender_device_id.to_string())
         .build();
 
     // Add IV to header
@@ -214,7 +214,7 @@ pub fn create_omemo_header(
     // Add encrypted keys to header
     for (rid, key_data) in keys {
         let mut key_element = Element::builder("key", "eu.siacs.conversations.axolotl")
-            .attr("rid", rid.to_string())
+            .attr("rid".try_into().unwrap(), rid.to_string())
             .build();
         key_element.append_text_node(&BASE64_STANDARD.encode(key_data));
 

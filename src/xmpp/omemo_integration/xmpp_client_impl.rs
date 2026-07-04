@@ -11,7 +11,7 @@ use crate::xmpp::transport;
 impl crate::xmpp::XMPPClient {
     /// Send an OMEMO encrypted message
     /// Check if an OMEMO element is related to PubSub
-    pub fn is_omemo_pubsub(pubsub: &xmpp_parsers::Element) -> bool {
+    pub fn is_omemo_pubsub(pubsub: &xmpp_parsers::minidom::Element) -> bool {
         // Check items element for OMEMO namespace
         if let Some(items) = pubsub.get_child("items", custom_ns::PUBSUB) {
             if let Some(node) = items.attr("node") {
@@ -129,15 +129,15 @@ impl crate::xmpp::XMPPClient {
         let node = format!("{}.bundles:{}", custom_ns::OMEMO_V1, device_id);
 
         // Build the IQ stanza
-        let iq = xmpp_parsers::Element::builder("iq", "jabber:client")
-            .attr("type", "get")
-            .attr("id", &request_id)
-            .attr("to", peer_jid)
+        let iq = xmpp_parsers::minidom::Element::builder("iq", "jabber:client")
+            .attr("type".try_into().unwrap(), "get")
+            .attr("id".try_into().unwrap(), &request_id)
+            .attr("to".try_into().unwrap(), peer_jid)
             .append(
-                xmpp_parsers::Element::builder("pubsub", custom_ns::PUBSUB)
+                xmpp_parsers::minidom::Element::builder("pubsub", custom_ns::PUBSUB)
                     .append(
-                        xmpp_parsers::Element::builder("items", custom_ns::PUBSUB)
-                            .attr("node", &node)
+                        xmpp_parsers::minidom::Element::builder("items", custom_ns::PUBSUB)
+                            .attr("node".try_into().unwrap(), &node)
                             .build(),
                     )
                     .build(),
@@ -170,39 +170,39 @@ impl crate::xmpp::XMPPClient {
         let publish_id = Uuid::new_v4().to_string();
 
         // Create the device list XML content
-        let mut list_element = xmpp_parsers::Element::builder("list", custom_ns::OMEMO).build();
+        let mut list_element = xmpp_parsers::minidom::Element::builder("list", custom_ns::OMEMO).build();
 
         // Add device elements
         for device_id in device_ids {
-            let device_element = xmpp_parsers::Element::builder("device", "")
-                .attr("id", &device_id.to_string())
+            let device_element = xmpp_parsers::minidom::Element::builder("device", "")
+                .attr("id".try_into().unwrap(), &device_id.to_string())
                 .build();
             list_element.append_child(device_element);
         }
 
         // Build the IQ stanza for publishing
-        let publish_elem = xmpp_parsers::Element::builder("publish", custom_ns::PUBSUB)
-            .attr("node", &format!("{}.devicelist", custom_ns::OMEMO))
+        let publish_elem = xmpp_parsers::minidom::Element::builder("publish", custom_ns::PUBSUB)
+            .attr("node".try_into().unwrap(), &format!("{}.devicelist", custom_ns::OMEMO))
             .append(
-                xmpp_parsers::Element::builder("item", custom_ns::PUBSUB)
-                    .attr("id", "current")
+                xmpp_parsers::minidom::Element::builder("item", custom_ns::PUBSUB)
+                    .attr("id".try_into().unwrap(), "current")
                     .append(list_element)
                     .build(),
             )
             .build();
 
         // Publish-options for open access
-        let publish_options = xmpp_parsers::Element::builder("publish-options", custom_ns::PUBSUB)
+        let publish_options = xmpp_parsers::minidom::Element::builder("publish-options", custom_ns::PUBSUB)
             .append(
-                xmpp_parsers::Element::builder("x", "jabber:x:data")
-                    .attr("type", "submit")
+                xmpp_parsers::minidom::Element::builder("x", "jabber:x:data")
+                    .attr("type".try_into().unwrap(), "submit")
                     .append(
-                        xmpp_parsers::Element::builder("field", "jabber:x:data")
-                            .attr("var", "FORM_TYPE")
-                            .attr("type", "hidden")
+                        xmpp_parsers::minidom::Element::builder("field", "jabber:x:data")
+                            .attr("var".try_into().unwrap(), "FORM_TYPE")
+                            .attr("type".try_into().unwrap(), "hidden")
                             .append({
                                 let mut v =
-                                    xmpp_parsers::Element::builder("value", "jabber:x:data")
+                                    xmpp_parsers::minidom::Element::builder("value", "jabber:x:data")
                                         .build();
                                 v.append_text_node(
                                     "http://jabber.org/protocol/pubsub#publish-options",
@@ -212,11 +212,11 @@ impl crate::xmpp::XMPPClient {
                             .build(),
                     )
                     .append(
-                        xmpp_parsers::Element::builder("field", "jabber:x:data")
-                            .attr("var", "pubsub#access_model")
+                        xmpp_parsers::minidom::Element::builder("field", "jabber:x:data")
+                            .attr("var".try_into().unwrap(), "pubsub#access_model")
                             .append({
                                 let mut v =
-                                    xmpp_parsers::Element::builder("value", "jabber:x:data")
+                                    xmpp_parsers::minidom::Element::builder("value", "jabber:x:data")
                                         .build();
                                 v.append_text_node("open");
                                 v
@@ -227,11 +227,11 @@ impl crate::xmpp::XMPPClient {
             )
             .build();
 
-        let iq = xmpp_parsers::Element::builder("iq", "jabber:client")
-            .attr("type", "set")
-            .attr("id", &publish_id)
+        let iq = xmpp_parsers::minidom::Element::builder("iq", "jabber:client")
+            .attr("type".try_into().unwrap(), "set")
+            .attr("id".try_into().unwrap(), &publish_id)
             .append(
-                xmpp_parsers::Element::builder("pubsub", custom_ns::PUBSUB)
+                xmpp_parsers::minidom::Element::builder("pubsub", custom_ns::PUBSUB)
                     .append(publish_elem)
                     .append(publish_options)
                     .build(),
@@ -277,16 +277,16 @@ impl crate::xmpp::XMPPClient {
                 }
 
                 // Create a new bundle element with the correct namespace
-                let mut bundle = xmpp_parsers::Element::builder("bundle", custom_ns::OMEMO).build();
+                let mut bundle = xmpp_parsers::minidom::Element::builder("bundle", custom_ns::OMEMO).build();
 
                 // Process each child element of the bundle
                 for child in root.children().filter(|n| n.is_element()) {
                     let child_name = child.tag_name().name();
-                    let mut child_elem = xmpp_parsers::Element::builder(child_name, "").build();
+                    let mut child_elem = xmpp_parsers::minidom::Element::builder(child_name, "").build();
 
                     // Copy all attributes
                     for attr in child.attributes() {
-                        child_elem.set_attr(attr.name(), attr.value());
+                        child_elem.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, attr.name().try_into().unwrap(), attr.value());
                     }
 
                     // Handle child elements differently based on their type
@@ -294,12 +294,12 @@ impl crate::xmpp::XMPPClient {
                         // Special handling for prekeys which has its own children
                         for prekey in child.children().filter(|n| n.is_element()) {
                             let mut prekey_elem =
-                                xmpp_parsers::Element::builder(prekey.tag_name().name(), "")
+                                xmpp_parsers::minidom::Element::builder(prekey.tag_name().name(), "")
                                     .build();
 
                             // Copy prekey attributes
                             for attr in prekey.attributes() {
-                                prekey_elem.set_attr(attr.name(), attr.value());
+                                prekey_elem.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, attr.name().try_into().unwrap(), attr.value());
                             }
 
                             // Add prekey text content if any
@@ -324,39 +324,39 @@ impl crate::xmpp::XMPPClient {
             Err(e) => {
                 error!("Failed to parse bundle data as XML: {}", e);
                 // Create a simple element with the data as text as a fallback
-                let mut bundle = xmpp_parsers::Element::builder("bundle", custom_ns::OMEMO).build();
+                let mut bundle = xmpp_parsers::minidom::Element::builder("bundle", custom_ns::OMEMO).build();
                 bundle.append_text_node(bundle_data);
                 bundle
             }
         };
 
         // Create the item element and append the bundle element
-        let item_element = xmpp_parsers::Element::builder("item", custom_ns::PUBSUB)
-            .attr("id", "current")
+        let item_element = xmpp_parsers::minidom::Element::builder("item", custom_ns::PUBSUB)
+            .attr("id".try_into().unwrap(), "current")
             .append(bundle_element)
             .build();
 
         // Build the IQ stanza for publishing
-        let publish_elem = xmpp_parsers::Element::builder("publish", custom_ns::PUBSUB)
+        let publish_elem = xmpp_parsers::minidom::Element::builder("publish", custom_ns::PUBSUB)
             .attr(
-                "node",
+                "node".try_into().unwrap(),
                 &format!("{}.bundles:{}", custom_ns::OMEMO_V1, device_id),
             )
             .append(item_element)
             .build();
 
         // Publish-options for open access
-        let publish_options = xmpp_parsers::Element::builder("publish-options", custom_ns::PUBSUB)
+        let publish_options = xmpp_parsers::minidom::Element::builder("publish-options", custom_ns::PUBSUB)
             .append(
-                xmpp_parsers::Element::builder("x", "jabber:x:data")
-                    .attr("type", "submit")
+                xmpp_parsers::minidom::Element::builder("x", "jabber:x:data")
+                    .attr("type".try_into().unwrap(), "submit")
                     .append(
-                        xmpp_parsers::Element::builder("field", "jabber:x:data")
-                            .attr("var", "FORM_TYPE")
-                            .attr("type", "hidden")
+                        xmpp_parsers::minidom::Element::builder("field", "jabber:x:data")
+                            .attr("var".try_into().unwrap(), "FORM_TYPE")
+                            .attr("type".try_into().unwrap(), "hidden")
                             .append({
                                 let mut v =
-                                    xmpp_parsers::Element::builder("value", "jabber:x:data")
+                                    xmpp_parsers::minidom::Element::builder("value", "jabber:x:data")
                                         .build();
                                 v.append_text_node(
                                     "http://jabber.org/protocol/pubsub#publish-options",
@@ -366,11 +366,11 @@ impl crate::xmpp::XMPPClient {
                             .build(),
                     )
                     .append(
-                        xmpp_parsers::Element::builder("field", "jabber:x:data")
-                            .attr("var", "pubsub#access_model")
+                        xmpp_parsers::minidom::Element::builder("field", "jabber:x:data")
+                            .attr("var".try_into().unwrap(), "pubsub#access_model")
                             .append({
                                 let mut v =
-                                    xmpp_parsers::Element::builder("value", "jabber:x:data")
+                                    xmpp_parsers::minidom::Element::builder("value", "jabber:x:data")
                                         .build();
                                 v.append_text_node("open");
                                 v
@@ -381,11 +381,11 @@ impl crate::xmpp::XMPPClient {
             )
             .build();
 
-        let iq = xmpp_parsers::Element::builder("iq", "jabber:client")
-            .attr("type", "set")
-            .attr("id", &publish_id)
+        let iq = xmpp_parsers::minidom::Element::builder("iq", "jabber:client")
+            .attr("type".try_into().unwrap(), "set")
+            .attr("id".try_into().unwrap(), &publish_id)
             .append(
-                xmpp_parsers::Element::builder("pubsub", custom_ns::PUBSUB)
+                xmpp_parsers::minidom::Element::builder("pubsub", custom_ns::PUBSUB)
                     .append(publish_elem)
                     .append(publish_options)
                     .build(),
@@ -717,24 +717,24 @@ impl crate::xmpp::XMPPClient {
         let config_id = Uuid::new_v4().to_string();
 
         // Create configuration form for open access
-        let config_iq = xmpp_parsers::Element::builder("iq", "jabber:client")
-            .attr("type", "set")
-            .attr("id", &config_id)
+        let config_iq = xmpp_parsers::minidom::Element::builder("iq", "jabber:client")
+            .attr("type".try_into().unwrap(), "set")
+            .attr("id".try_into().unwrap(), &config_id)
             .append(
-                xmpp_parsers::Element::builder("pubsub", "http://jabber.org/protocol/pubsub#owner")
+                xmpp_parsers::minidom::Element::builder("pubsub", "http://jabber.org/protocol/pubsub#owner")
                     .append(
-                        xmpp_parsers::Element::builder("configure", "")
-                            .attr("node", node_name)
+                        xmpp_parsers::minidom::Element::builder("configure", "")
+                            .attr("node".try_into().unwrap(), node_name)
                             .append(
-                                xmpp_parsers::Element::builder("x", "jabber:x:data")
-                                    .attr("type", "submit")
+                                xmpp_parsers::minidom::Element::builder("x", "jabber:x:data")
+                                    .attr("type".try_into().unwrap(), "submit")
                                     .append(
-                                        xmpp_parsers::Element::builder("field", "")
-                                            .attr("var", "FORM_TYPE")
-                                            .attr("type", "hidden")
+                                        xmpp_parsers::minidom::Element::builder("field", "")
+                                            .attr("var".try_into().unwrap(), "FORM_TYPE")
+                                            .attr("type".try_into().unwrap(), "hidden")
                                             .append({
                                                 let mut value_elem =
-                                                    xmpp_parsers::Element::builder("value", "")
+                                                    xmpp_parsers::minidom::Element::builder("value", "")
                                                         .build();
                                                 value_elem.append_text_node(
                                                     "http://jabber.org/protocol/pubsub#node_config",
@@ -744,11 +744,11 @@ impl crate::xmpp::XMPPClient {
                                             .build(),
                                     )
                                     .append(
-                                        xmpp_parsers::Element::builder("field", "")
-                                            .attr("var", "pubsub#access_model")
+                                        xmpp_parsers::minidom::Element::builder("field", "")
+                                            .attr("var".try_into().unwrap(), "pubsub#access_model")
                                             .append({
                                                 let mut value_elem =
-                                                    xmpp_parsers::Element::builder("value", "")
+                                                    xmpp_parsers::minidom::Element::builder("value", "")
                                                         .build();
                                                 value_elem.append_text_node("open");
                                                 value_elem

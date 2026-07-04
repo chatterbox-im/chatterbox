@@ -7,7 +7,7 @@ use log::{debug, error, info, warn};
 use super::custom_ns;
 use crate::models::{DeliveryStatus, Message};
 use base64::Engine;
-use xmpp_parsers::Element;
+use xmpp_parsers::minidom::Element;
 
 /// Implementation of XEP-0280 Message Carbons
 impl super::XMPPClient {
@@ -91,7 +91,7 @@ impl super::XMPPClient {
     }
 
     /// Process a received carbon message
-    pub async fn process_carbon(&self, stanza: &xmpp_parsers::Element) -> Result<()> {
+    pub async fn process_carbon(&self, stanza: &xmpp_parsers::minidom::Element) -> Result<()> {
         // Process carbon copy of a message (sent or received from another client)
         debug!("Processing message carbon");
 
@@ -231,7 +231,7 @@ impl super::XMPPClient {
     /// Process an OMEMO encrypted carbon message
     async fn process_carbon_omemo(
         &self,
-        message: &xmpp_parsers::Element,
+        message: &xmpp_parsers::minidom::Element,
         is_sent: bool,
     ) -> Result<()> {
         debug!("Processing OMEMO encrypted carbon message");
@@ -504,13 +504,13 @@ impl super::XMPPClient {
 #[cfg(test)]
 mod tests {
     use super::custom_ns;
-    use xmpp_parsers::Element;
+    use xmpp_parsers::minidom::Element;
 
     fn make_carbon_received(from: &str, body: &str) -> Element {
         let inner_msg = Element::builder("message", "jabber:client")
-            .attr("from", from)
-            .attr("to", "me@server.example")
-            .attr("id", "orig-id-1")
+            .attr("from".try_into().unwrap(), from)
+            .attr("to".try_into().unwrap(), "me@server.example")
+            .attr("id".try_into().unwrap(), "orig-id-1")
             .append(
                 Element::builder("body", "jabber:client")
                     .append(body)
@@ -527,17 +527,17 @@ mod tests {
             .build();
 
         Element::builder("message", "jabber:client")
-            .attr("from", "me@server.example")
-            .attr("to", "me@server.example/resource")
+            .attr("from".try_into().unwrap(), "me@server.example")
+            .attr("to".try_into().unwrap(), "me@server.example/resource")
             .append(received)
             .build()
     }
 
     fn make_carbon_sent(to: &str, body: &str) -> Element {
         let inner_msg = Element::builder("message", "jabber:client")
-            .attr("from", "me@server.example/other-device")
-            .attr("to", to)
-            .attr("id", "orig-id-2")
+            .attr("from".try_into().unwrap(), "me@server.example/other-device")
+            .attr("to".try_into().unwrap(), to)
+            .attr("id".try_into().unwrap(), "orig-id-2")
             .append(
                 Element::builder("body", "jabber:client")
                     .append(body)
@@ -554,8 +554,8 @@ mod tests {
             .build();
 
         Element::builder("message", "jabber:client")
-            .attr("from", "me@server.example")
-            .attr("to", "me@server.example/resource")
+            .attr("from".try_into().unwrap(), "me@server.example")
+            .attr("to".try_into().unwrap(), "me@server.example/resource")
             .append(sent)
             .build()
     }
@@ -601,7 +601,7 @@ mod tests {
     #[test]
     fn test_non_carbon_message_not_detected() {
         let stanza = Element::builder("message", "jabber:client")
-            .attr("from", "bob@example.com")
+            .attr("from".try_into().unwrap(), "bob@example.com")
             .append(
                 Element::builder("body", "jabber:client")
                     .append("plain msg")

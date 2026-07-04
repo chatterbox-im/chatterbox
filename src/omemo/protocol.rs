@@ -1473,7 +1473,7 @@ mod tests {
 
     #[test]
     fn test_xml_output_parseable_by_conversations_logic() {
-        // The real receive path (omemo_handler.rs) uses tokio_xmpp::Element parsing.
+        // The real receive path (omemo_handler.rs) uses xmpp_parsers::minidom::Element parsing.
         // This test validates that our XML output can be parsed by an XML parser
         // and contains all required attributes Conversations looks for.
         use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
@@ -1484,7 +1484,7 @@ mod tests {
         let xml = utils::omemo_message_to_xml(&msg);
 
         // Parse as a tokio_xmpp Element (same library as production code)
-        let element: tokio_xmpp::Element = xml.parse().unwrap();
+        let element: xmpp_parsers::minidom::Element = xml.parse().unwrap();
 
         // Conversations checks: element name is "encrypted", ns is OMEMO
         assert_eq!(element.name(), "encrypted");

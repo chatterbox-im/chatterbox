@@ -3,7 +3,7 @@ use log::{info, warn};
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
-use xmpp_parsers::Element;
+use xmpp_parsers::minidom::Element;
 
 use super::transport::{self, StanzaTx};
 
@@ -43,9 +43,9 @@ impl ServiceDiscovery {
     pub async fn send_disco_info_request(&self, jid: &str) -> Result<()> {
         let iq_id = format!("disco_info_{}", uuid::Uuid::new_v4());
         let mut iq = Element::builder("iq", "jabber:client").build();
-        iq.set_attr("type", "get");
-        iq.set_attr("to", jid);
-        iq.set_attr("id", &iq_id);
+        iq.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, "type".try_into().unwrap(), "get");
+        iq.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, "to".try_into().unwrap(), jid);
+        iq.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, "id".try_into().unwrap(), &iq_id);
 
         let query = Element::builder("query", "http://jabber.org/protocol/disco#info").build();
         iq.append_child(query);
@@ -60,9 +60,9 @@ impl ServiceDiscovery {
     pub async fn send_disco_items_request(&self, jid: &str) -> Result<()> {
         let iq_id = format!("disco_items_{}", uuid::Uuid::new_v4());
         let mut iq = Element::builder("iq", "jabber:client").build();
-        iq.set_attr("type", "get");
-        iq.set_attr("to", jid);
-        iq.set_attr("id", &iq_id);
+        iq.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, "type".try_into().unwrap(), "get");
+        iq.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, "to".try_into().unwrap(), jid);
+        iq.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, "id".try_into().unwrap(), &iq_id);
 
         let query = Element::builder("query", "http://jabber.org/protocol/disco#items").build();
         iq.append_child(query);
@@ -319,21 +319,21 @@ impl ServiceDiscovery {
         let id = stanza.attr("id").unwrap_or("");
 
         let mut result_iq = Element::builder("iq", "jabber:client").build();
-        result_iq.set_attr("type", "result");
-        result_iq.set_attr("to", from);
-        result_iq.set_attr("id", id);
+        result_iq.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, "type".try_into().unwrap(), "result");
+        result_iq.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, "to".try_into().unwrap(), from);
+        result_iq.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, "id".try_into().unwrap(), id);
 
         let mut query = Element::builder("query", "http://jabber.org/protocol/disco#info").build();
 
         let identity = Element::builder("identity", "")
-            .attr("category", "client")
-            .attr("type", "console")
-            .attr("name", "Chatterbox")
+            .attr("category".try_into().unwrap(), "client")
+            .attr("type".try_into().unwrap(), "console")
+            .attr("name".try_into().unwrap(), "Chatterbox")
             .build();
         query.append_child(identity);
 
         for feature in Self::supported_features() {
-            let feature_elem = Element::builder("feature", "").attr("var", feature).build();
+            let feature_elem = Element::builder("feature", "").attr("var".try_into().unwrap(), feature).build();
             query.append_child(feature_elem);
         }
 
@@ -342,32 +342,12 @@ impl ServiceDiscovery {
         Ok(())
     }
 
-    /// Advertises supported features for this client
+    /// Advertises supported features for this client.
+    /// Per XEP-0030, features are disclosed in response to incoming disco#info queries
+    /// (handled by `respond_to_disco_info_query`). The capabilities hash in the `<c>`
+    /// presence element (XEP-0115) covers proactive advertisement.
     pub async fn advertise_features(&self) -> Result<()> {
-        let mut iq = Element::builder("iq", "jabber:client").build();
-        iq.set_attr("type", "set");
-        iq.set_attr("id", "disco3");
-
-        let mut query = Element::builder("query", "http://jabber.org/protocol/disco#info").build();
-
-        // Add client identity
-        let identity = Element::builder("identity", "")
-            .attr("category", "client")
-            .attr("type", "console")
-            .attr("name", "Chatterbox XMPP Client")
-            .build();
-        query.append_child(identity);
-
-        for feature in Self::supported_features() {
-            let feature_elem = Element::builder("feature", "").attr("var", feature).build();
-            query.append_child(feature_elem);
-        }
-
-        iq.append_child(query);
-
-        transport::send_stanza(&self.stanza_tx, iq)?;
-        info!("Advertised supported features");
-
+        info!("Service discovery features available (responded to on demand)");
         Ok(())
     }
 
@@ -417,17 +397,17 @@ mod tests {
         let mut query = Element::builder("query", "http://jabber.org/protocol/disco#info").build();
         for ns in features {
             let feat = Element::builder("feature", "http://jabber.org/protocol/disco#info")
-                .attr("var", *ns)
+                .attr("var".try_into().unwrap(), *ns)
                 .build();
             query.append_child(feat);
         }
         for (category, type_, name) in identities {
             let mut id = Element::builder("identity", "http://jabber.org/protocol/disco#info")
-                .attr("category", *category)
-                .attr("type", *type_)
+                .attr("category".try_into().unwrap(), *category)
+                .attr("type".try_into().unwrap(), *type_)
                 .build();
             if let Some(n) = name {
-                id.set_attr("name", *n);
+                id.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, "name".try_into().unwrap(), *n);
             }
             query.append_child(id);
         }

@@ -5,7 +5,7 @@ use anyhow::{anyhow, Result};
 use log::{error, info, warn};
 use std::collections::HashSet;
 use tokio::sync::broadcast;
-use xmpp_parsers::Element;
+use xmpp_parsers::minidom::Element;
 
 use super::transport::{self, StanzaTx};
 
@@ -166,9 +166,9 @@ pub fn send_initial_presence_via(stanza_tx: &StanzaTx) -> Result<()> {
     presence.append_child(status);
 
     let caps = Element::builder("c", "http://jabber.org/protocol/caps")
-        .attr("hash", "sha-1")
-        .attr("node", "https://github.com/user/sermo")
-        .attr("ver", "1.0.0")
+        .attr("hash".try_into().unwrap(), "sha-1")
+        .attr("node".try_into().unwrap(), "https://github.com/user/sermo")
+        .attr("ver".try_into().unwrap(), "1.0.0")
         .build();
     presence.append_child(caps);
 
@@ -187,7 +187,7 @@ pub fn send_initial_presence_via(stanza_tx: &StanzaTx) -> Result<()> {
 /// Result indicating success or failure
 pub fn send_unavailable_presence_via(stanza_tx: &StanzaTx) -> Result<()> {
     let presence = Element::builder("presence", NS_JABBER_CLIENT)
-        .attr("type", "unavailable")
+        .attr("type".try_into().unwrap(), "unavailable")
         .build();
 
     transport::send_stanza(stanza_tx, presence)
@@ -295,8 +295,8 @@ pub async fn process_subscription(stanza_tx: &StanzaTx, stanza: &Element) -> Res
             // Auto-accept for now
             // In a real application, this would typically ask the user
             let response = Element::builder("presence", NS_JABBER_CLIENT)
-                .attr("to", from)
-                .attr("type", "subscribed")
+                .attr("to".try_into().unwrap(), from)
+                .attr("type".try_into().unwrap(), "subscribed")
                 .build();
 
             match transport::send_stanza(stanza_tx, response) {
@@ -305,8 +305,8 @@ pub async fn process_subscription(stanza_tx: &StanzaTx, stanza: &Element) -> Res
 
                     // Subscribe back if we're not already subscribed
                     let subscribe_back = Element::builder("presence", NS_JABBER_CLIENT)
-                        .attr("to", from)
-                        .attr("type", "subscribe")
+                        .attr("to".try_into().unwrap(), from)
+                        .attr("type".try_into().unwrap(), "subscribe")
                         .build();
 
                     if let Err(e) = transport::send_stanza(stanza_tx, subscribe_back) {
@@ -345,8 +345,8 @@ pub async fn process_subscription(stanza_tx: &StanzaTx, stanza: &Element) -> Res
 
             // Acknowledge the unsubscription
             let response = Element::builder("presence", NS_JABBER_CLIENT)
-                .attr("to", from)
-                .attr("type", "unsubscribed")
+                .attr("to".try_into().unwrap(), from)
+                .attr("type".try_into().unwrap(), "unsubscribed")
                 .build();
 
             if let Err(e) = transport::send_stanza(stanza_tx, response) {
@@ -407,9 +407,9 @@ mod tests {
     use crate::models::{PresenceEvent, ShowStatus, SubscriptionKind};
 
     fn make_presence(from: &str, type_attr: Option<&str>) -> Element {
-        let mut builder = Element::builder("presence", "jabber:client").attr("from", from);
+        let mut builder = Element::builder("presence", "jabber:client").attr("from".try_into().unwrap(), from);
         if let Some(t) = type_attr {
-            builder = builder.attr("type", t);
+            builder = builder.attr("type".try_into().unwrap(), t);
         }
         builder.build()
     }
@@ -466,7 +466,7 @@ mod tests {
     #[test]
     fn test_parse_show_dnd() {
         let stanza = Element::builder("presence", "jabber:client")
-            .attr("from", "dave@example.com/work")
+            .attr("from".try_into().unwrap(), "dave@example.com/work")
             .append(Element::builder("show", "").append("dnd").build())
             .build();
         let mut rx = subscribe_to_presence();
@@ -483,7 +483,7 @@ mod tests {
     #[test]
     fn test_parse_show_away() {
         let stanza = Element::builder("presence", "jabber:client")
-            .attr("from", "eve@example.com/mobile")
+            .attr("from".try_into().unwrap(), "eve@example.com/mobile")
             .append(Element::builder("show", "").append("away").build())
             .build();
         let show = parse_show(&stanza);
@@ -493,10 +493,10 @@ mod tests {
     #[test]
     fn test_idle_since_parsing() {
         let stanza = Element::builder("presence", "jabber:client")
-            .attr("from", "frank@example.com")
+            .attr("from".try_into().unwrap(), "frank@example.com")
             .append(
                 Element::builder("idle", NS_IDLE)
-                    .attr("since", "2026-01-15T10:30:00Z")
+                    .attr("since".try_into().unwrap(), "2026-01-15T10:30:00Z")
                     .build(),
             )
             .build();

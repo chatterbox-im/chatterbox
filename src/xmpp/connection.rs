@@ -6,7 +6,7 @@ use anyhow::{anyhow, Result};
 use log::{debug, error, info, warn};
 use std::str::FromStr;
 use std::time::Duration;
-use tokio_xmpp::{AsyncClient as XMPPAsyncClient, BareJid as TokioBareJid};
+use tokio_xmpp::{Client as XMPPAsyncClient, jid::BareJid as TokioBareJid};
 
 /// Enum for representing client state
 #[derive(Debug, Clone, PartialEq)]
@@ -36,7 +36,7 @@ impl XMPPClient {
         let tokio_jid = match TokioBareJid::from_str(&full_jid) {
             Ok(jid) => {
                 // Verify the JID has a node part
-                if jid.node_str().is_none() {
+                if jid.node().is_none() {
                     let err = anyhow!(
                         "Invalid JID format: Missing username part in '{}'",
                         full_jid
@@ -53,23 +53,14 @@ impl XMPPClient {
             }
         };
 
-        // Create a reconnecting transport. After the initial connection succeeds,
-        // the transport automatically re-establishes the TCP/TLS/SASL session after
-        // any mid-session drop, using exponential backoff.
-        // Fatal errors (TLS cert, auth failure) are detected by the event loop:
-        // it exits and drops event_rx, which causes the transport to shut down.
+        // Create the XMPP client with a reconnecting transport.
+        // The Client (tokio-xmpp v6) handles reconnection and Stream Management
+        // (XEP-0198) internally and transparently.
         let client = XMPPAsyncClient::new(tokio_jid.clone(), password);
-        let reconnect_config = super::transport::ReconnectConfig {
-            initial_backoff: Duration::from_secs(1),
-            max_backoff: Duration::from_secs(60),
-            max_attempts: 0, // unlimited — fatal errors handled by event loop
-            jid: tokio_jid,
-            password: password.to_string(),
-        };
-        // Spawn the transport actor — it owns the AsyncClient exclusively.
+        // Spawn the transport actor — it owns the Client exclusively.
         // No mutex needed: the transport multiplexes reads/writes via channels.
         let transport_handle =
-            super::transport::spawn_transport_with_reconnect(client, reconnect_config);
+            super::transport::spawn_transport(client);
         self.stanza_tx = Some(transport_handle.stanza_tx.clone());
 
         // Spawn the event processing loop — lives for the entire session,
@@ -174,8 +165,8 @@ impl XMPPClient {
 
         // Send unavailable presence before disconnecting
         if self.stanza_tx.is_some() {
-            let presence = xmpp_parsers::Element::builder("presence", "jabber:client")
-                .attr("type", "unavailable")
+            let presence = xmpp_parsers::minidom::Element::builder("presence", "jabber:client")
+                .attr("type".try_into().unwrap(), "unavailable")
                 .build();
             match self.send_stanza(presence) {
                 Ok(_) => debug!("Sent unavailable presence"),
@@ -192,7 +183,68 @@ impl XMPPClient {
 
     /// Send initial presence to make the client available for receiving real-time messages
     pub async fn send_initial_presence(&self) -> Result<()> {
-        let presence = xmpp_parsers::Element::builder("presence", "jabber:client").build();
+        let presence = xmpp_parsers::minidom::Element::builder("presence", "jabber:client").build();
         self.send_stanza(presence)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    use tokio::sync::oneshot;
+
+    fn client() -> XMPPClient {
+        XMPPClient::new().0
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_connection_success() {
+        let (tx, rx) = oneshot::channel::<Result<(), String>>();
+        tx.send(Ok(())).unwrap();
+        let result = client().wait_for_connection(Duration::from_secs(1), rx).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_connection_propagates_error_message() {
+        let (tx, rx) = oneshot::channel::<Result<(), String>>();
+        tx.send(Err("TLS certificate is not trusted by this system".to_string())).unwrap();
+        let err = client()
+            .wait_for_connection(Duration::from_secs(1), rx)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("TLS certificate"),
+            "error should propagate the message, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_connection_timeout() {
+        let (_tx, rx) = oneshot::channel::<Result<(), String>>();
+        // Never send — let it time out
+        let err = client()
+            .wait_for_connection(Duration::from_millis(50), rx)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("timed out") || err.to_string().contains("timeout"),
+            "expected timeout error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_connection_sender_dropped() {
+        let (tx, rx) = oneshot::channel::<Result<(), String>>();
+        drop(tx); // Sender dropped without sending
+        let err = client()
+            .wait_for_connection(Duration::from_secs(1), rx)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("terminated") || err.to_string().contains("dropped"),
+            "expected dropped-sender error, got: {err}"
+        );
     }
 }

@@ -4,7 +4,7 @@
 use crate::xmpp::XMPPClient;
 use anyhow::{anyhow, Result};
 use log::{error, info, warn};
-use xmpp_parsers::Element;
+use xmpp_parsers::minidom::Element;
 
 impl XMPPClient {
     /// Get the roster (contact list) from the XMPP server
@@ -46,7 +46,7 @@ impl XMPPClient {
         let full_jid = self.ensure_full_jid(jid).await?;
 
         let item = Element::builder("item", "jabber:iq:roster")
-            .attr("jid", &full_jid)
+            .attr("jid".try_into().unwrap(), &full_jid)
             .build();
         let query = Element::builder("query", "jabber:iq:roster")
             .append(item)
@@ -72,8 +72,8 @@ impl XMPPClient {
 
         // Send presence subscription request
         let subscribe = Element::builder("presence", "jabber:client")
-            .attr("type", "subscribe")
-            .attr("to", &full_jid)
+            .attr("type".try_into().unwrap(), "subscribe")
+            .attr("to".try_into().unwrap(), &full_jid)
             .build();
         self.send_stanza(subscribe)
             .map_err(|e| anyhow!("Failed to send subscription request: {}", e))?;
@@ -143,8 +143,8 @@ impl XMPPClient {
         );
 
         let item = Element::builder("item", "jabber:iq:roster")
-            .attr("jid", &exact_jid)
-            .attr("subscription", "remove")
+            .attr("jid".try_into().unwrap(), &exact_jid)
+            .attr("subscription".try_into().unwrap(), "remove")
             .build();
         let query = Element::builder("query", "jabber:iq:roster")
             .append(item)
@@ -168,17 +168,17 @@ impl XMPPClient {
         }
 
         let unsubscribe = Element::builder("presence", "jabber:client")
-            .attr("type", "unsubscribe")
-            .attr("to", &exact_jid)
-            .attr("id", &format!("{}", rand::random::<u64>()))
+            .attr("type".try_into().unwrap(), "unsubscribe")
+            .attr("to".try_into().unwrap(), &exact_jid)
+            .attr("id".try_into().unwrap(), &format!("{}", rand::random::<u64>()))
             .build();
         if let Err(e) = self.send_stanza(unsubscribe) {
             warn!("Failed to send unsubscription request: {}", e);
         }
         let unsubscribed = Element::builder("presence", "jabber:client")
-            .attr("type", "unsubscribed")
-            .attr("to", &exact_jid)
-            .attr("id", &format!("{}", rand::random::<u64>()))
+            .attr("type".try_into().unwrap(), "unsubscribed")
+            .attr("to".try_into().unwrap(), &exact_jid)
+            .attr("id".try_into().unwrap(), &format!("{}", rand::random::<u64>()))
             .build();
         if let Err(e) = self.send_stanza(unsubscribed) {
             warn!("Failed to send unsubscribed stanza: {}", e);

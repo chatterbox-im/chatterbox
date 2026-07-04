@@ -8,7 +8,7 @@ use tokio::sync::Mutex as TokioMutex;
 use uuid::Uuid;
 
 use xmpp_parsers::message::Message as XMPPMessage;
-use xmpp_parsers::Element;
+use xmpp_parsers::minidom::Element;
 
 use super::custom_ns;
 use super::transport::{self, StanzaTx};
@@ -57,11 +57,11 @@ pub fn send_receipt(stanza_tx: &StanzaTx, from: &str, id: &str) -> Result<()> {
 
     // Create receipt stanza
     let receipt = Element::builder("message", "jabber:client")
-        .attr("to", from)
-        .attr("id", &Uuid::new_v4().to_string())
+        .attr("to".try_into().unwrap(), from)
+        .attr("id".try_into().unwrap(), &Uuid::new_v4().to_string())
         .append(
             Element::builder("received", custom_ns::RECEIPTS)
-                .attr("id", id)
+                .attr("id".try_into().unwrap(), id)
                 .build(),
         )
         .build();
@@ -79,23 +79,12 @@ impl super::XMPPClient {
         content: &str,
     ) -> XMPPMessage {
         // First, check if we need to verify OMEMO keys for this recipient
-        let recipient_str = recipient_jid.into();
+        let recipient_str: String = recipient_jid.into();
 
         // Extract the bare JID (remove resource part) for OMEMO checks
-        let bare_jid = match recipient_str.parse::<xmpp_parsers::Jid>() {
-            Ok(jid) => match jid {
-                xmpp_parsers::Jid::Full(full) => {
-                    let node = full.node.as_ref().map(|n| n.as_ref()).unwrap_or("");
-                    let domain = full.domain.to_string();
-                    format!("{}@{}", node, domain)
-                }
-                xmpp_parsers::Jid::Bare(bare) => bare.to_string(),
-            },
-            Err(e) => {
-                error!("Failed to parse JID '{}': {}", recipient_str, e);
-                "unknown@example.com".to_string()
-            }
-        };
+        let bare_jid = recipient_str.parse::<xmpp_parsers::jid::Jid>()
+            .map(|j| j.to_bare().to_string())
+            .unwrap_or_else(|_| recipient_str.clone());
 
         // Schedule an OMEMO key check in the background
         let client_clone = self.clone();
@@ -115,10 +104,10 @@ impl super::XMPPClient {
 
         // Continue with regular message creation
         let mut message = XMPPMessage::new(None);
-        message.id = Some(msg_id);
+        message.id = Some(xmpp_parsers::message::Id(msg_id));
 
         // Parse the string into a Jid
-        let jid = match recipient_str.parse::<xmpp_parsers::Jid>() {
+        let jid = match recipient_str.parse::<xmpp_parsers::jid::Jid>() {
             Ok(jid) => jid,
             Err(e) => {
                 error!("Failed to parse JID '{}': {}", recipient_str, e);
@@ -130,8 +119,8 @@ impl super::XMPPClient {
         message.to = Some(jid);
         message.type_ = xmpp_parsers::message::MessageType::Chat;
         message.bodies.insert(
-            String::new(),
-            xmpp_parsers::message::Body(content.to_string()),
+            xmpp_parsers::message::Lang(String::new()),
+            content.to_string(),
         );
 
         // Add XEP-0184 receipt request
@@ -152,7 +141,7 @@ impl super::XMPPClient {
             error!("XMPP client not initialized when trying to send message");
             anyhow::anyhow!("XMPP client not initialized")
         })?;
-        let recipient_jid: xmpp_parsers::BareJid = match recipient.parse() {
+        let recipient_jid: xmpp_parsers::jid::BareJid = match recipient.parse() {
             Ok(jid) => jid,
             Err(e) => {
                 error!("Invalid recipient JID '{}': {}", recipient, e);
@@ -167,7 +156,7 @@ impl super::XMPPClient {
         );
 
         // Create message
-        let message = self.create_message(recipient_jid.clone(), msg_id.clone(), content);
+        let message = self.create_message(recipient_jid.to_string(), msg_id.clone(), content);
 
         // Add to pending receipts before sending
         {
@@ -222,7 +211,7 @@ impl super::XMPPClient {
         let mut receipt = XMPPMessage::new(None);
 
         // Convert String to Jid for the to field
-        let jid_to = to.map(|to_str| match to_str.parse::<xmpp_parsers::Jid>() {
+        let jid_to = to.map(|to_str| match to_str.parse::<xmpp_parsers::jid::Jid>() {
             Ok(jid) => jid,
             Err(e) => {
                 error!("Failed to parse JID for receipt: {}", e);
@@ -231,11 +220,11 @@ impl super::XMPPClient {
         });
 
         receipt.to = jid_to;
-        receipt.id = Some(Uuid::new_v4().to_string());
+        receipt.id = Some(xmpp_parsers::message::Id(Uuid::new_v4().to_string()));
 
         // Add received element with id attribute
         let received = Element::builder("received", custom_ns::RECEIPTS)
-            .attr("id", &msg_id)
+            .attr("id".try_into().unwrap(), &msg_id)
             .build();
         receipt.payloads.push(received);
 
@@ -352,11 +341,11 @@ mod tests {
 
     fn make_receipt_stanza(from: &str, receipt_id: &str) -> Element {
         Element::builder("message", "jabber:client")
-            .attr("from", from)
-            .attr("to", "me@server.example")
+            .attr("from".try_into().unwrap(), from)
+            .attr("to".try_into().unwrap(), "me@server.example")
             .append(
                 Element::builder("received", custom_ns::RECEIPTS)
-                    .attr("id", receipt_id)
+                    .attr("id".try_into().unwrap(), receipt_id)
                     .build(),
             )
             .build()
@@ -364,9 +353,9 @@ mod tests {
 
     fn make_message_with_receipt_request(from: &str, id: &str) -> Element {
         Element::builder("message", "jabber:client")
-            .attr("from", from)
-            .attr("to", "me@server.example")
-            .attr("id", id)
+            .attr("from".try_into().unwrap(), from)
+            .attr("to".try_into().unwrap(), "me@server.example")
+            .attr("id".try_into().unwrap(), id)
             .append(
                 Element::builder("body", "jabber:client")
                     .append("Hello")
@@ -415,7 +404,7 @@ mod tests {
 
         // Receipt with no id attribute
         let stanza = Element::builder("message", "jabber:client")
-            .attr("from", "alice@example.com")
+            .attr("from".try_into().unwrap(), "alice@example.com")
             .append(Element::builder("received", custom_ns::RECEIPTS).build())
             .build();
 
@@ -429,7 +418,7 @@ mod tests {
         let (msg_tx, _msg_rx) = tokio::sync::mpsc::channel(10);
 
         let stanza = Element::builder("message", "jabber:client")
-            .attr("from", "bob@example.com")
+            .attr("from".try_into().unwrap(), "bob@example.com")
             .append(
                 Element::builder("body", "jabber:client")
                     .append("hi")

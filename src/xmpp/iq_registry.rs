@@ -15,13 +15,13 @@ use tokio::time::Instant;
 
 /// A pending IQ request waiting for its response.
 struct PendingRequest {
-    sender: oneshot::Sender<xmpp_parsers::Element>,
+    sender: oneshot::Sender<xmpp_parsers::minidom::Element>,
     registered_at: Instant,
 }
 
 /// A MAM query collector that receives intermediate message stanzas.
 struct MamCollector {
-    sender: mpsc::UnboundedSender<xmpp_parsers::Element>,
+    sender: mpsc::UnboundedSender<xmpp_parsers::minidom::Element>,
     registered_at: Instant,
 }
 
@@ -41,7 +41,7 @@ impl IqResponseRegistry {
 
     /// Register interest in an IQ response with the given ID.
     /// Returns a receiver that will get the response stanza.
-    pub fn register(&mut self, id: String) -> oneshot::Receiver<xmpp_parsers::Element> {
+    pub fn register(&mut self, id: String) -> oneshot::Receiver<xmpp_parsers::minidom::Element> {
         let (tx, rx) = oneshot::channel();
         self.pending.insert(
             id,
@@ -60,8 +60,8 @@ impl IqResponseRegistry {
         &mut self,
         query_id: String,
     ) -> (
-        mpsc::UnboundedReceiver<xmpp_parsers::Element>,
-        oneshot::Receiver<xmpp_parsers::Element>,
+        mpsc::UnboundedReceiver<xmpp_parsers::minidom::Element>,
+        oneshot::Receiver<xmpp_parsers::minidom::Element>,
     ) {
         let (msg_tx, msg_rx) = mpsc::unbounded_channel();
         let (iq_tx, iq_rx) = oneshot::channel();
@@ -84,7 +84,7 @@ impl IqResponseRegistry {
 
     /// Try to route a MAM message stanza to a waiting collector.
     /// Returns true if the stanza was consumed.
-    pub fn try_route_mam(&self, query_id: &str, stanza: xmpp_parsers::Element) -> bool {
+    pub fn try_route_mam(&self, query_id: &str, stanza: xmpp_parsers::minidom::Element) -> bool {
         if let Some(collector) = self.mam_collectors.get(query_id) {
             // Send may fail if the receiver was dropped — that's fine
             let _ = collector.sender.send(stanza);
@@ -96,7 +96,7 @@ impl IqResponseRegistry {
 
     /// Try to route an IQ stanza to a waiting caller.
     /// Returns true if the stanza was consumed (matched a pending request).
-    pub fn try_route(&mut self, id: &str, stanza: xmpp_parsers::Element) -> bool {
+    pub fn try_route(&mut self, id: &str, stanza: xmpp_parsers::minidom::Element) -> bool {
         if let Some(request) = self.pending.remove(id) {
             // Also clean up the MAM collector for this query if present
             self.mam_collectors.remove(id);
@@ -137,12 +137,12 @@ impl IqResponseRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xmpp_parsers::Element;
+    use xmpp_parsers::minidom::Element;
 
     fn make_iq_result(id: &str) -> Element {
         Element::builder("iq", "jabber:client")
-            .attr("type", "result")
-            .attr("id", id)
+            .attr("type".try_into().unwrap(), "result")
+            .attr("id".try_into().unwrap(), id)
             .build()
     }
 
@@ -175,10 +175,10 @@ mod tests {
 
         // Route intermediate MAM messages
         let msg1 = Element::builder("message", "jabber:client")
-            .attr("id", "m1")
+            .attr("id".try_into().unwrap(), "m1")
             .build();
         let msg2 = Element::builder("message", "jabber:client")
-            .attr("id", "m2")
+            .attr("id".try_into().unwrap(), "m2")
             .build();
         assert!(registry.try_route_mam("mam-q1", msg1));
         assert!(registry.try_route_mam("mam-q1", msg2));

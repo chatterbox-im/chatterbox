@@ -4,7 +4,7 @@
 use anyhow::{anyhow, Result};
 use base64::Engine;
 use log::{debug, error, info, warn};
-use xmpp_parsers::Element;
+use xmpp_parsers::minidom::Element;
 
 use super::{custom_ns, XMPPClient};
 use crate::models::{DeliveryStatus, Message, PendingMessage};
@@ -89,9 +89,9 @@ impl XMPPClient {
 
         // Create the OMEMO message stanza
         let mut message_element = Element::builder("message", "jabber:client").build();
-        message_element.set_attr("id", &id);
-        message_element.set_attr("to", to);
-        message_element.set_attr("type", "chat");
+        message_element.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, "id".try_into().unwrap(), &id);
+        message_element.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, "to".try_into().unwrap(), to);
+        message_element.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, "type".try_into().unwrap(), "chat");
 
         // Add receipt request
         let request_element = Element::builder("request", custom_ns::RECEIPTS).build();
@@ -106,14 +106,14 @@ impl XMPPClient {
 
         // Create header element
         let mut header_element = Element::builder("header", custom_ns::OMEMO_V1).build();
-        header_element.set_attr("sid", &encrypted_message.sender_device_id.to_string());
+        header_element.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, "sid".try_into().unwrap(), &encrypted_message.sender_device_id.to_string());
 
         // Add key elements, including prekey="true" for PreKeySignalMessages
         for (device_id, encrypted_key) in &encrypted_message.encrypted_keys {
             let mut key_element = Element::builder("key", custom_ns::OMEMO_V1).build();
-            key_element.set_attr("rid", &device_id.to_string());
+            key_element.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, "rid".try_into().unwrap(), &device_id.to_string());
             if encrypted_message.prekey_devices.contains(device_id) {
-                key_element.set_attr("prekey", "true");
+                key_element.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, "prekey".try_into().unwrap(), "true");
             }
             key_element
                 .append_text_node(&base64::engine::general_purpose::STANDARD.encode(encrypted_key));
@@ -140,8 +140,8 @@ impl XMPPClient {
 
         // Add EME indicator (XEP-0380)
         let mut eme_element = Element::builder("encryption", "urn:xmpp:eme:0").build();
-        eme_element.set_attr("namespace", custom_ns::OMEMO_V1);
-        eme_element.set_attr("name", "OMEMO");
+        eme_element.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, "namespace".try_into().unwrap(), custom_ns::OMEMO_V1);
+        eme_element.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, "name".try_into().unwrap(), "OMEMO");
         message_element.append_child(eme_element);
 
         // Add body fallback for clients that don't support OMEMO

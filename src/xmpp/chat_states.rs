@@ -6,7 +6,7 @@ use log::{debug, error};
 use uuid::Uuid;
 
 use xmpp_parsers::message::{Message as XMPPMessage, MessageType};
-use xmpp_parsers::Element;
+use xmpp_parsers::minidom::Element;
 
 use super::custom_ns;
 use super::transport::{self};
@@ -77,13 +77,13 @@ impl super::XMPPClient {
         })?;
 
         // Parse recipient
-        let recipient_jid: xmpp_parsers::Jid = recipient
+        let recipient_jid: xmpp_parsers::jid::Jid = recipient
             .parse()
             .map_err(|e| anyhow!("Invalid recipient JID '{}': {}", recipient, e))?;
 
         // Create chat state message
         let mut message = XMPPMessage::new(None);
-        message.id = Some(Uuid::new_v4().to_string());
+        message.id = Some(xmpp_parsers::message::Id(Uuid::new_v4().to_string()));
         message.to = Some(recipient_jid);
         message.type_ = MessageType::Chat;
 
@@ -98,7 +98,7 @@ impl super::XMPPClient {
 
         // Add the chat state element to the message
         let state_element =
-            xmpp_parsers::Element::builder(state_name, custom_ns::CHATSTATES).build();
+            xmpp_parsers::minidom::Element::builder(state_name, custom_ns::CHATSTATES).build();
         message.payloads.push(state_element);
 
         // Send via transport channel
@@ -137,13 +137,13 @@ impl super::XMPPClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xmpp_parsers::Element;
+    use xmpp_parsers::minidom::Element;
 
     fn make_message_with_state(from: &str, state: &str) -> Element {
         Element::builder("message", "jabber:client")
-            .attr("from", from)
-            .attr("to", "me@server.example")
-            .attr("type", "chat")
+            .attr("from".try_into().unwrap(), from)
+            .attr("to".try_into().unwrap(), "me@server.example")
+            .attr("type".try_into().unwrap(), "chat")
             .append(Element::builder(state, super::custom_ns::CHATSTATES).build())
             .build()
     }
@@ -190,7 +190,7 @@ mod tests {
     #[test]
     fn test_no_chat_state_in_message() {
         let stanza = Element::builder("message", "jabber:client")
-            .attr("from", "alice@example.com")
+            .attr("from".try_into().unwrap(), "alice@example.com")
             .append(
                 Element::builder("body", "jabber:client")
                     .append("hello")
