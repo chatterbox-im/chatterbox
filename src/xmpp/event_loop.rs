@@ -30,6 +30,7 @@ impl XMPPClient {
         online_tx: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
     ) {
         let mut seen_online_event = false;
+        let mut reconnecting = false;
         let mut online_tx = online_tx;
         let mut typing_tx_cache: Option<mpsc::Sender<(String, chat_states::TypingStatus)>> = None;
         let mut our_bare_jid: Option<String> = None;
@@ -431,7 +432,30 @@ impl XMPPClient {
                     bound_jid,
                     resumed: _,
                 } => {
-                    if !seen_online_event {
+                    if reconnecting {
+                        // Mid-session reconnect — re-establish XMPP session state.
+                        // Carbons and presence are fire-and-forget (best-effort).
+                        reconnecting = false;
+                        info!("Reconnected to XMPP server as {}", bound_jid);
+                        let iq_id = uuid::Uuid::new_v4().to_string();
+                        let carbons_iq = Element::builder("iq", "jabber:client")
+                            .attr("type", "set")
+                            .attr("id", &iq_id)
+                            .append(Element::builder("enable", custom_ns::CARBONS).build())
+                            .build();
+                        if let Err(e) = transport::send_stanza(&stanza_tx, carbons_iq) {
+                            warn!("Failed to re-enable carbons after reconnect: {}", e);
+                        }
+                        if let Err(e) = transport::send_stanza(
+                            &stanza_tx,
+                            Element::builder("presence", "jabber:client").build(),
+                        ) {
+                            warn!("Failed to re-send presence after reconnect: {}", e);
+                        }
+                        if let Some(ref jid) = our_bare_jid {
+                            let _ = msg_tx.send(Message::system(jid, "Reconnected.")).await;
+                        }
+                    } else if !seen_online_event {
                         info!("Connected to XMPP server as {}", bound_jid);
                         seen_online_event = true;
                         our_bare_jid = Some(
@@ -455,18 +479,50 @@ impl XMPPClient {
                 XMPPEvent::Disconnected(reason) => {
                     let reason_str = format!("{:?}", reason);
                     error!("XMPP client is disconnected: {}", reason_str);
+
+                    // NOTE: fatality detection inspects tokio-xmpp's Debug output.
+                    // If that format changes in a future version this check may
+                    // silently stop working and TLS errors would retry indefinitely.
+                    let is_fatal = reason_str.contains("not trusted")
+                        || reason_str.contains("ertificate") // Certificate / certificate
+                        || reason_str.contains("NotAuthorized")
+                        || reason_str.contains("not-authorized");
+
                     if let Some(tx) = online_tx.take() {
-                        let msg = if reason_str.contains("not trusted")
-                            || reason_str.contains("certificate")
-                            || reason_str.contains("Certificate")
-                        {
-                            "TLS certificate is not trusted by this system".to_string()
+                        // Still in the initial-connect phase (Online not yet seen).
+                        if is_fatal {
+                            // Signal failure and exit; dropping event_rx shuts the
+                            // transport down so it stops retrying.
+                            let msg = if reason_str.contains("not trusted")
+                                || reason_str.contains("ertificate")
+                            {
+                                "TLS certificate is not trusted by this system".to_string()
+                            } else {
+                                format!("Connection failed: {}", reason_str)
+                            };
+                            let _ = tx.send(Err(msg));
+                            break;
+                        }
+                        // Transient failure: restore online_tx and let the transport
+                        // retry. wait_for_connection's 20-second timeout is the limit.
+                        online_tx = Some(tx);
+                    } else {
+                        // Mid-session drop. Set reconnecting flag so the next Online
+                        // event re-establishes carbons and presence.
+                        reconnecting = true;
+                        let notify = if is_fatal {
+                            format!("Connection error — cannot reconnect: {}", reason_str)
                         } else {
-                            format!("Connection failed: {}", reason_str)
+                            "Connection lost. Reconnecting...".to_string()
                         };
-                        let _ = tx.send(Err(msg));
+                        if let Some(ref jid) = our_bare_jid {
+                            let _ = msg_tx.send(Message::system(jid, &notify)).await;
+                        }
+                        if is_fatal {
+                            break;
+                        }
+                        // Don't break — transport will reconnect and fire Online.
                     }
-                    break;
                 }
             }
 

@@ -241,7 +241,7 @@ async fn test_omemo_encryption() -> Result<()> {
 
                                     // Test trust/untrust operations
                                     drop(manager_guard);
-                                    let manager_guard = omemo_manager.lock().await;
+                                    let mut manager_guard = omemo_manager.lock().await;
 
                                     // First mark as trusted
                                     if let Err(e) = manager_guard
