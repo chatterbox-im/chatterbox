@@ -710,12 +710,17 @@ impl OmemoManager {
                 info!("ENCRYPT_DEBUG: Processing device {}:{}", jid, device_id);
                 let device_key = (jid.clone(), device_id);
 
-                // True when we need to force a PreKey exchange for recovery —
-                // this is now encoded as `RecoveryPreKeySent` in the sessions map,
-                // replacing the old `pending_prekey_sends` HashSet.
+                // True when we need to force a PreKey exchange for recovery.
+                // RecoveryPreKeySent: AEAD recovery path.
+                // PeerResetPending: peer sent a PreKey referencing a consumed OPK — we
+                //   must start a fresh X3DH session next time we send to them.
+                // Both states guarantee get_or_create_session will build a new initiator
+                // session, but we also set this flag so that use_prekey_format is true
+                // even if has_ephemeral is not set (defensive belt-and-suspenders).
                 let needs_prekey = matches!(
                     self.sessions.get(&device_key),
                     Some(OmemoSessionState::RecoveryPreKeySent { .. })
+                        | Some(OmemoSessionState::PeerResetPending)
                 );
                 info!(
                     "ENCRYPT_DEBUG: Device {}:{} needs_prekey: {}",
