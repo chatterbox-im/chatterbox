@@ -1544,6 +1544,8 @@ fn draw_help_dialog(f: &mut Frame, area: Rect) {
         ("General", ""),
         ("ESC", "Quit application"),
         ("Tab", "Switch between Messages and Contacts"),
+        ("Ctrl+S", "Toggle sidebar (contacts panel) visibility"),
+        ("Ctrl+H", "Show this help dialog"),        
         ("", ""),
         ("Contacts Navigation", ""),
         (
@@ -1571,16 +1573,6 @@ fn draw_help_dialog(f: &mut Frame, area: Rect) {
             "Force OMEMO device list re-fetch for active contact",
         ),
         ("Ctrl+P", "Toggle OS notifications"),
-        ("Ctrl+S", "Toggle sidebar (contacts panel) visibility"),
-        ("", ""),
-        ("Debug", ""),
-        (
-            "Ctrl+N",
-            "Test friend request notification popup (for debugging)",
-        ),
-        ("", ""),
-        ("Help", ""),
-        ("Ctrl+H", "Show this help dialog"),
         ("", ""),
         ("Press any key to close this dialog", ""),
     ];
