@@ -482,155 +482,17 @@ impl XMPPClient {
         Ok(())
     }
 
-    /// Check OMEMO keys for a contact and request verification if needed
+    /// Check OMEMO keys for a contact and request verification if needed.
     pub async fn check_omemo_keys_for_contact(&self, contact: &str) -> Result<()> {
-        // Skip checks for special contacts
-        if contact.starts_with('[') && contact.ends_with(']') {
-            return Ok(());
-        }
-
-        if self.omemo_manager.is_none() {
-            warn!("No OMEMO manager available for key verification");
-            return Ok(());
-        }
-
-        let omemo_manager = self.omemo_manager.as_ref().unwrap();
-
-        // First, get the device IDs for this contact with timeout protection
-        let device_ids = {
-            let manager_guard = omemo_manager.lock().await;
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(10),
-                manager_guard.get_device_ids_for_test(contact),
-            )
-            .await
-            {
-                Ok(Ok(device_ids)) => device_ids,
-                Ok(Err(e)) => {
-                    warn!("Failed to get device IDs for {}: {}", contact, e);
-                    return Ok(());
-                }
-                Err(_) => {
-                    warn!(
-                        "Timeout while getting device IDs for {}, skipping OMEMO verification",
-                        contact
-                    );
-                    return Ok(());
-                }
+        let omemo_manager = match &self.omemo_manager {
+            Some(m) => m,
+            None => {
+                warn!("No OMEMO manager available for key verification");
+                return Ok(());
             }
         };
-
-        if device_ids.is_empty() {
-            return Ok(());
-        }
-
-        info!("Found {} OMEMO devices for {}", device_ids.len(), contact);
-
-        let storage = crate::omemo::storage::OmemoStorage::new_default()?;
-        let pending_verification = storage.get_pending_device_verification(contact);
-
-        if let Ok(Some(_)) = pending_verification {
-            return Ok(());
-        }
-
-        // Check each device to see if it's trusted
-        for device_id in device_ids {
-            let trusted = {
-                let manager_guard = omemo_manager.lock().await;
-                match tokio::time::timeout(
-                    std::time::Duration::from_secs(8),
-                    manager_guard.is_device_identity_trusted(contact, device_id),
-                )
-                .await
-                {
-                    Ok(Ok(trusted)) => trusted,
-                    Ok(Err(e)) => {
-                        warn!("Failed to check trust for {}:{}: {}", contact, device_id, e);
-                        false
-                    }
-                    Err(_) => {
-                        warn!(
-                            "Timeout checking trust for {}:{}, assuming not trusted",
-                            contact, device_id
-                        );
-                        false
-                    }
-                }
-            };
-
-            if !trusted {
-                let fingerprint = {
-                    let manager_guard = omemo_manager.lock().await;
-                    match tokio::time::timeout(
-                        std::time::Duration::from_secs(8),
-                        manager_guard.get_device_fingerprint(contact, device_id),
-                    )
-                    .await
-                    {
-                        Ok(Ok(fingerprint)) => fingerprint,
-                        Ok(Err(e)) => {
-                            warn!(
-                                "Failed to get fingerprint for {}:{}: {}",
-                                contact, device_id, e
-                            );
-                            continue;
-                        }
-                        Err(_) => {
-                            warn!(
-                                "Timeout getting fingerprint for {}:{}, skipping device",
-                                contact, device_id
-                            );
-                            continue;
-                        }
-                    }
-                };
-
-                // Double-check if this fingerprint is already trusted in the database
-                let fingerprint_trusted = storage.is_device_trusted(contact, device_id)?;
-                if fingerprint_trusted {
-                    let mut manager_guard = omemo_manager.lock().await;
-                    match tokio::time::timeout(
-                        std::time::Duration::from_secs(5),
-                        manager_guard.trust_device_identity(contact, device_id),
-                    )
-                    .await
-                    {
-                        Ok(Ok(_)) => {}
-                        Ok(Err(e)) => {
-                            warn!("Failed to update device trust state in manager: {}", e);
-                        }
-                        Err(_) => {
-                            warn!("Timeout updating trust state for {}:{}", contact, device_id);
-                        }
-                    }
-                    continue;
-                }
-
-                if let Err(e) =
-                    storage.store_pending_device_verification(contact, device_id, &fingerprint)
-                {
-                    warn!("Failed to store pending verification: {}", e);
-                }
-
-                info!(
-                    "Requesting verification for untrusted device {}:{} with fingerprint {}",
-                    contact, device_id, fingerprint
-                );
-
-                if let Err(e) = self
-                    .detect_unrecognized_omemo_key(contact, &fingerprint, Some(device_id))
-                    .await
-                {
-                    error!("Failed to request key verification: {}", e);
-                    return Err(anyhow!("Failed to request key verification: {}", e));
-                }
-
-                // Only request verification for one device at a time
-                break;
-            }
-        }
-
-        Ok(())
+        let mut guard = omemo_manager.lock().await;
+        prompt_first_untrusted_key(&mut *guard, contact, &self.msg_tx).await
     }
 
     /// Request verification for an OMEMO key
@@ -851,4 +713,111 @@ impl XMPPClient {
                 .map_err(|e| anyhow!("{}", e))
         }
     }
+}
+
+/// Find the first unverified device for `contact` and prompt the user via the UI.
+/// Single source of truth used by both the XMPP handler and the coordinator.
+pub(crate) async fn prompt_first_untrusted_key(
+    omemo_manager: &mut crate::omemo::OmemoManager,
+    contact: &str,
+    msg_tx: &tokio::sync::mpsc::Sender<Message>,
+) -> Result<()> {
+    if contact.starts_with('[') && contact.ends_with(']') {
+        return Ok(());
+    }
+
+    let storage = crate::omemo::storage::OmemoStorage::new_default()?;
+    if let Ok(Some(_)) = storage.get_pending_device_verification(contact) {
+        return Ok(());
+    }
+
+    let device_ids = match tokio::time::timeout(
+        Duration::from_secs(10),
+        omemo_manager.get_device_ids_for_test(contact),
+    )
+    .await
+    {
+        Ok(Ok(ids)) => ids,
+        Ok(Err(e)) => {
+            warn!("Failed to get device IDs for {}: {}", contact, e);
+            return Ok(());
+        }
+        Err(_) => {
+            warn!("Timeout getting device IDs for {}", contact);
+            return Ok(());
+        }
+    };
+
+    info!("Found {} OMEMO devices for {}", device_ids.len(), contact);
+
+    for device_id in device_ids {
+        let trusted = match tokio::time::timeout(
+            Duration::from_secs(8),
+            omemo_manager.is_device_identity_trusted(contact, device_id),
+        )
+        .await
+        {
+            Ok(Ok(t)) => t,
+            Ok(Err(e)) => {
+                warn!("Failed to check trust for {}:{}: {}", contact, device_id, e);
+                false
+            }
+            Err(_) => {
+                warn!("Timeout checking trust for {}:{}, assuming not trusted", contact, device_id);
+                false
+            }
+        };
+
+        if !trusted {
+            let fingerprint = match tokio::time::timeout(
+                Duration::from_secs(8),
+                omemo_manager.get_device_fingerprint(contact, device_id),
+            )
+            .await
+            {
+                Ok(Ok(fp)) => fp,
+                Ok(Err(e)) => {
+                    warn!("Failed to get fingerprint for {}:{}: {}", contact, device_id, e);
+                    continue;
+                }
+                Err(_) => {
+                    warn!("Timeout getting fingerprint for {}:{}, skipping", contact, device_id);
+                    continue;
+                }
+            };
+
+            if storage.is_device_trusted(contact, device_id)? {
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    omemo_manager.trust_device_identity(contact, device_id),
+                )
+                .await;
+                continue;
+            }
+
+            // Skip devices the user has already explicitly rejected — don't re-prompt.
+            if storage.get_trust_level(contact, device_id)?
+                == crate::omemo::storage::TrustLevel::Untrusted
+            {
+                continue;
+            }
+
+            let _ = storage.store_pending_device_verification(contact, device_id, &fingerprint);
+            info!(
+                "Requesting verification for untrusted device {}:{} with fingerprint {}",
+                contact, device_id, fingerprint
+            );
+
+            let msg = Message::system(
+                "me",
+                format!("__OMEMO_KEY_VERIFY__:{}:{}:{}", contact, fingerprint, device_id),
+            );
+            if let Err(e) = msg_tx.send(msg).await {
+                error!("Failed to send key verification request to UI: {}", e);
+            }
+            break;
+        }
+    }
+
+    Ok(())
 }

@@ -1099,88 +1099,11 @@ async fn handle_carbon_inline(state: &mut CoordinatorState, stanza: &Element) {
 
 /// Check OMEMO keys for a contact (inline, no spawn).
 async fn check_omemo_keys_inline(state: &mut CoordinatorState, contact: &str) -> Result<()> {
-    if contact.starts_with('[') && contact.ends_with(']') {
-        return Ok(());
-    }
-
     let omemo_manager = state
         .omemo_manager
         .as_mut()
         .ok_or_else(|| anyhow!("OMEMO not initialized"))?;
-
-    let device_ids = match tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        omemo_manager.get_device_ids_for_test(contact),
-    )
-    .await
-    {
-        Ok(Ok(ids)) => ids,
-        Ok(Err(e)) => {
-            warn!("Failed to get device IDs for {}: {}", contact, e);
-            return Ok(());
-        }
-        Err(_) => {
-            warn!("Timeout getting device IDs for {}", contact);
-            return Ok(());
-        }
-    };
-
-    if device_ids.is_empty() {
-        return Ok(());
-    }
-
-    let storage = crate::omemo::storage::OmemoStorage::new_default()?;
-    if let Ok(Some(_)) = storage.get_pending_device_verification(contact) {
-        return Ok(());
-    }
-
-    for device_id in device_ids {
-        let trusted = match tokio::time::timeout(
-            std::time::Duration::from_secs(8),
-            omemo_manager.is_device_identity_trusted(contact, device_id),
-        )
-        .await
-        {
-            Ok(Ok(t)) => t,
-            _ => false,
-        };
-
-        if !trusted {
-            let fingerprint = match tokio::time::timeout(
-                std::time::Duration::from_secs(8),
-                omemo_manager.get_device_fingerprint(contact, device_id),
-            )
-            .await
-            {
-                Ok(Ok(fp)) => fp,
-                _ => continue,
-            };
-
-            if storage.is_device_trusted(contact, device_id)? {
-                let _ = tokio::time::timeout(
-                    std::time::Duration::from_secs(5),
-                    omemo_manager.trust_device_identity(contact, device_id),
-                )
-                .await;
-                continue;
-            }
-
-            let _ = storage.store_pending_device_verification(contact, device_id, &fingerprint);
-
-            // Send verification request to UI
-            let special_message = Message::system(
-                "me",
-                format!(
-                    "__OMEMO_KEY_VERIFY__:{}:{}:{}",
-                    contact, fingerprint, device_id
-                ),
-            );
-            send_to_ui(&state.msg_tx, special_message);
-            break;
-        }
-    }
-
-    Ok(())
+    super::omemo_handler::prompt_first_untrusted_key(omemo_manager, contact, &state.msg_tx).await
 }
 
 /// Toggle trust for a contact's devices (inline).
