@@ -112,6 +112,7 @@ pub struct ChatUI {
     friend_request_notification: Option<FriendRequestNotification>, // Add this field for friend request notifications
     resources: HashMap<String, Vec<String>>, // Map of base JID -> resource JIDs
     connection_status: bool,                 // Track XMPP server connection status
+    sidebar_hidden: bool,                    // Whether the contacts sidebar is hidden
     message_scroll_offset: Option<usize>, // None = auto-scroll to bottom, Some(n) = n lines scrolled up from bottom
     unread_contacts: HashSet<String>,     // Contacts with unread messages
     pub history_loaded_contacts: HashSet<String>, // Contacts whose history has been loaded
@@ -187,6 +188,7 @@ impl ChatUI {
             friend_request_notification: None,       // Initialize to None
             resources: HashMap::new(),               // Initialize resources map
             connection_status: false,                // Initialize connection status to disconnected
+            sidebar_hidden: false,                   // Sidebar visible by default
             message_scroll_offset: None,             // Auto-scroll to bottom by default
             unread_contacts: HashSet::new(),         // No unread messages initially
             history_loaded_contacts: HashSet::new(), // No history loaded yet
@@ -707,6 +709,9 @@ impl ChatUI {
                     String::from("__TEST_FRIEND_REQUEST__"),
                 )));
             }
+            KeyCode::Char('s') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
+                self.sidebar_hidden = !self.sidebar_hidden;
+            }
             KeyCode::Up => {
                 if let Tab::Contacts = self.active_tab {
                     if !self.contacts.is_empty() {
@@ -850,10 +855,11 @@ impl ChatUI {
         // Create a layout with 3 horizontal sections
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(20), // Contacts panel
-                Constraint::Percentage(80), // Chat panel
-            ])
+            .constraints(if self.sidebar_hidden {
+                vec![Constraint::Length(0), Constraint::Percentage(100)]
+            } else {
+                vec![Constraint::Percentage(20), Constraint::Percentage(80)]
+            })
             .split(size);
 
         // Split the right section for messages, input, and help
@@ -980,7 +986,7 @@ impl ChatUI {
             ),
             Span::styled(notification_status_text, notification_status_style),
             Span::styled(
-                "] | Ctrl+T trust | Fn+↑/↓ scroll",
+                "] | Ctrl+T trust | Ctrl+S sidebar | Fn+↑/↓ scroll",
                 Style::default().fg(Color::Gray),
             ),
         ];
@@ -1565,6 +1571,7 @@ fn draw_help_dialog(f: &mut Frame, area: Rect) {
             "Force OMEMO device list re-fetch for active contact",
         ),
         ("Ctrl+P", "Toggle OS notifications"),
+        ("Ctrl+S", "Toggle sidebar (contacts panel) visibility"),
         ("", ""),
         ("Debug", ""),
         (
