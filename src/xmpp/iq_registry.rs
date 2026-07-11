@@ -108,6 +108,18 @@ impl IqResponseRegistry {
         }
     }
 
+    /// Cancel all pending IQ requests immediately (e.g. on connection drop).
+    /// Dropping the senders causes all waiting `recv()` calls to return
+    /// `Err(RecvError)` right away, so callers fail fast instead of timing out.
+    pub fn cancel_all(&mut self) {
+        let count = self.pending.len();
+        if count > 0 {
+            debug!("Cancelling {} pending IQ request(s) due to connection drop", count);
+        }
+        self.pending.clear();
+        self.mam_collectors.clear();
+    }
+
     /// Remove stale entries older than the given duration.
     /// Call periodically to prevent memory leaks from abandoned requests.
     pub fn evict_stale(&mut self, max_age: std::time::Duration) {

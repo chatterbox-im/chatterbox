@@ -437,11 +437,19 @@ impl XMPPClient {
                     }
                 }
                 XMPPEvent::Online {
-                    bound_jid,                    features: _,                    resumed: _,
+                    bound_jid,                    features: _,                    resumed,
                 } => {
-                    if reconnecting {
+                    // `reconnecting` is set when we saw an explicit Disconnected event.
+                    // `!resumed && seen_online_event` catches the case where SM resumption
+                    // failed and tokio-xmpp started a completely fresh session without
+                    // emitting Disconnected first — carbons and presence must be
+                    // re-established or the new session will be invisible to the server.
+                    if reconnecting || (!resumed && seen_online_event) {
                         // Mid-session reconnect — re-establish XMPP session state.
                         // Carbons and presence are fire-and-forget (best-effort).
+                        // Cancel any in-flight IQ requests from the old session so
+                        // callers fail fast rather than waiting out their timeouts.
+                        iq_registry.lock().await.cancel_all();
                         reconnecting = false;
                         info!("Reconnected to XMPP server as {}", bound_jid);
                         let iq_id = uuid::Uuid::new_v4().to_string();
@@ -516,6 +524,8 @@ impl XMPPClient {
                     } else {
                         // Mid-session drop. Set reconnecting flag so the next Online
                         // event re-establishes carbons and presence.
+                        // Cancel in-flight IQs immediately so callers fail fast.
+                        iq_registry.lock().await.cancel_all();
                         reconnecting = true;
                         let notify = if is_fatal {
                             format!("Connection error — cannot reconnect: {}", reason_str)
