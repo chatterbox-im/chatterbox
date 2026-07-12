@@ -19,6 +19,7 @@
 //!       }
 //!   }
 
+use once_cell::sync::Lazy;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 
@@ -26,6 +27,18 @@ use crate::{
     models::Message,
     xmpp::XMPPClient,
 };
+
+// A dedicated Tokio runtime for all FFI async operations.
+// UniFFI drives Rust futures from a thread that may not have a runtime set as
+// "current"; entering this runtime fixes `tokio::spawn` and I/O operations
+// (e.g. TCP connections) that require a reactor to be present on the thread.
+static RUNTIME: Lazy<tokio::runtime::Runtime> = Lazy::new(|| {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_name("chatterbox-ffi")
+        .build()
+        .expect("Failed to build Tokio runtime for FFI layer")
+});
 
 // ---------------------------------------------------------------------------
 // Public data types exposed to Swift
@@ -105,77 +118,95 @@ impl ChatterboxClient {
         username: String,
         password: String,
     ) -> Result<(), FfiError> {
-        let (mut xmpp, msg_rx) = XMPPClient::new();
-
-        // Set OMEMO JID for user-specific key storage
-        let bare_jid = username.split('/').next().unwrap_or(&username);
-        crate::omemo::device_id::set_omemo_jid(bare_jid);
-
-        xmpp.connect(&server, &username, &password)
-            .await
-            .map_err(|e| FfiError::Connection { reason: e.to_string() })?;
-
-        xmpp.initialize_client()
-            .await
-            .map_err(|e| FfiError::Omemo { reason: e.to_string() })?;
-
-        crate::xmpp::publish_late_state(&xmpp);
-
-        *self.inner.lock().await = Some(ClientState { xmpp });
-
-        // Spawn a background pump that forwards incoming messages as FfiEvents.
+        let inner = Arc::clone(&self.inner);
         let event_tx = self.event_tx.clone();
-        tokio::spawn(async move {
-            let mut rx = msg_rx;
-            loop {
-                match rx.recv().await {
-                    Some(m) => {
-                        let _ = event_tx.send(FfiEvent::Message { msg: to_ffi_message(m) }).await;
-                    }
-                    None => {
-                        let _ = event_tx
-                            .send(FfiEvent::Disconnected {
-                                reason: "Connection closed".to_string(),
-                            })
-                            .await;
-                        break;
+
+        // Spawn onto our dedicated runtime so that tokio::spawn / I/O inside
+        // xmpp.connect() can find a reactor.  JoinHandle<T> is Send, so the
+        // outer UniFFI future stays Send even though the work runs elsewhere.
+        RUNTIME.spawn(async move {
+            let (mut xmpp, msg_rx) = XMPPClient::new();
+
+            let bare_jid = username.split('/').next().unwrap_or(&username).to_string();
+            crate::omemo::device_id::set_omemo_jid(&bare_jid);
+
+            xmpp.connect(&server, &username, &password)
+                .await
+                .map_err(|e| FfiError::Connection { reason: e.to_string() })?;
+
+            xmpp.initialize_client()
+                .await
+                .map_err(|e| FfiError::Omemo { reason: e.to_string() })?;
+
+            crate::xmpp::publish_late_state(&xmpp);
+
+            *inner.lock().await = Some(ClientState { xmpp });
+
+            // Background pump: forward incoming messages as FfiEvents.
+            tokio::spawn(async move {
+                let mut rx = msg_rx;
+                loop {
+                    match rx.recv().await {
+                        Some(m) => {
+                            let _ = event_tx.send(FfiEvent::Message { msg: to_ffi_message(m) }).await;
+                        }
+                        None => {
+                            let _ = event_tx
+                                .send(FfiEvent::Disconnected {
+                                    reason: "Connection closed".to_string(),
+                                })
+                                .await;
+                            break;
+                        }
                     }
                 }
-            }
-        });
+            });
 
-        Ok(())
+            Ok::<(), FfiError>(())
+        })
+        .await
+        .map_err(|e| FfiError::Connection { reason: e.to_string() })?
     }
 
     /// Send an OMEMO-encrypted (or plaintext-fallback) message to `to_jid`.
     pub async fn send_message(&self, to_jid: String, body: String) -> Result<(), FfiError> {
-        let mut guard = self.inner.lock().await;
-        let state = guard.as_mut().ok_or(FfiError::NotConnected)?;
-        state
-            .xmpp
-            .send_message(&to_jid, &body)
-            .await
-            .map_err(|e| FfiError::Send { reason: e.to_string() })
+        let inner = Arc::clone(&self.inner);
+        RUNTIME.spawn(async move {
+            let mut guard = inner.lock().await;
+            let state = guard.as_mut().ok_or(FfiError::NotConnected)?;
+            state
+                .xmpp
+                .send_message(&to_jid, &body)
+                .await
+                .map_err(|e| FfiError::Send { reason: e.to_string() })
+        })
+        .await
+        .map_err(|e| FfiError::Send { reason: e.to_string() })?
     }
 
     /// Fetch the roster (contact list) from the server.
     pub async fn get_contacts(&self) -> Result<Vec<FfiContact>, FfiError> {
-        let guard = self.inner.lock().await;
-        let state = guard.as_ref().ok_or(FfiError::NotConnected)?;
-        let jids = state
-            .xmpp
-            .get_roster()
-            .await
-            .map_err(|e| FfiError::Roster { reason: e.to_string() })?
-            .unwrap_or_default();
-        Ok(jids
-            .into_iter()
-            .map(|jid| FfiContact {
-                display_name: jid.split('@').next().unwrap_or(&jid).to_string(),
-                jid,
-                status: "offline".to_string(),
-            })
-            .collect())
+        let inner = Arc::clone(&self.inner);
+        RUNTIME.spawn(async move {
+            let guard = inner.lock().await;
+            let state = guard.as_ref().ok_or(FfiError::NotConnected)?;
+            let jids = state
+                .xmpp
+                .get_roster()
+                .await
+                .map_err(|e| FfiError::Roster { reason: e.to_string() })?
+                .unwrap_or_default();
+            Ok(jids
+                .into_iter()
+                .map(|jid| FfiContact {
+                    display_name: jid.split('@').next().unwrap_or(&jid).to_string(),
+                    jid,
+                    status: "offline".to_string(),
+                })
+                .collect())
+        })
+        .await
+        .map_err(|e| FfiError::Roster { reason: e.to_string() })?
     }
 
     /// Wait for the next event (message, presence update, or disconnect).
@@ -191,12 +222,21 @@ impl ChatterboxClient {
     /// }
     /// ```
     pub async fn next_event(&self) -> Option<FfiEvent> {
-        self.event_rx.lock().await.recv().await
+        let event_rx = Arc::clone(&self.event_rx);
+        RUNTIME.spawn(async move {
+            event_rx.lock().await.recv().await
+        })
+        .await
+        .unwrap_or(None)
     }
 
     /// Gracefully disconnect and close the event stream.
     pub async fn disconnect(&self) {
-        *self.inner.lock().await = None;
+        let inner = Arc::clone(&self.inner);
+        let _ = RUNTIME.spawn(async move {
+            *inner.lock().await = None;
+        })
+        .await;
     }
 }
 
