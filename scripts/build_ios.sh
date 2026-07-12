@@ -2,14 +2,16 @@
 # Build Chatterbox for iOS and generate Swift bindings.
 #
 # Usage:
-#   ./scripts/build_ios.sh                  # device + simulator + XCFramework
-#   ./scripts/build_ios.sh --device-only    # only aarch64-apple-ios
-#   ./scripts/build_ios.sh --sim-only       # only aarch64-apple-ios-sim
-#   ./scripts/build_ios.sh --release        # optimised (default is debug)
+#   ./scripts/build_ios.sh                        # device + simulator + XCFramework
+#   ./scripts/build_ios.sh --device-only          # only aarch64-apple-ios
+#   ./scripts/build_ios.sh --sim-only             # only aarch64-apple-ios-sim
+#   ./scripts/build_ios.sh --release              # optimised (default is debug)
+#   ./scripts/build_ios.sh --output-dir /path     # write XCFramework + bindings to /path
+#                                                 # (used by chatterbox-ios/bootstrap.sh)
 #
-# Output:
-#   ios/Chatterbox.xcframework/   <- link this in Xcode
-#   ios/Sources/ChatterboxFFI/    <- add these Swift/header files to your Xcode project
+# Default output (no --output-dir):
+#   ios/Chatterbox.xcframework/
+#   ios/Sources/ChatterboxFFI/
 
 set -euo pipefail
 
@@ -27,14 +29,33 @@ fi
 PROFILE="debug"
 BUILD_DEVICE=true
 BUILD_SIM=true
+OUTPUT_DIR=""
 
 for arg in "$@"; do
   case "$arg" in
-    --release)      PROFILE="release" ;;
-    --device-only)  BUILD_SIM=false ;;
-    --sim-only)     BUILD_DEVICE=false ;;
+    --release)          PROFILE="release" ;;
+    --device-only)      BUILD_SIM=false ;;
+    --sim-only)         BUILD_DEVICE=false ;;
+    --output-dir=*)     OUTPUT_DIR="${arg#*=}" ;;
+    --output-dir)       shift; OUTPUT_DIR="$1" ;;
   esac
 done
+
+# Resolve output directories
+SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"   # repo root
+if [[ -n "$OUTPUT_DIR" ]]; then
+  XCFW_OUT="$OUTPUT_DIR/Chatterbox.xcframework"
+  BINDINGS_DIR="$OUTPUT_DIR/ChatterboxFFI"
+  XCODE_XCFW="$OUTPUT_DIR/ChatterboxiOS/Chatterbox.xcframework"
+  XCODE_SWIFT="$OUTPUT_DIR/ChatterboxiOS/ChatterboxiOS/chatterbox.swift"
+else
+  XCFW_OUT="$SCRIPT_DIR/ios/Chatterbox.xcframework"
+  BINDINGS_DIR="$SCRIPT_DIR/ios/Sources/ChatterboxFFI"
+  XCODE_XCFW="$SCRIPT_DIR/ios/ChatterboxiOS/Chatterbox.xcframework"
+  XCODE_SWIFT="$SCRIPT_DIR/ios/ChatterboxiOS/ChatterboxiOS/chatterbox.swift"
+fi
+
+cd "$SCRIPT_DIR"
 
 PROFILE_FLAG=$([[ "$PROFILE" == "release" ]] && echo "--release" || echo "")
 CARGO_ARGS="--lib $PROFILE_FLAG --no-default-features --features ffi"
@@ -49,26 +70,22 @@ build_target() {
 [[ "$BUILD_DEVICE" == true ]] && build_target aarch64-apple-ios
 [[ "$BUILD_SIM"    == true ]] && build_target aarch64-apple-ios-sim
 
-# Generate Swift bindings from whichever lib we just built
+# Generate Swift bindings
 if [[ "$BUILD_SIM" == true ]]; then
   BINDGEN_LIB="target/aarch64-apple-ios-sim/$PROFILE/libchatterbox.a"
 else
   BINDGEN_LIB="target/aarch64-apple-ios/$PROFILE/libchatterbox.a"
 fi
 
-BINDINGS_DIR="ios/Sources/ChatterboxFFI"
 mkdir -p "$BINDINGS_DIR"
 echo "==> Generating Swift bindings -> $BINDINGS_DIR"
 "$CARGO" run --features ffi --bin uniffi-bindgen -- \
   generate --library "$BINDGEN_LIB" --language swift --out-dir "$BINDINGS_DIR"
 
-# Build XCFramework (bundles device + simulator so Xcode picks the right slice)
+# Build XCFramework
 if [[ "$BUILD_DEVICE" == true && "$BUILD_SIM" == true ]]; then
-  XCFW="ios/Chatterbox.xcframework"
-  rm -rf "$XCFW"
-  echo "==> Creating $XCFW"
-  # XCFramework headers must only contain .h/.modulemap — NOT chatterbox.swift
-  # (Swift source files are added directly to the Xcode app target instead)
+  rm -rf "$XCFW_OUT"
+  echo "==> Creating $XCFW_OUT"
   HEADERS_ONLY_DIR="$(mktemp -d)"
   cp "$BINDINGS_DIR"/chatterboxFFI.h "$HEADERS_ONLY_DIR/"
   cp "$BINDINGS_DIR"/chatterboxFFI.modulemap "$HEADERS_ONLY_DIR/"
@@ -77,12 +94,21 @@ if [[ "$BUILD_DEVICE" == true && "$BUILD_SIM" == true ]]; then
     -headers "$HEADERS_ONLY_DIR" \
     -library "target/aarch64-apple-ios-sim/$PROFILE/libchatterbox.a" \
     -headers "$HEADERS_ONLY_DIR" \
-    -output "$XCFW"
+    -output "$XCFW_OUT"
   rm -rf "$HEADERS_ONLY_DIR"
+
+  # Copy into the Xcode project folder (so Xcode finds it at its relative path)
+  if [[ -d "$(dirname "$XCODE_XCFW")" ]]; then
+    rm -rf "$XCODE_XCFW"
+    cp -R "$XCFW_OUT" "$XCODE_XCFW"
+    echo "==> Copied XCFramework -> $XCODE_XCFW"
+  fi
+
+  # Update chatterbox.swift in the app sources
+  if [[ -f "$(dirname "$XCODE_SWIFT")/chatterbox.swift" || -d "$(dirname "$XCODE_SWIFT")" ]]; then
+    cp "$BINDINGS_DIR/chatterbox.swift" "$XCODE_SWIFT"
+    echo "==> Updated chatterbox.swift -> $XCODE_SWIFT"
+  fi
+
   echo "==> Done!"
-  echo ""
-  echo "In Xcode:"
-  echo "  1. Drag ios/Chatterbox.xcframework into your project (check 'Copy if needed')"
-  echo "  2. Add the .swift files from $BINDINGS_DIR to your app target"
-  echo "  3. Add \$(SRCROOT)/ios/Sources/ChatterboxFFI to Swift Compiler -> Import Paths"
 fi
