@@ -1350,46 +1350,60 @@ fn draw_messages(f: &mut Frame, messages: &[Message], area: Rect, ui: &ChatUI) {
 }
 
 fn draw_key_confirmation(f: &mut Frame, key_conf: &KeyConfirmation, area: Rect) {
-    // Calculate popup size and position (centered)
-    let popup_width = 60.min(area.width - 4);
-    let popup_height = 10.min(area.height - 4);
-
-    let popup_x = (area.width - popup_width) / 2;
-    let popup_y = (area.height - popup_height) / 2;
-
-    let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
-
-    // Create popup with border
-    let popup_block = Block::default()
-        .title("Unrecognized OMEMO Key")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow));
-
-    f.render_widget(Clear, popup_area); // Clear the area first
-    f.render_widget(popup_block, popup_area);
-
-    // Create inner area for content
-    let inner_area = popup_area.inner(Margin {
-        vertical: 1,
-        horizontal: 2,
-    });
-
-    // Format the content
     let device_info = key_conf
         .device_id
         .as_ref()
         .map_or(String::new(), |id| format!(" (Device ID: {})", id));
 
-    let content = vec![
+    // Size the popup to fit the fingerprint line (border=2, h-margins=4 → 6 overhead cols).
+    let fingerprint_line = format!("Key fingerprint: {}", key_conf.fingerprint);
+    let desired_popup_width = (fingerprint_line.len() as u16 + 6).max(44);
+    let max_popup_width = area.width.saturating_sub(4);
+    let popup_width = desired_popup_width.min(max_popup_width);
+
+    // When the terminal is too narrow to show the fingerprint on one line, split it in two.
+    let inner_width = popup_width.saturating_sub(6) as usize;
+    let fingerprint_lines: Vec<String> = if fingerprint_line.len() <= inner_width {
+        vec![fingerprint_line]
+    } else {
+        // Split the hex-colon string at roughly the midpoint on a colon boundary.
+        let fp = &key_conf.fingerprint;
+        let mid = fp.len() / 2;
+        let split = fp[..mid].rfind(':').map(|i| i + 1).unwrap_or(mid);
+        vec![
+            "Key fingerprint:".to_string(),
+            format!("  {}", &fp[..split.saturating_sub(1)]),
+            format!("  {}", &fp[split..]),
+        ]
+    };
+
+    let mut content: Vec<String> = vec![
         format!("Contact: {}{}", key_conf.contact, device_info),
         "".to_string(),
-        format!("Key fingerprint: {}", key_conf.fingerprint),
-        "".to_string(),
-        "Do you want to accept this key?".to_string(),
-        "Press [Y] to accept or [N] to reject".to_string(),
     ];
+    content.extend(fingerprint_lines);
+    content.push("".to_string());
+    content.push("Do you want to accept this key?".to_string());
+    content.push("Press [Y] to accept or [N] to reject".to_string());
 
-    // Display content as a list
+    let popup_height = (content.len() as u16 + 2).min(area.height.saturating_sub(4));
+    let popup_x = (area.width - popup_width) / 2;
+    let popup_y = (area.height - popup_height) / 2;
+    let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
+
+    let popup_block = Block::default()
+        .title("Unrecognized OMEMO Key")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+
+    f.render_widget(Clear, popup_area);
+    f.render_widget(popup_block, popup_area);
+
+    let inner_area = popup_area.inner(Margin {
+        vertical: 1,
+        horizontal: 2,
+    });
+
     let content_list = List::new(
         content
             .iter()
