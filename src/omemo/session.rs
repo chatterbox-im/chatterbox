@@ -129,7 +129,9 @@ impl OmemoSessionState {
 
     /// True when the inner session has been cryptographically initialised.
     pub fn is_initialized(&self) -> bool {
-        self.as_session().map(|s| s.is_initialized()).unwrap_or(false)
+        self.as_session()
+            .map(|s| s.is_initialized())
+            .unwrap_or(false)
     }
 
     /// True when the entry needs a fresh outbound PreKey — either because the
@@ -137,7 +139,10 @@ impl OmemoSessionState {
     /// because we are proactively recovering from repeated MAC failures
     /// (`RecoveryPreKeySent`).
     pub fn needs_rebuild(&self) -> bool {
-        matches!(self, Self::PeerResetPending | Self::RecoveryPreKeySent { .. })
+        matches!(
+            self,
+            Self::PeerResetPending | Self::RecoveryPreKeySent { .. }
+        )
     }
 
     /// True when this entry represents an in-progress recovery attempt.

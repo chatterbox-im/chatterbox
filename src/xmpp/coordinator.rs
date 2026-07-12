@@ -915,9 +915,21 @@ fn build_omemo_stanza(
     encrypted_message: &crate::omemo::protocol::OmemoMessage,
 ) -> Element {
     let mut message_element = Element::builder("message", "jabber:client").build();
-    message_element.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, "id".try_into().unwrap(), id);
-    message_element.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, "to".try_into().unwrap(), to);
-    message_element.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, "type".try_into().unwrap(), "chat");
+    message_element.set_attr(
+        xmpp_parsers::minidom::rxml::Namespace::NONE,
+        "id".try_into().unwrap(),
+        id,
+    );
+    message_element.set_attr(
+        xmpp_parsers::minidom::rxml::Namespace::NONE,
+        "to".try_into().unwrap(),
+        to,
+    );
+    message_element.set_attr(
+        xmpp_parsers::minidom::rxml::Namespace::NONE,
+        "type".try_into().unwrap(),
+        "chat",
+    );
 
     // Receipt request
     message_element.append_child(Element::builder("request", custom_ns::RECEIPTS).build());
@@ -927,13 +939,25 @@ fn build_omemo_stanza(
     // Encrypted element
     let mut encrypted_element = Element::builder("encrypted", custom_ns::OMEMO_V1).build();
     let mut header_element = Element::builder("header", custom_ns::OMEMO_V1).build();
-    header_element.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, "sid".try_into().unwrap(), &encrypted_message.sender_device_id.to_string());
+    header_element.set_attr(
+        xmpp_parsers::minidom::rxml::Namespace::NONE,
+        "sid".try_into().unwrap(),
+        &encrypted_message.sender_device_id.to_string(),
+    );
 
     for (device_id, encrypted_key) in &encrypted_message.encrypted_keys {
         let mut key_element = Element::builder("key", custom_ns::OMEMO_V1).build();
-        key_element.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, "rid".try_into().unwrap(), &device_id.to_string());
+        key_element.set_attr(
+            xmpp_parsers::minidom::rxml::Namespace::NONE,
+            "rid".try_into().unwrap(),
+            &device_id.to_string(),
+        );
         if encrypted_message.prekey_devices.contains(device_id) {
-            key_element.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, "prekey".try_into().unwrap(), "true");
+            key_element.set_attr(
+                xmpp_parsers::minidom::rxml::Namespace::NONE,
+                "prekey".try_into().unwrap(),
+                "true",
+            );
         }
         key_element
             .append_text_node(&base64::engine::general_purpose::STANDARD.encode(encrypted_key));
@@ -956,8 +980,16 @@ fn build_omemo_stanza(
 
     // EME indicator
     let mut eme_element = Element::builder("encryption", "urn:xmpp:eme:0").build();
-    eme_element.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, "namespace".try_into().unwrap(), custom_ns::OMEMO_V1);
-    eme_element.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, "name".try_into().unwrap(), "OMEMO");
+    eme_element.set_attr(
+        xmpp_parsers::minidom::rxml::Namespace::NONE,
+        "namespace".try_into().unwrap(),
+        custom_ns::OMEMO_V1,
+    );
+    eme_element.set_attr(
+        xmpp_parsers::minidom::rxml::Namespace::NONE,
+        "name".try_into().unwrap(),
+        "OMEMO",
+    );
     message_element.append_child(eme_element);
 
     // Body fallback
@@ -1491,7 +1523,11 @@ mod tests {
             )
             .build();
 
-        event_tx.send(tokio_xmpp::Event::Stanza(xmpp_parsers::stanza::Stanza::try_from(inbound).unwrap())).unwrap();
+        event_tx
+            .send(tokio_xmpp::Event::Stanza(
+                xmpp_parsers::stanza::Stanza::try_from(inbound).unwrap(),
+            ))
+            .unwrap();
 
         // Wait for coordinator to process and deliver to UI
         let ui_msg = timeout(Duration::from_millis(200), msg_rx.recv())
@@ -1533,7 +1569,11 @@ mod tests {
             .append(Element::builder("composing", custom_ns::CHATSTATES).build())
             .build();
 
-        event_tx.send(tokio_xmpp::Event::Stanza(xmpp_parsers::stanza::Stanza::try_from(inbound).unwrap())).unwrap();
+        event_tx
+            .send(tokio_xmpp::Event::Stanza(
+                xmpp_parsers::stanza::Stanza::try_from(inbound).unwrap(),
+            ))
+            .unwrap();
 
         // Should NOT produce a UI message
         let result = timeout(Duration::from_millis(100), msg_rx.recv()).await;
@@ -1585,7 +1625,9 @@ mod tests {
             .build();
 
         event_tx
-            .send(tokio_xmpp::Event::Stanza(xmpp_parsers::stanza::Stanza::try_from(receipt_stanza).unwrap()))
+            .send(tokio_xmpp::Event::Stanza(
+                xmpp_parsers::stanza::Stanza::try_from(receipt_stanza).unwrap(),
+            ))
             .unwrap();
 
         // Should receive a UI update with Delivered status
@@ -1630,7 +1672,9 @@ mod tests {
             .build();
 
         event_tx
-            .send(tokio_xmpp::Event::Stanza(xmpp_parsers::stanza::Stanza::try_from(receipt_stanza).unwrap()))
+            .send(tokio_xmpp::Event::Stanza(
+                xmpp_parsers::stanza::Stanza::try_from(receipt_stanza).unwrap(),
+            ))
             .unwrap();
 
         // Should NOT produce a UI message
@@ -1682,7 +1726,9 @@ mod tests {
             .build();
 
         event_tx
-            .send(tokio_xmpp::Event::Stanza(xmpp_parsers::stanza::Stanza::try_from(receipt_stanza).unwrap()))
+            .send(tokio_xmpp::Event::Stanza(
+                xmpp_parsers::stanza::Stanza::try_from(receipt_stanza).unwrap(),
+            ))
             .unwrap();
 
         let ui_msg = timeout(Duration::from_millis(200), msg_rx.recv())
@@ -1759,7 +1805,11 @@ mod tests {
             .append(Element::builder("composing", custom_ns::CHATSTATES).build())
             .build();
 
-        event_tx.send(tokio_xmpp::Event::Stanza(xmpp_parsers::stanza::Stanza::try_from(inbound).unwrap())).unwrap();
+        event_tx
+            .send(tokio_xmpp::Event::Stanza(
+                xmpp_parsers::stanza::Stanza::try_from(inbound).unwrap(),
+            ))
+            .unwrap();
 
         let (jid, status) = timeout(Duration::from_millis(200), typing_rx.recv())
             .await
@@ -1798,8 +1848,9 @@ mod tests {
         // Simulate Online event
         let bound_jid: tokio_xmpp::jid::Jid = "test@example.org/resource123".parse().unwrap();
         event_tx
-            .send(
-            tokio_xmpp::Event::Online { features: Default::default(), bound_jid,
+            .send(tokio_xmpp::Event::Online {
+                features: Default::default(),
+                bound_jid,
                 resumed: false,
             })
             .unwrap();
@@ -1828,8 +1879,9 @@ mod tests {
 
         let bound_jid: tokio_xmpp::jid::Jid = "test@example.org/res1".parse().unwrap();
         event_tx
-            .send(
-            tokio_xmpp::Event::Online { features: Default::default(), bound_jid: bound_jid.clone(),
+            .send(tokio_xmpp::Event::Online {
+                features: Default::default(),
+                bound_jid: bound_jid.clone(),
                 resumed: false,
             })
             .unwrap();
@@ -1839,8 +1891,9 @@ mod tests {
 
         // Send another Online — should not panic or error
         event_tx
-            .send(
-            tokio_xmpp::Event::Online { features: Default::default(), bound_jid,
+            .send(tokio_xmpp::Event::Online {
+                features: Default::default(),
+                bound_jid,
                 resumed: true,
             })
             .unwrap();
@@ -1881,7 +1934,11 @@ mod tests {
             .attr("from".try_into().unwrap(), "server.example.org")
             .build();
 
-        event_tx.send(tokio_xmpp::Event::Stanza(xmpp_parsers::stanza::Stanza::try_from(iq_result).unwrap())).unwrap();
+        event_tx
+            .send(tokio_xmpp::Event::Stanza(
+                xmpp_parsers::stanza::Stanza::try_from(iq_result).unwrap(),
+            ))
+            .unwrap();
 
         // Give coordinator time to process without panic
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1939,7 +1996,9 @@ mod tests {
             .build();
 
         event_tx
-            .send(tokio_xmpp::Event::Stanza(xmpp_parsers::stanza::Stanza::try_from(carbon_wrapper).unwrap()))
+            .send(tokio_xmpp::Event::Stanza(
+                xmpp_parsers::stanza::Stanza::try_from(carbon_wrapper).unwrap(),
+            ))
             .unwrap();
 
         let ui_msg = timeout(Duration::from_millis(200), msg_rx.recv())
@@ -2000,7 +2059,9 @@ mod tests {
             .build();
 
         event_tx
-            .send(tokio_xmpp::Event::Stanza(xmpp_parsers::stanza::Stanza::try_from(carbon_wrapper).unwrap()))
+            .send(tokio_xmpp::Event::Stanza(
+                xmpp_parsers::stanza::Stanza::try_from(carbon_wrapper).unwrap(),
+            ))
             .unwrap();
 
         let ui_msg = timeout(Duration::from_millis(200), msg_rx.recv())
@@ -2080,7 +2141,11 @@ mod tests {
             .append(Element::builder("request", custom_ns::RECEIPTS).build())
             .build();
 
-        event_tx.send(tokio_xmpp::Event::Stanza(xmpp_parsers::stanza::Stanza::try_from(inbound).unwrap())).unwrap();
+        event_tx
+            .send(tokio_xmpp::Event::Stanza(
+                xmpp_parsers::stanza::Stanza::try_from(inbound).unwrap(),
+            ))
+            .unwrap();
 
         // Drain the UI message
         let _ = timeout(Duration::from_millis(100), msg_rx.recv()).await;
@@ -2232,7 +2297,11 @@ mod tests {
             .attr("from".try_into().unwrap(), "alice@example.org/phone")
             .build();
 
-        event_tx.send(tokio_xmpp::Event::Stanza(xmpp_parsers::stanza::Stanza::try_from(presence).unwrap())).unwrap();
+        event_tx
+            .send(tokio_xmpp::Event::Stanza(
+                xmpp_parsers::stanza::Stanza::try_from(presence).unwrap(),
+            ))
+            .unwrap();
 
         // Give it time to process
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -2277,7 +2346,11 @@ mod tests {
                         .build(),
                 )
                 .build();
-            event_tx.send(tokio_xmpp::Event::Stanza(xmpp_parsers::stanza::Stanza::try_from(inbound).unwrap())).unwrap();
+            event_tx
+                .send(tokio_xmpp::Event::Stanza(
+                    xmpp_parsers::stanza::Stanza::try_from(inbound).unwrap(),
+                ))
+                .unwrap();
         }
 
         // Give coordinator time to process all 5 events
@@ -2340,7 +2413,11 @@ mod tests {
                         .build(),
                 )
                 .build();
-            event_tx.send(tokio_xmpp::Event::Stanza(xmpp_parsers::stanza::Stanza::try_from(inbound).unwrap())).unwrap();
+            event_tx
+                .send(tokio_xmpp::Event::Stanza(
+                    xmpp_parsers::stanza::Stanza::try_from(inbound).unwrap(),
+                ))
+                .unwrap();
         }
 
         // Wait for processing

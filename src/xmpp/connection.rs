@@ -6,7 +6,7 @@ use anyhow::{anyhow, Result};
 use log::{debug, error, info, warn};
 use std::str::FromStr;
 use std::time::Duration;
-use tokio_xmpp::{Client as XMPPAsyncClient, jid::BareJid as TokioBareJid};
+use tokio_xmpp::{jid::BareJid as TokioBareJid, Client as XMPPAsyncClient};
 
 /// Enum for representing client state
 #[derive(Debug, Clone, PartialEq)]
@@ -59,8 +59,7 @@ impl XMPPClient {
         let client = XMPPAsyncClient::new(tokio_jid.clone(), password);
         // Spawn the transport actor — it owns the Client exclusively.
         // No mutex needed: the transport multiplexes reads/writes via channels.
-        let transport_handle =
-            super::transport::spawn_transport(client);
+        let transport_handle = super::transport::spawn_transport(client);
         self.stanza_tx = Some(transport_handle.stanza_tx.clone());
 
         // Spawn the event processing loop — lives for the entire session,
@@ -126,7 +125,9 @@ impl XMPPClient {
         // Enable message carbons
         match self.enable_carbons().await {
             Ok(true) => info!("Message carbons enabled successfully during connect"),
-            Ok(false) => warn!("Message carbons enable request was sent but returned unexpected result"),
+            Ok(false) => {
+                warn!("Message carbons enable request was sent but returned unexpected result")
+            }
             Err(e) => error!("Failed to enable message carbons during connect: {}", e),
         }
 
@@ -202,14 +203,19 @@ mod tests {
     async fn test_wait_for_connection_success() {
         let (tx, rx) = oneshot::channel::<Result<(), String>>();
         tx.send(Ok(())).unwrap();
-        let result = client().wait_for_connection(Duration::from_secs(1), rx).await;
+        let result = client()
+            .wait_for_connection(Duration::from_secs(1), rx)
+            .await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn test_wait_for_connection_propagates_error_message() {
         let (tx, rx) = oneshot::channel::<Result<(), String>>();
-        tx.send(Err("TLS certificate is not trusted by this system".to_string())).unwrap();
+        tx.send(Err(
+            "TLS certificate is not trusted by this system".to_string()
+        ))
+        .unwrap();
         let err = client()
             .wait_for_connection(Duration::from_secs(1), rx)
             .await

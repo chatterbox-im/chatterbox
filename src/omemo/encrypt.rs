@@ -84,9 +84,7 @@ impl OmemoManager {
             self.sessions.remove(&key);
             {
                 let storage_guard = self.storage.lock().await;
-                if let Err(e) = storage_guard
-                    .clear_session_rebuild_needed(&key.0, key.1)
-                {
+                if let Err(e) = storage_guard.clear_session_rebuild_needed(&key.0, key.1) {
                     warn!("Failed to clear rebuild flag for {:?}: {}", key, e);
                 }
                 // Also clear prekey-pending (set by RecoveryPreKeySent path).
@@ -148,25 +146,32 @@ impl OmemoManager {
         // may reference an OPK that the remote has already consumed in a previous
         // session; using a stale OPK causes an irrecoverable "missing one-time
         // prekey" failure on the receiver.
-        let label = if needs_rebuild { "Session rebuild" } else { "New session" };
+        let label = if needs_rebuild {
+            "Session rebuild"
+        } else {
+            "New session"
+        };
         info!(
             "SESSION_DEBUG: {} — force-fetching bundle from server for {}:{}",
             label, bare_jid, remote_device_id
         );
-        let mut remote_identity =
-            match self
-                .fetch_device_identity_from_server(&bare_jid, remote_device_id)
-                .await
-            {
-                Ok(identity) => identity,
-                Err(e) => {
-                    warn!(
-                        "Failed to fetch fresh bundle for {} of {}:{}: {} — falling back to cache",
-                        label.to_lowercase(), bare_jid, remote_device_id, e
-                    );
-                    self.get_device_identity(&bare_jid, remote_device_id).await?
-                }
-            };
+        let mut remote_identity = match self
+            .fetch_device_identity_from_server(&bare_jid, remote_device_id)
+            .await
+        {
+            Ok(identity) => identity,
+            Err(e) => {
+                warn!(
+                    "Failed to fetch fresh bundle for {} of {}:{}: {} — falling back to cache",
+                    label.to_lowercase(),
+                    bare_jid,
+                    remote_device_id,
+                    e
+                );
+                self.get_device_identity(&bare_jid, remote_device_id)
+                    .await?
+            }
+        };
         info!(
             "SESSION_DEBUG: Successfully retrieved device identity for {}:{}",
             bare_jid, remote_device_id
@@ -877,13 +882,19 @@ impl OmemoManager {
                             // so the recovery marker does not resurface on the next restart.
                             {
                                 let storage_guard = self.storage.lock().await;
-                                if let Err(e) = storage_guard
-                                    .clear_prekey_pending(&device_key.0, device_key.1)
+                                if let Err(e) =
+                                    storage_guard.clear_prekey_pending(&device_key.0, device_key.1)
                                 {
-                                    warn!("Failed to clear prekey-pending flag for {}:{}: {}", device_key.0, device_key.1, e);
+                                    warn!(
+                                        "Failed to clear prekey-pending flag for {}:{}: {}",
+                                        device_key.0, device_key.1, e
+                                    );
                                 }
                             }
-                            info!("ENCRYPT_DEBUG: Sent recovery PreKey to {}:{}", jid, device_id);
+                            info!(
+                                "ENCRYPT_DEBUG: Sent recovery PreKey to {}:{}",
+                                jid, device_id
+                            );
                         }
                     }
                     Err(e) => {

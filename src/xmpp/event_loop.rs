@@ -302,7 +302,11 @@ impl XMPPClient {
                                     .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
                                 let content = body.text();
 
-                                debug!("Found message body from {} ({} bytes)", from, content.len());
+                                debug!(
+                                    "Found message body from {} ({} bytes)",
+                                    from,
+                                    content.len()
+                                );
 
                                 if !content.is_empty() {
                                     let sender_bare_jid =
@@ -437,7 +441,9 @@ impl XMPPClient {
                     }
                 }
                 XMPPEvent::Online {
-                    bound_jid,                    features: _,                    resumed,
+                    bound_jid,
+                    features: _,
+                    resumed,
                 } => {
                     // `reconnecting` is set when we saw an explicit Disconnected event.
                     // `!resumed && seen_online_event` catches the case where SM resumption
@@ -582,13 +588,13 @@ mod tests {
         mpsc::Receiver<Message>,
         oneshot::Receiver<Result<(), String>>,
     ) {
-        let (stanza_tx, stanza_rx) =
-            mpsc::unbounded_channel::<xmpp_parsers::minidom::Element>();
+        let (stanza_tx, stanza_rx) = mpsc::unbounded_channel::<xmpp_parsers::minidom::Element>();
         let (event_tx, event_rx) = mpsc::unbounded_channel::<XMPPEvent>();
         let (msg_tx, msg_rx) = mpsc::channel::<Message>(16);
-        let pending_receipts = Arc::new(TokioMutex::new(
-            std::collections::HashMap::<String, PendingMessage>::new(),
-        ));
+        let pending_receipts = Arc::new(TokioMutex::new(std::collections::HashMap::<
+            String,
+            PendingMessage,
+        >::new()));
         let iq_registry = Arc::new(TokioMutex::new(IqResponseRegistry::new()));
         let (_late_tx, late_rx) = watch::channel(LateState::default());
         let (online_tx, online_rx) = oneshot::channel::<Result<(), String>>();
@@ -736,9 +742,7 @@ mod tests {
         let iq = xmpp_parsers::minidom::Element::builder("iq", "jabber:client")
             .attr("type".try_into().unwrap(), "set")
             .attr("id".try_into().unwrap(), iq_id)
-            .append(
-                xmpp_parsers::minidom::Element::builder("enable", custom_ns::CARBONS).build(),
-            )
+            .append(xmpp_parsers::minidom::Element::builder("enable", custom_ns::CARBONS).build())
             .build();
 
         assert_eq!(iq.name(), "iq");
@@ -756,6 +760,10 @@ mod tests {
     fn test_reconnect_presence_is_available() {
         let pres = xmpp_parsers::minidom::Element::builder("presence", "jabber:client").build();
         assert_eq!(pres.name(), "presence");
-        assert_eq!(pres.attr("type"), None, "available presence must have no type attr");
+        assert_eq!(
+            pres.attr("type"),
+            None,
+            "available presence must have no type attr"
+        );
     }
 }

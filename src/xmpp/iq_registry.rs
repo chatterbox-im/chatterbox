@@ -114,7 +114,10 @@ impl IqResponseRegistry {
     pub fn cancel_all(&mut self) {
         let count = self.pending.len();
         if count > 0 {
-            debug!("Cancelling {} pending IQ request(s) due to connection drop", count);
+            debug!(
+                "Cancelling {} pending IQ request(s) due to connection drop",
+                count
+            );
         }
         self.pending.clear();
         self.mam_collectors.clear();

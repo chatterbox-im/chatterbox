@@ -280,7 +280,10 @@ mod proptest_session {
         bob_jid: &str,
         bob_did: u32,
     ) -> bool {
-        let Ok(msg_a) = alice.encrypt_message(bob_jid, "convergence-check-a2b").await else {
+        let Ok(msg_a) = alice
+            .encrypt_message(bob_jid, "convergence-check-a2b")
+            .await
+        else {
             return false;
         };
         let Ok(dec_a) = bob.decrypt_message(alice_jid, alice_did, &msg_a).await else {
@@ -289,7 +292,10 @@ mod proptest_session {
         if dec_a != "convergence-check-a2b" {
             return false;
         }
-        let Ok(msg_b) = bob.encrypt_message(alice_jid, "convergence-check-b2a").await else {
+        let Ok(msg_b) = bob
+            .encrypt_message(alice_jid, "convergence-check-b2a")
+            .await
+        else {
             return false;
         };
         let Ok(dec_b) = alice.decrypt_message(bob_jid, bob_did, &msg_b).await else {

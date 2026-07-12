@@ -27,11 +27,11 @@ pub mod device_id;
 mod encrypt;
 #[cfg(test)]
 mod encrypt_decrypt_test;
-#[cfg(test)]
-mod session_proptest;
 mod lifecycle;
 pub mod protocol;
 pub mod session;
+#[cfg(test)]
+mod session_proptest;
 pub mod storage;
 pub mod wire;
 

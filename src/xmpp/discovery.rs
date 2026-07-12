@@ -43,9 +43,21 @@ impl ServiceDiscovery {
     pub async fn send_disco_info_request(&self, jid: &str) -> Result<()> {
         let iq_id = format!("disco_info_{}", uuid::Uuid::new_v4());
         let mut iq = Element::builder("iq", "jabber:client").build();
-        iq.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, "type".try_into().unwrap(), "get");
-        iq.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, "to".try_into().unwrap(), jid);
-        iq.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, "id".try_into().unwrap(), &iq_id);
+        iq.set_attr(
+            xmpp_parsers::minidom::rxml::Namespace::NONE,
+            "type".try_into().unwrap(),
+            "get",
+        );
+        iq.set_attr(
+            xmpp_parsers::minidom::rxml::Namespace::NONE,
+            "to".try_into().unwrap(),
+            jid,
+        );
+        iq.set_attr(
+            xmpp_parsers::minidom::rxml::Namespace::NONE,
+            "id".try_into().unwrap(),
+            &iq_id,
+        );
 
         let query = Element::builder("query", "http://jabber.org/protocol/disco#info").build();
         iq.append_child(query);
@@ -60,9 +72,21 @@ impl ServiceDiscovery {
     pub async fn send_disco_items_request(&self, jid: &str) -> Result<()> {
         let iq_id = format!("disco_items_{}", uuid::Uuid::new_v4());
         let mut iq = Element::builder("iq", "jabber:client").build();
-        iq.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, "type".try_into().unwrap(), "get");
-        iq.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, "to".try_into().unwrap(), jid);
-        iq.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, "id".try_into().unwrap(), &iq_id);
+        iq.set_attr(
+            xmpp_parsers::minidom::rxml::Namespace::NONE,
+            "type".try_into().unwrap(),
+            "get",
+        );
+        iq.set_attr(
+            xmpp_parsers::minidom::rxml::Namespace::NONE,
+            "to".try_into().unwrap(),
+            jid,
+        );
+        iq.set_attr(
+            xmpp_parsers::minidom::rxml::Namespace::NONE,
+            "id".try_into().unwrap(),
+            &iq_id,
+        );
 
         let query = Element::builder("query", "http://jabber.org/protocol/disco#items").build();
         iq.append_child(query);
@@ -319,9 +343,21 @@ impl ServiceDiscovery {
         let id = stanza.attr("id").unwrap_or("");
 
         let mut result_iq = Element::builder("iq", "jabber:client").build();
-        result_iq.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, "type".try_into().unwrap(), "result");
-        result_iq.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, "to".try_into().unwrap(), from);
-        result_iq.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, "id".try_into().unwrap(), id);
+        result_iq.set_attr(
+            xmpp_parsers::minidom::rxml::Namespace::NONE,
+            "type".try_into().unwrap(),
+            "result",
+        );
+        result_iq.set_attr(
+            xmpp_parsers::minidom::rxml::Namespace::NONE,
+            "to".try_into().unwrap(),
+            from,
+        );
+        result_iq.set_attr(
+            xmpp_parsers::minidom::rxml::Namespace::NONE,
+            "id".try_into().unwrap(),
+            id,
+        );
 
         let mut query = Element::builder("query", "http://jabber.org/protocol/disco#info").build();
 
@@ -333,7 +369,9 @@ impl ServiceDiscovery {
         query.append_child(identity);
 
         for feature in Self::supported_features() {
-            let feature_elem = Element::builder("feature", "").attr("var".try_into().unwrap(), feature).build();
+            let feature_elem = Element::builder("feature", "")
+                .attr("var".try_into().unwrap(), feature)
+                .build();
             query.append_child(feature_elem);
         }
 
@@ -407,7 +445,11 @@ mod tests {
                 .attr("type".try_into().unwrap(), *type_)
                 .build();
             if let Some(n) = name {
-                id.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, "name".try_into().unwrap(), *n);
+                id.set_attr(
+                    xmpp_parsers::minidom::rxml::Namespace::NONE,
+                    "name".try_into().unwrap(),
+                    *n,
+                );
             }
             query.append_child(id);
         }

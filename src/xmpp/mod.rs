@@ -280,7 +280,10 @@ impl XMPPClient {
     }
 
     /// Process an OMEMO message carbon (sent or received via XEP-0280)
-    pub async fn process_omemo_carbon(&self, stanza: &xmpp_parsers::minidom::Element) -> Result<()> {
+    pub async fn process_omemo_carbon(
+        &self,
+        stanza: &xmpp_parsers::minidom::Element,
+    ) -> Result<()> {
         self.process_carbon(stanza).await
     }
 
@@ -342,7 +345,10 @@ pub fn publish_late_state(client: &XMPPClient) {
 }
 
 /// Verify OMEMO stanza structure for security
-pub fn verify_omemo_stanza(stanza: &xmpp_parsers::minidom::Element, _content: &str) -> Result<(), String> {
+pub fn verify_omemo_stanza(
+    stanza: &xmpp_parsers::minidom::Element,
+    _content: &str,
+) -> Result<(), String> {
     debug!("Verifying OMEMO stanza structure for security compliance");
 
     let mut missing_elements = Vec::new();

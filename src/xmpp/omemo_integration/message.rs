@@ -4,8 +4,8 @@ use log::{debug, error, info, trace, warn};
 use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
 
-use xmpp_parsers::minidom::Element;
 use xmpp_parsers::jid::BareJid as JidBare;
+use xmpp_parsers::minidom::Element;
 
 use crate::omemo::crypto;
 use crate::omemo::OmemoError;

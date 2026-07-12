@@ -530,25 +530,25 @@ impl OmemoManager {
             signed_pre_key_pair,
             signed_pre_key_signature,
             one_time_pre_key_pairs,
-        signed_pre_key_history: {
-            // Move the outgoing SPK into history so peers that built a
-            // PreKeySignalMessage against it before the rotation can still
-            // establish a session.  Trim to the last SPK_HISTORY_DEPTH entries.
-            const SPK_HISTORY_DEPTH: usize = 5;
-            let mut history = current_bundle.signed_pre_key_history.clone();
-            history.insert(
-                current_bundle.signed_pre_key_id,
-                current_bundle.signed_pre_key_pair.clone(),
-            );
-            if history.len() > SPK_HISTORY_DEPTH {
-                let mut ids: Vec<u32> = history.keys().copied().collect();
-                ids.sort_unstable();
-                for old_id in ids.iter().take(ids.len() - SPK_HISTORY_DEPTH) {
-                    history.remove(old_id);
+            signed_pre_key_history: {
+                // Move the outgoing SPK into history so peers that built a
+                // PreKeySignalMessage against it before the rotation can still
+                // establish a session.  Trim to the last SPK_HISTORY_DEPTH entries.
+                const SPK_HISTORY_DEPTH: usize = 5;
+                let mut history = current_bundle.signed_pre_key_history.clone();
+                history.insert(
+                    current_bundle.signed_pre_key_id,
+                    current_bundle.signed_pre_key_pair.clone(),
+                );
+                if history.len() > SPK_HISTORY_DEPTH {
+                    let mut ids: Vec<u32> = history.keys().copied().collect();
+                    ids.sort_unstable();
+                    for old_id in ids.iter().take(ids.len() - SPK_HISTORY_DEPTH) {
+                        history.remove(old_id);
+                    }
                 }
-            }
-            history
-        },
+                history
+            },
         };
 
         let storage_guard = self.storage.lock().await;
@@ -581,7 +581,10 @@ impl OmemoManager {
             .sessions
             .iter()
             .filter_map(|(key, state)| {
-                if matches!(state, crate::omemo::session::OmemoSessionState::RecoveryPreKeySent { .. }) {
+                if matches!(
+                    state,
+                    crate::omemo::session::OmemoSessionState::RecoveryPreKeySent { .. }
+                ) {
                     Some(key.clone())
                 } else {
                     None
@@ -681,11 +684,17 @@ impl OmemoManager {
                     error!("RESET: Failed to publish clean device list: {}", e);
                     return Err(anyhow!("Failed to publish clean device list: {}", e));
                 }
-                info!("RESET: Published clean device list with only device {}", self.device_id);
+                info!(
+                    "RESET: Published clean device list with only device {}",
+                    self.device_id
+                );
                 // Best-effort: delete the bundle node for each removed device
                 for stale_id in &stale_ids {
                     if let Err(e) = self.pubsub.delete_bundle(*stale_id).await {
-                        warn!("RESET: Failed to delete bundle for device {}: {}", stale_id, e);
+                        warn!(
+                            "RESET: Failed to delete bundle for device {}: {}",
+                            stale_id, e
+                        );
                     }
                 }
             } else if !device_list.contains(&self.device_id) {
@@ -1069,10 +1078,11 @@ impl OmemoManager {
                 .insert(key.clone(), OmemoSessionState::PeerResetPending);
             {
                 let storage_guard = self.storage.lock().await;
-                if let Err(e) = storage_guard
-                    .set_session_rebuild_needed(&bare_jid, device_id)
-                {
-                    warn!("Failed to persist rebuild flag for {}:{}: {}", bare_jid, device_id, e);
+                if let Err(e) = storage_guard.set_session_rebuild_needed(&bare_jid, device_id) {
+                    warn!(
+                        "Failed to persist rebuild flag for {}:{}: {}",
+                        bare_jid, device_id, e
+                    );
                 }
             }
             // Remember to restore Trusted after the rebuild

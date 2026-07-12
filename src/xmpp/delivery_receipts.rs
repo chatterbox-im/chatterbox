@@ -82,7 +82,8 @@ impl super::XMPPClient {
         let recipient_str: String = recipient_jid.into();
 
         // Extract the bare JID (remove resource part) for OMEMO checks
-        let bare_jid = recipient_str.parse::<xmpp_parsers::jid::Jid>()
+        let bare_jid = recipient_str
+            .parse::<xmpp_parsers::jid::Jid>()
             .map(|j| j.to_bare().to_string())
             .unwrap_or_else(|_| recipient_str.clone());
 

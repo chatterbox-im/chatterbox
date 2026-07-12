@@ -939,7 +939,10 @@ impl DoubleRatchet {
         // decision, since such a message carries an older ratchet key and counter.
         let skip_index = (signal_msg.ratchet_key.clone(), signal_msg.counter);
         let message_key = if let Some(stored_key) = state.skipped_message_keys.remove(&skip_index) {
-            debug!("Double Ratchet decrypt_key: using stored skipped message key for counter {}", signal_msg.counter);
+            debug!(
+                "Double Ratchet decrypt_key: using stored skipped message key for counter {}",
+                signal_msg.counter
+            );
             stored_key
         } else {
             // Check if we need a DH ratchet step

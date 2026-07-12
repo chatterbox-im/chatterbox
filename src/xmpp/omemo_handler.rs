@@ -360,19 +360,21 @@ impl XMPPClient {
                         // Send a receipt if requested
                         if element.has_child("request", custom_ns::RECEIPTS) {
                             if let Some(stanza_tx) = &self.stanza_tx {
-                                let receipt =
-                                    xmpp_parsers::minidom::Element::builder("message", NS_JABBER_CLIENT)
-                                        .attr("to".try_into().unwrap(), from)
-                                        .attr("id".try_into().unwrap(), &uuid::Uuid::new_v4().to_string())
-                                        .append(
-                                            xmpp_parsers::minidom::Element::builder(
-                                                "received",
-                                                custom_ns::RECEIPTS,
-                                            )
-                                            .attr("id".try_into().unwrap(), id)
-                                            .build(),
-                                        )
-                                        .build();
+                                let receipt = xmpp_parsers::minidom::Element::builder(
+                                    "message",
+                                    NS_JABBER_CLIENT,
+                                )
+                                .attr("to".try_into().unwrap(), from)
+                                .attr("id".try_into().unwrap(), &uuid::Uuid::new_v4().to_string())
+                                .append(
+                                    xmpp_parsers::minidom::Element::builder(
+                                        "received",
+                                        custom_ns::RECEIPTS,
+                                    )
+                                    .attr("id".try_into().unwrap(), id)
+                                    .build(),
+                                )
+                                .build();
 
                                 if let Err(e) = transport::send_stanza(stanza_tx, receipt) {
                                     error!("Failed to send receipt: {}", e);
@@ -763,7 +765,10 @@ pub(crate) async fn prompt_first_untrusted_key(
                 false
             }
             Err(_) => {
-                warn!("Timeout checking trust for {}:{}, assuming not trusted", contact, device_id);
+                warn!(
+                    "Timeout checking trust for {}:{}, assuming not trusted",
+                    contact, device_id
+                );
                 false
             }
         };
@@ -777,11 +782,17 @@ pub(crate) async fn prompt_first_untrusted_key(
             {
                 Ok(Ok(fp)) => fp,
                 Ok(Err(e)) => {
-                    warn!("Failed to get fingerprint for {}:{}: {}", contact, device_id, e);
+                    warn!(
+                        "Failed to get fingerprint for {}:{}: {}",
+                        contact, device_id, e
+                    );
                     continue;
                 }
                 Err(_) => {
-                    warn!("Timeout getting fingerprint for {}:{}, skipping", contact, device_id);
+                    warn!(
+                        "Timeout getting fingerprint for {}:{}, skipping",
+                        contact, device_id
+                    );
                     continue;
                 }
             };
@@ -810,7 +821,10 @@ pub(crate) async fn prompt_first_untrusted_key(
 
             let msg = Message::system(
                 "me",
-                format!("__OMEMO_KEY_VERIFY__:{}:{}:{}", contact, fingerprint, device_id),
+                format!(
+                    "__OMEMO_KEY_VERIFY__:{}:{}:{}",
+                    contact, fingerprint, device_id
+                ),
             );
             if let Err(e) = msg_tx.send(msg).await {
                 error!("Failed to send key verification request to UI: {}", e);

@@ -8,7 +8,9 @@ use log::debug; // Add the debug import
 use log::info; // Add the log import
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState},
+    widgets::{
+        Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState,
+    },
     Frame,
 };
 use std::{
@@ -547,7 +549,11 @@ impl ChatUI {
                         let device_id = row.0.clone();
                         let new_trusted =
                             !matches!(row.2, TrustLevel::Trusted | TrustLevel::Verified);
-                        row.2 = if new_trusted { TrustLevel::Trusted } else { TrustLevel::Untrusted };
+                        row.2 = if new_trusted {
+                            TrustLevel::Trusted
+                        } else {
+                            TrustLevel::Untrusted
+                        };
                         let flag = if new_trusted { "1" } else { "0" };
                         let signal = format!("__SET_DEVICE_TRUST__:{}:{}:{}", jid, device_id, flag);
                         return Ok(Some((String::new(), signal)));
@@ -561,9 +567,14 @@ impl ChatUI {
                                 let device_id = row.0.clone();
                                 let new_trusted =
                                     !matches!(row.2, TrustLevel::Trusted | TrustLevel::Verified);
-                                row.2 = if new_trusted { TrustLevel::Trusted } else { TrustLevel::Untrusted };
+                                row.2 = if new_trusted {
+                                    TrustLevel::Trusted
+                                } else {
+                                    TrustLevel::Untrusted
+                                };
                                 let flag = if new_trusted { "1" } else { "0" };
-                                let signal = format!("__SET_DEVICE_TRUST__:{}:{}:{}", jid, device_id, flag);
+                                let signal =
+                                    format!("__SET_DEVICE_TRUST__:{}:{}:{}", jid, device_id, flag);
                                 return Ok(Some((String::new(), signal)));
                             }
                         }
@@ -1460,11 +1471,7 @@ fn draw_add_contact_dialog(f: &mut Frame, dialog: &ContactAddDialog, area: Rect)
     ));
 }
 
-fn draw_contact_remove_dialog(
-    f: &mut Frame,
-    dialog: &ContactRemoveDialog,
-    area: Rect,
-) {
+fn draw_contact_remove_dialog(f: &mut Frame, dialog: &ContactRemoveDialog, area: Rect) {
     // Calculate popup size and position (centered)
     let popup_width = 60.min(area.width - 4); // Increased from 50 to 60
     let popup_height = 8.min(area.height - 4); // Increased from 6 to 8
@@ -1545,7 +1552,7 @@ fn draw_help_dialog(f: &mut Frame, area: Rect) {
         ("ESC", "Quit application"),
         ("Tab", "Switch between Messages and Contacts"),
         ("Ctrl+S", "Toggle sidebar (contacts panel) visibility"),
-        ("Ctrl+H", "Show this help dialog"),        
+        ("Ctrl+H", "Show this help dialog"),
         ("", ""),
         ("Contacts Navigation", ""),
         (
@@ -1612,19 +1619,15 @@ fn draw_help_dialog(f: &mut Frame, area: Rect) {
     f.render_widget(shortcuts_list, inner_area);
 }
 
-fn draw_device_fingerprints_dialog(
-    f: &mut Frame,
-    dialog: &DeviceFingerprintsDialog,
-    area: Rect,
-) {
+fn draw_device_fingerprints_dialog(f: &mut Frame, dialog: &DeviceFingerprintsDialog, area: Rect) {
     // ── popup geometry ────────────────────────────────────────────────────────
     let popup_width = 84u16.min(area.width.saturating_sub(4));
     let contact_rows = dialog.contact_rows.len() as u16;
     let own_rows = dialog.own_rows.len() as u16;
     // header + contact section header + table header + rows + gap + own section
     // header + table header + rows + footer
-    let popup_height = (4 + contact_rows.max(1) + 4 + own_rows.max(1) + 4)
-        .min(area.height.saturating_sub(4));
+    let popup_height =
+        (4 + contact_rows.max(1) + 4 + own_rows.max(1) + 4).min(area.height.saturating_sub(4));
     let popup_x = (area.width.saturating_sub(popup_width)) / 2;
     let popup_y = (area.height.saturating_sub(popup_height)) / 2;
     let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
@@ -1636,7 +1639,10 @@ fn draw_device_fingerprints_dialog(
         .border_style(Style::default().fg(Color::Blue));
     f.render_widget(outer_block, popup_area);
 
-    let inner = popup_area.inner(Margin { vertical: 1, horizontal: 1 });
+    let inner = popup_area.inner(Margin {
+        vertical: 1,
+        horizontal: 1,
+    });
 
     // ── helper: format a fingerprint to fit in `w` chars ─────────────────────
     fn fmt_fp(fp: &str, w: usize) -> String {
@@ -1658,7 +1664,9 @@ fn draw_device_fingerprints_dialog(
     // ── trust slider helper ───────────────────────────────────────────────────
     fn trust_cell(trust: &TrustLevel) -> (String, Color) {
         match trust {
-            TrustLevel::Trusted | TrustLevel::Verified => ("────● Trusted".to_string(), Color::Green),
+            TrustLevel::Trusted | TrustLevel::Verified => {
+                ("────● Trusted".to_string(), Color::Green)
+            }
             TrustLevel::Untrusted => ("●──── Blocked".to_string(), Color::Red),
             TrustLevel::Undecided => ("──?── Unknown".to_string(), Color::Yellow),
         }
@@ -1690,10 +1698,7 @@ fn draw_device_fingerprints_dialog(
     let header_style = Style::default()
         .fg(Color::Magenta)
         .add_modifier(Modifier::BOLD);
-    let contact_title = dialog
-        .contact_jid
-        .as_deref()
-        .unwrap_or("Contact devices");
+    let contact_title = dialog.contact_jid.as_deref().unwrap_or("Contact devices");
     let contact_rows_rendered: Vec<Row> = if dialog.contact_rows.is_empty() {
         vec![Row::new(vec![
             Cell::from(""),
@@ -1710,10 +1715,7 @@ fn draw_device_fingerprints_dialog(
                 Row::new(vec![
                     Cell::from(dev.as_str()),
                     Cell::from(fmt_fp(fp, fp_width)),
-                    Cell::from(Span::styled(
-                        trust_text,
-                        Style::default().fg(trust_color),
-                    )),
+                    Cell::from(Span::styled(trust_text, Style::default().fg(trust_color))),
                 ])
             })
             .collect()
@@ -1726,12 +1728,13 @@ fn draw_device_fingerprints_dialog(
     }
 
     let contact_table = Table::new(contact_rows_rendered, widths)
-        .header(
-            Row::new(vec!["Device", "Fingerprint", "Trust"]).style(header_style),
-        )
+        .header(Row::new(vec!["Device", "Fingerprint", "Trust"]).style(header_style))
         .block(
             Block::default()
-                .title(Span::styled(contact_title, Style::default().fg(Color::Magenta)))
+                .title(Span::styled(
+                    contact_title,
+                    Style::default().fg(Color::Magenta),
+                ))
                 .borders(Borders::NONE),
         )
         .row_highlight_style(
@@ -1751,8 +1754,7 @@ fn draw_device_fingerprints_dialog(
     let own_rows_rendered: Vec<Row> = if dialog.own_rows.is_empty() {
         vec![Row::new(vec![
             Cell::from(""),
-            Cell::from("No own devices found")
-                .style(Style::default().fg(Color::DarkGray)),
+            Cell::from("No own devices found").style(Style::default().fg(Color::DarkGray)),
             Cell::from(""),
         ])]
     } else {
@@ -1766,7 +1768,9 @@ fn draw_device_fingerprints_dialog(
                     dev.clone()
                 };
                 let dev_style = if *is_current {
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
                 };
@@ -1794,9 +1798,7 @@ fn draw_device_fingerprints_dialog(
     }
 
     let own_table = Table::new(own_rows_rendered, widths)
-        .header(
-            Row::new(vec!["Device", "Fingerprint", "Trust"]).style(own_header_style),
-        )
+        .header(Row::new(vec!["Device", "Fingerprint", "Trust"]).style(own_header_style))
         .block(
             Block::default()
                 .title(Span::styled(

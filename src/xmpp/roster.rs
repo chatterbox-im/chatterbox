@@ -170,7 +170,10 @@ impl XMPPClient {
         let unsubscribe = Element::builder("presence", "jabber:client")
             .attr("type".try_into().unwrap(), "unsubscribe")
             .attr("to".try_into().unwrap(), &exact_jid)
-            .attr("id".try_into().unwrap(), &format!("{}", rand::random::<u64>()))
+            .attr(
+                "id".try_into().unwrap(),
+                &format!("{}", rand::random::<u64>()),
+            )
             .build();
         if let Err(e) = self.send_stanza(unsubscribe) {
             warn!("Failed to send unsubscription request: {}", e);
@@ -178,7 +181,10 @@ impl XMPPClient {
         let unsubscribed = Element::builder("presence", "jabber:client")
             .attr("type".try_into().unwrap(), "unsubscribed")
             .attr("to".try_into().unwrap(), &exact_jid)
-            .attr("id".try_into().unwrap(), &format!("{}", rand::random::<u64>()))
+            .attr(
+                "id".try_into().unwrap(),
+                &format!("{}", rand::random::<u64>()),
+            )
             .build();
         if let Err(e) = self.send_stanza(unsubscribed) {
             warn!("Failed to send unsubscribed stanza: {}", e);

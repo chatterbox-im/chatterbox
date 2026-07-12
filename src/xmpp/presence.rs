@@ -407,7 +407,8 @@ mod tests {
     use crate::models::{PresenceEvent, ShowStatus, SubscriptionKind};
 
     fn make_presence(from: &str, type_attr: Option<&str>) -> Element {
-        let mut builder = Element::builder("presence", "jabber:client").attr("from".try_into().unwrap(), from);
+        let mut builder =
+            Element::builder("presence", "jabber:client").attr("from".try_into().unwrap(), from);
         if let Some(t) = type_attr {
             builder = builder.attr("type".try_into().unwrap(), t);
         }

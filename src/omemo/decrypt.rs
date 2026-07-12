@@ -67,8 +67,9 @@ impl OmemoManager {
                     if bundle.signed_pre_key_id == prekey_msg.signed_pre_key_id {
                         // Current SPK — common path
                         bundle.signed_pre_key_pair.clone()
-                    } else if let Some(historic) =
-                        bundle.signed_pre_key_history.get(&prekey_msg.signed_pre_key_id)
+                    } else if let Some(historic) = bundle
+                        .signed_pre_key_history
+                        .get(&prekey_msg.signed_pre_key_id)
                     {
                         // Sender built this PreKey against a recently-rotated SPK that
                         // we still have in our history — use it.
@@ -106,10 +107,13 @@ impl OmemoManager {
                             if let Err(e) = storage_guard.delete_session(&sk) {
                                 warn!("Failed to delete on-disk session after unknown SPK: {}", e);
                             }
-                            if let Err(e) = storage_guard
-                                .set_session_rebuild_needed(&bare_jid, device_id)
+                            if let Err(e) =
+                                storage_guard.set_session_rebuild_needed(&bare_jid, device_id)
                             {
-                                warn!("Failed to persist rebuild flag for {}:{}: {}", bare_jid, device_id, e);
+                                warn!(
+                                    "Failed to persist rebuild flag for {}:{}: {}",
+                                    bare_jid, device_id, e
+                                );
                             }
                         }
                         if let Err(e) = self.publish_bundle_to_server().await {
@@ -174,10 +178,11 @@ impl OmemoManager {
                 // Persist the rebuild marker so it survives a restart.
                 {
                     let storage_guard = self.storage.lock().await;
-                    if let Err(e) = storage_guard
-                        .set_session_rebuild_needed(&bare_jid, device_id)
-                    {
-                        warn!("Failed to persist rebuild flag for {}:{}: {}", bare_jid, device_id, e);
+                    if let Err(e) = storage_guard.set_session_rebuild_needed(&bare_jid, device_id) {
+                        warn!(
+                            "Failed to persist rebuild flag for {}:{}: {}",
+                            bare_jid, device_id, e
+                        );
                     }
                 }
 
@@ -620,13 +625,20 @@ impl OmemoManager {
             // can render as a clear, actionable "session broken" prompt.
         }
 
-        self.sessions
-            .insert(key.clone(), OmemoSessionState::RecoveryPreKeySent { attempt: new_attempt });
+        self.sessions.insert(
+            key.clone(),
+            OmemoSessionState::RecoveryPreKeySent {
+                attempt: new_attempt,
+            },
+        );
         // Persist so the recovery state survives a process restart.
         {
             let storage_guard = self.storage.lock().await;
             if let Err(e) = storage_guard.set_prekey_pending(&bare_jid, device_id) {
-                warn!("Failed to persist prekey-pending flag for {}:{}: {}", bare_jid, device_id, e);
+                warn!(
+                    "Failed to persist prekey-pending flag for {}:{}: {}",
+                    bare_jid, device_id, e
+                );
             }
         }
 
@@ -679,7 +691,10 @@ impl OmemoManager {
             {
                 let storage_guard = self.storage.lock().await;
                 if let Err(e) = storage_guard.set_prekey_pending(&bare_jid, target_device_id) {
-                    warn!("Failed to persist prekey-pending flag for {}:{}: {}", bare_jid, target_device_id, e);
+                    warn!(
+                        "Failed to persist prekey-pending flag for {}:{}: {}",
+                        bare_jid, target_device_id, e
+                    );
                 }
             }
             info!(

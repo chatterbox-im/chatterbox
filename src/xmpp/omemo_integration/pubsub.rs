@@ -59,42 +59,44 @@ pub async fn publish_pubsub_item_with_client(
                 .collect();
 
             // Create the device list stanza correctly
-            let mut pubsub_elem =
-                xmpp_parsers::minidom::Element::builder("pubsub", "http://jabber.org/protocol/pubsub")
-                    .append(
-                        xmpp_parsers::minidom::Element::builder(
-                            "publish",
-                            "http://jabber.org/protocol/pubsub",
-                        )
-                        .attr("node".try_into().unwrap(), node)
-                        .append(
-                            xmpp_parsers::minidom::Element::builder(
-                                "item",
-                                "http://jabber.org/protocol/pubsub",
-                            )
-                            .attr("id".try_into().unwrap(), id)
-                            .append({
-                                let mut list_elem = xmpp_parsers::minidom::Element::builder(
-                                    "list",
-                                    "eu.siacs.conversations.axolotl",
-                                )
-                                .build();
-
-                                // Add each device with the proper namespace handling
-                                for device_id in &device_ids {
-                                    let device_elem = xmpp_parsers::minidom::Element::builder("device", "")
-                                        .attr("id".try_into().unwrap(), device_id)
-                                        .build();
-                                    list_elem.append_child(device_elem);
-                                }
-
-                                list_elem
-                            })
-                            .build(),
-                        )
-                        .build(),
+            let mut pubsub_elem = xmpp_parsers::minidom::Element::builder(
+                "pubsub",
+                "http://jabber.org/protocol/pubsub",
+            )
+            .append(
+                xmpp_parsers::minidom::Element::builder(
+                    "publish",
+                    "http://jabber.org/protocol/pubsub",
+                )
+                .attr("node".try_into().unwrap(), node)
+                .append(
+                    xmpp_parsers::minidom::Element::builder(
+                        "item",
+                        "http://jabber.org/protocol/pubsub",
                     )
-                    .build();
+                    .attr("id".try_into().unwrap(), id)
+                    .append({
+                        let mut list_elem = xmpp_parsers::minidom::Element::builder(
+                            "list",
+                            "eu.siacs.conversations.axolotl",
+                        )
+                        .build();
+
+                        // Add each device with the proper namespace handling
+                        for device_id in &device_ids {
+                            let device_elem = xmpp_parsers::minidom::Element::builder("device", "")
+                                .attr("id".try_into().unwrap(), device_id)
+                                .build();
+                            list_elem.append_child(device_elem);
+                        }
+
+                        list_elem
+                    })
+                    .build(),
+                )
+                .build(),
+            )
+            .build();
 
             // Add publish-options for open access (required for OMEMO interop)
             let publish_options = xmpp_parsers::minidom::Element::builder(
@@ -109,9 +111,11 @@ pub async fn publish_pubsub_item_with_client(
                             .attr("var".try_into().unwrap(), "FORM_TYPE")
                             .attr("type".try_into().unwrap(), "hidden")
                             .append({
-                                let mut v =
-                                    xmpp_parsers::minidom::Element::builder("value", "jabber:x:data")
-                                        .build();
+                                let mut v = xmpp_parsers::minidom::Element::builder(
+                                    "value",
+                                    "jabber:x:data",
+                                )
+                                .build();
                                 v.append_text_node(
                                     "http://jabber.org/protocol/pubsub#publish-options",
                                 );
@@ -123,9 +127,11 @@ pub async fn publish_pubsub_item_with_client(
                         xmpp_parsers::minidom::Element::builder("field", "jabber:x:data")
                             .attr("var".try_into().unwrap(), "pubsub#access_model")
                             .append({
-                                let mut v =
-                                    xmpp_parsers::minidom::Element::builder("value", "jabber:x:data")
-                                        .build();
+                                let mut v = xmpp_parsers::minidom::Element::builder(
+                                    "value",
+                                    "jabber:x:data",
+                                )
+                                .build();
                                 v.append_text_node("open");
                                 v
                             })
@@ -144,7 +150,11 @@ pub async fn publish_pubsub_item_with_client(
             // Only set 'to' if provided (PEP publishes to self don't need it)
             if let Some(to_addr) = to {
                 if !to_addr.is_empty() {
-                    iq.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, "to".try_into().unwrap(), to_addr);
+                    iq.set_attr(
+                        xmpp_parsers::minidom::rxml::Namespace::NONE,
+                        "to".try_into().unwrap(),
+                        to_addr,
+                    );
                 }
             }
 
@@ -183,33 +193,47 @@ pub async fn publish_pubsub_item_with_client(
             // Add 'to' attribute if provided and non-empty
             if let Some(to_addr) = to {
                 if !to_addr.is_empty() {
-                    iq.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, "to".try_into().unwrap(), to_addr);
+                    iq.set_attr(
+                        xmpp_parsers::minidom::rxml::Namespace::NONE,
+                        "to".try_into().unwrap(),
+                        to_addr,
+                    );
                 }
             }
 
             // Create the pubsub element
-            let mut pubsub_elem =
-                xmpp_parsers::minidom::Element::builder("pubsub", "http://jabber.org/protocol/pubsub")
-                    .build();
+            let mut pubsub_elem = xmpp_parsers::minidom::Element::builder(
+                "pubsub",
+                "http://jabber.org/protocol/pubsub",
+            )
+            .build();
 
             // Create the publish element
-            let mut publish_elem =
-                xmpp_parsers::minidom::Element::builder("publish", "http://jabber.org/protocol/pubsub")
-                    .attr("node".try_into().unwrap(), node)
-                    .build();
+            let mut publish_elem = xmpp_parsers::minidom::Element::builder(
+                "publish",
+                "http://jabber.org/protocol/pubsub",
+            )
+            .attr("node".try_into().unwrap(), node)
+            .build();
 
             // Create the item element
-            let mut item_elem =
-                xmpp_parsers::minidom::Element::builder("item", "http://jabber.org/protocol/pubsub")
-                    .attr("id".try_into().unwrap(), id)
-                    .build();
+            let mut item_elem = xmpp_parsers::minidom::Element::builder(
+                "item",
+                "http://jabber.org/protocol/pubsub",
+            )
+            .attr("id".try_into().unwrap(), id)
+            .build();
 
             // Create bundle element with correct namespace
             let mut bundle_elem =
-                xmpp_parsers::minidom::Element::builder("bundle", "eu.siacs.conversations.axolotl").build();
+                xmpp_parsers::minidom::Element::builder("bundle", "eu.siacs.conversations.axolotl")
+                    .build();
 
             // Function to recursively add child elements
-            fn add_child_elements(parent: &mut xmpp_parsers::minidom::Element, node: roxmltree::Node) {
+            fn add_child_elements(
+                parent: &mut xmpp_parsers::minidom::Element,
+                node: roxmltree::Node,
+            ) {
                 for child in node.children().filter(|n| n.is_element()) {
                     // Use the OMEMO namespace for all child elements to maintain consistency
                     let mut child_elem = xmpp_parsers::minidom::Element::builder(
@@ -222,7 +246,11 @@ pub async fn publish_pubsub_item_with_client(
                     for attr in child.attributes() {
                         // Skip xmlns attributes to avoid namespace conflicts
                         if attr.name() != "xmlns" {
-                            child_elem.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, attr.name().try_into().unwrap(), attr.value());
+                            child_elem.set_attr(
+                                xmpp_parsers::minidom::rxml::Namespace::NONE,
+                                attr.name().try_into().unwrap(),
+                                attr.value(),
+                            );
                         }
                     }
 
@@ -261,9 +289,11 @@ pub async fn publish_pubsub_item_with_client(
                             .attr("var".try_into().unwrap(), "FORM_TYPE")
                             .attr("type".try_into().unwrap(), "hidden")
                             .append({
-                                let mut v =
-                                    xmpp_parsers::minidom::Element::builder("value", "jabber:x:data")
-                                        .build();
+                                let mut v = xmpp_parsers::minidom::Element::builder(
+                                    "value",
+                                    "jabber:x:data",
+                                )
+                                .build();
                                 v.append_text_node(
                                     "http://jabber.org/protocol/pubsub#publish-options",
                                 );
@@ -275,9 +305,11 @@ pub async fn publish_pubsub_item_with_client(
                         xmpp_parsers::minidom::Element::builder("field", "jabber:x:data")
                             .attr("var".try_into().unwrap(), "pubsub#access_model")
                             .append({
-                                let mut v =
-                                    xmpp_parsers::minidom::Element::builder("value", "jabber:x:data")
-                                        .build();
+                                let mut v = xmpp_parsers::minidom::Element::builder(
+                                    "value",
+                                    "jabber:x:data",
+                                )
+                                .build();
                                 v.append_text_node("open");
                                 v
                             })
@@ -316,7 +348,8 @@ pub async fn publish_pubsub_item_with_client(
 
         // Create the PubSub element
         let mut pubsub_element =
-            xmpp_parsers::minidom::Element::builder("pubsub", "http://jabber.org/protocol/pubsub").build();
+            xmpp_parsers::minidom::Element::builder("pubsub", "http://jabber.org/protocol/pubsub")
+                .build();
 
         // Create the publish element
         let mut publish_element =
@@ -345,7 +378,11 @@ pub async fn publish_pubsub_item_with_client(
 
                     // Copy attributes
                     for attr in root.attributes() {
-                        payload_element.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, attr.name().try_into().unwrap(), attr.value());
+                        payload_element.set_attr(
+                            xmpp_parsers::minidom::rxml::Namespace::NONE,
+                            attr.name().try_into().unwrap(),
+                            attr.value(),
+                        );
                     }
 
                     // Process children for device list specifically - add them with proper structure
@@ -354,9 +391,10 @@ pub async fn publish_pubsub_item_with_client(
                         for child in root.children() {
                             if child.is_element() && child.tag_name().name() == "device" {
                                 if let Some(id_attr) = child.attribute("id") {
-                                    let device_elem = xmpp_parsers::minidom::Element::builder("device", "")
-                                        .attr("id".try_into().unwrap(), id_attr)
-                                        .build();
+                                    let device_elem =
+                                        xmpp_parsers::minidom::Element::builder("device", "")
+                                            .attr("id".try_into().unwrap(), id_attr)
+                                            .build();
                                     payload_element.append_child(device_elem);
                                 }
                             }
@@ -395,7 +433,11 @@ pub async fn publish_pubsub_item_with_client(
         // If a 'to' attribute was provided, add it
         let iq = if let Some(to_addr) = to {
             let mut iq_copy = iq;
-            iq_copy.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, "to".try_into().unwrap(), to_addr);
+            iq_copy.set_attr(
+                xmpp_parsers::minidom::rxml::Namespace::NONE,
+                "to".try_into().unwrap(),
+                to_addr,
+            );
             iq_copy
         } else {
             iq
@@ -525,7 +567,11 @@ pub async fn publish_bundle_alternative_format_with_client(
 
                 // Copy attributes
                 for attr in root.attributes() {
-                    iq.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, attr.name().try_into().unwrap(), attr.value());
+                    iq.set_attr(
+                        xmpp_parsers::minidom::rxml::Namespace::NONE,
+                        attr.name().try_into().unwrap(),
+                        attr.value(),
+                    );
                 }
 
                 // Function to recursively build elements
@@ -538,7 +584,11 @@ pub async fn publish_bundle_alternative_format_with_client(
 
                     // Copy attributes
                     for attr in node.attributes() {
-                        elem.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, attr.name().try_into().unwrap(), attr.value());
+                        elem.set_attr(
+                            xmpp_parsers::minidom::rxml::Namespace::NONE,
+                            attr.name().try_into().unwrap(),
+                            attr.value(),
+                        );
                     }
 
                     // Process children
@@ -617,11 +667,16 @@ fn publish_item_alternative_format(
         Ok(doc) => {
             let root = doc.root_element();
             let mut iq =
-                xmpp_parsers::minidom::Element::builder(root.tag_name().name(), "jabber:client").build();
+                xmpp_parsers::minidom::Element::builder(root.tag_name().name(), "jabber:client")
+                    .build();
 
             // Copy attributes
             for attr in root.attributes() {
-                iq.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, attr.name().try_into().unwrap(), attr.value());
+                iq.set_attr(
+                    xmpp_parsers::minidom::rxml::Namespace::NONE,
+                    attr.name().try_into().unwrap(),
+                    attr.value(),
+                );
             }
 
             // Function to recursively build elements
@@ -634,11 +689,16 @@ fn publish_item_alternative_format(
                     node.tag_name().namespace().unwrap_or("")
                 };
 
-                let mut elem = xmpp_parsers::minidom::Element::builder(node.tag_name().name(), ns).build();
+                let mut elem =
+                    xmpp_parsers::minidom::Element::builder(node.tag_name().name(), ns).build();
 
                 // Copy attributes
                 for attr in node.attributes() {
-                    elem.set_attr(xmpp_parsers::minidom::rxml::Namespace::NONE, attr.name().try_into().unwrap(), attr.value());
+                    elem.set_attr(
+                        xmpp_parsers::minidom::rxml::Namespace::NONE,
+                        attr.name().try_into().unwrap(),
+                        attr.value(),
+                    );
                 }
 
                 // Process children
@@ -707,7 +767,8 @@ pub async fn publish_pubsub_item_device_list_with_client(
 
         // Create the XML stanza directly to ensure correct namespace handling
         let mut list_element =
-            xmpp_parsers::minidom::Element::builder("list", "eu.siacs.conversations.axolotl").build();
+            xmpp_parsers::minidom::Element::builder("list", "eu.siacs.conversations.axolotl")
+                .build();
 
         // Add each device element
         for device_id in device_ids {
@@ -727,46 +788,49 @@ pub async fn publish_pubsub_item_device_list_with_client(
 
         let publish_element =
             xmpp_parsers::minidom::Element::builder("publish", "http://jabber.org/protocol/pubsub")
-                .attr("node".try_into().unwrap(), "eu.siacs.conversations.axolotl.devicelist")
+                .attr(
+                    "node".try_into().unwrap(),
+                    "eu.siacs.conversations.axolotl.devicelist",
+                )
                 .append(item_element)
                 .build();
 
         // Add publish-options for open access (required for OMEMO interop)
-        let publish_options =
-            xmpp_parsers::minidom::Element::builder("publish-options", "http://jabber.org/protocol/pubsub")
+        let publish_options = xmpp_parsers::minidom::Element::builder(
+            "publish-options",
+            "http://jabber.org/protocol/pubsub",
+        )
+        .append(
+            xmpp_parsers::minidom::Element::builder("x", "jabber:x:data")
+                .attr("type".try_into().unwrap(), "submit")
                 .append(
-                    xmpp_parsers::minidom::Element::builder("x", "jabber:x:data")
-                        .attr("type".try_into().unwrap(), "submit")
-                        .append(
-                            xmpp_parsers::minidom::Element::builder("field", "jabber:x:data")
-                                .attr("var".try_into().unwrap(), "FORM_TYPE")
-                                .attr("type".try_into().unwrap(), "hidden")
-                                .append({
-                                    let mut v =
-                                        xmpp_parsers::minidom::Element::builder("value", "jabber:x:data")
-                                            .build();
-                                    v.append_text_node(
-                                        "http://jabber.org/protocol/pubsub#publish-options",
-                                    );
-                                    v
-                                })
-                                .build(),
-                        )
-                        .append(
-                            xmpp_parsers::minidom::Element::builder("field", "jabber:x:data")
-                                .attr("var".try_into().unwrap(), "pubsub#access_model")
-                                .append({
-                                    let mut v =
-                                        xmpp_parsers::minidom::Element::builder("value", "jabber:x:data")
-                                            .build();
-                                    v.append_text_node("open");
-                                    v
-                                })
-                                .build(),
-                        )
+                    xmpp_parsers::minidom::Element::builder("field", "jabber:x:data")
+                        .attr("var".try_into().unwrap(), "FORM_TYPE")
+                        .attr("type".try_into().unwrap(), "hidden")
+                        .append({
+                            let mut v =
+                                xmpp_parsers::minidom::Element::builder("value", "jabber:x:data")
+                                    .build();
+                            v.append_text_node("http://jabber.org/protocol/pubsub#publish-options");
+                            v
+                        })
                         .build(),
                 )
-                .build();
+                .append(
+                    xmpp_parsers::minidom::Element::builder("field", "jabber:x:data")
+                        .attr("var".try_into().unwrap(), "pubsub#access_model")
+                        .append({
+                            let mut v =
+                                xmpp_parsers::minidom::Element::builder("value", "jabber:x:data")
+                                    .build();
+                            v.append_text_node("open");
+                            v
+                        })
+                        .build(),
+                )
+                .build(),
+        )
+        .build();
 
         let pubsub_element =
             xmpp_parsers::minidom::Element::builder("pubsub", "http://jabber.org/protocol/pubsub")
@@ -842,9 +906,12 @@ pub async fn request_pubsub_items_with_client(
         .append(
             xmpp_parsers::minidom::Element::builder("pubsub", "http://jabber.org/protocol/pubsub")
                 .append(
-                    xmpp_parsers::minidom::Element::builder("items", "http://jabber.org/protocol/pubsub")
-                        .attr("node".try_into().unwrap(), node)
-                        .build(),
+                    xmpp_parsers::minidom::Element::builder(
+                        "items",
+                        "http://jabber.org/protocol/pubsub",
+                    )
+                    .attr("node".try_into().unwrap(), node)
+                    .build(),
                 )
                 .build(),
         )

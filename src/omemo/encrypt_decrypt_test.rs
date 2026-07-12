@@ -465,7 +465,11 @@ mod tests {
             .add_bundle(bob_jid, bob_device_id, bob.key_bundle.as_ref().unwrap())
             .await;
         pubsub
-            .add_bundle(alice_jid, alice_device_id, alice.key_bundle.as_ref().unwrap())
+            .add_bundle(
+                alice_jid,
+                alice_device_id,
+                alice.key_bundle.as_ref().unwrap(),
+            )
             .await;
 
         // First session establishment: Alice → Bob (fresh OPK used and consumed)
@@ -569,7 +573,11 @@ mod tests {
             .add_bundle(bob_jid, bob_device_id, bob.key_bundle.as_ref().unwrap())
             .await;
         pubsub
-            .add_bundle(alice_jid, alice_device_id, alice.key_bundle.as_ref().unwrap())
+            .add_bundle(
+                alice_jid,
+                alice_device_id,
+                alice.key_bundle.as_ref().unwrap(),
+            )
             .await;
 
         // Normal first exchange so Bob consumes Alice's intended OPK.
@@ -648,7 +656,11 @@ mod tests {
             .add_bundle(bob_jid, bob_device_id, bob.key_bundle.as_ref().unwrap())
             .await;
         pubsub
-            .add_bundle(alice_jid, alice_device_id, alice.key_bundle.as_ref().unwrap())
+            .add_bundle(
+                alice_jid,
+                alice_device_id,
+                alice.key_bundle.as_ref().unwrap(),
+            )
             .await;
 
         // Establish a valid session so Bob has one in memory.
@@ -721,7 +733,11 @@ mod tests {
             .add_bundle(bob_jid, bob_device_id, bob.key_bundle.as_ref().unwrap())
             .await;
         pubsub
-            .add_bundle(alice_jid, alice_device_id, alice.key_bundle.as_ref().unwrap())
+            .add_bundle(
+                alice_jid,
+                alice_device_id,
+                alice.key_bundle.as_ref().unwrap(),
+            )
             .await;
 
         // Establish a session
@@ -753,7 +769,8 @@ mod tests {
                 Some(OmemoSessionState::RecoveryPreKeySent { .. })
             ),
             "session must be RecoveryPreKeySent after AEAD failure, got: {:?}",
-            bob.sessions.get(&(alice_jid.to_string(), alice_device_id))
+            bob.sessions
+                .get(&(alice_jid.to_string(), alice_device_id))
                 .map(|s| std::mem::discriminant(s))
         );
     }
@@ -780,7 +797,11 @@ mod tests {
             .add_bundle(bob_jid, bob_device_id, bob.key_bundle.as_ref().unwrap())
             .await;
         pubsub
-            .add_bundle(alice_jid, alice_device_id, alice.key_bundle.as_ref().unwrap())
+            .add_bundle(
+                alice_jid,
+                alice_device_id,
+                alice.key_bundle.as_ref().unwrap(),
+            )
             .await;
 
         let seed = alice.encrypt_message(bob_jid, "seed").await.unwrap();
@@ -791,9 +812,7 @@ mod tests {
         let aead_err = || {
             crate::omemo::session::SessionError::DoubleRatchetError(
                 crate::omemo::protocol::DoubleRatchetError::CryptoError(
-                    crate::omemo::crypto::CryptoError::AesGcmError(
-                        "aead::Error".to_string(),
-                    ),
+                    crate::omemo::crypto::CryptoError::AesGcmError("aead::Error".to_string()),
                 ),
             )
         };
@@ -804,7 +823,10 @@ mod tests {
             .ok();
         let attempt_1 = match bob.sessions.get(&(alice_jid.to_string(), alice_device_id)) {
             Some(OmemoSessionState::RecoveryPreKeySent { attempt }) => *attempt,
-            other => panic!("expected RecoveryPreKeySent, got {:?}", other.map(|s| std::mem::discriminant(s))),
+            other => panic!(
+                "expected RecoveryPreKeySent, got {:?}",
+                other.map(|s| std::mem::discriminant(s))
+            ),
         };
 
         // Second AEAD failure before the recovery PreKey was sent
@@ -813,7 +835,10 @@ mod tests {
             .ok();
         let attempt_2 = match bob.sessions.get(&(alice_jid.to_string(), alice_device_id)) {
             Some(OmemoSessionState::RecoveryPreKeySent { attempt }) => *attempt,
-            other => panic!("expected RecoveryPreKeySent, got {:?}", other.map(|s| std::mem::discriminant(s))),
+            other => panic!(
+                "expected RecoveryPreKeySent, got {:?}",
+                other.map(|s| std::mem::discriminant(s))
+            ),
         };
 
         assert!(
@@ -847,7 +872,11 @@ mod tests {
             .add_bundle(bob_jid, bob_device_id, bob.key_bundle.as_ref().unwrap())
             .await;
         pubsub
-            .add_bundle(alice_jid, alice_device_id, alice.key_bundle.as_ref().unwrap())
+            .add_bundle(
+                alice_jid,
+                alice_device_id,
+                alice.key_bundle.as_ref().unwrap(),
+            )
             .await;
 
         // Establish a valid session first
@@ -945,7 +974,11 @@ mod tests {
             .add_bundle(bob_jid, bob_device_id, bob.key_bundle.as_ref().unwrap())
             .await;
         pubsub
-            .add_bundle(alice_jid, alice_device_id, alice.key_bundle.as_ref().unwrap())
+            .add_bundle(
+                alice_jid,
+                alice_device_id,
+                alice.key_bundle.as_ref().unwrap(),
+            )
             .await;
 
         // First send — creates an InitiatorAwaitingReply session
@@ -953,12 +986,11 @@ mod tests {
             .encrypt_message(bob_jid, "first")
             .await
             .expect("first encrypt should succeed");
-        let base_key_1 = PreKeySignalMessage::deserialize(
-            msg1.encrypted_keys.get(&bob_device_id).unwrap(),
-        )
-        .expect("should be PreKeySignalMessage")
-        .base_key
-        .clone();
+        let base_key_1 =
+            PreKeySignalMessage::deserialize(msg1.encrypted_keys.get(&bob_device_id).unwrap())
+                .expect("should be PreKeySignalMessage")
+                .base_key
+                .clone();
 
         // Artificially age the `sent_at` timestamp past the 24-hour timeout.
         if let Some(OmemoSessionState::InitiatorAwaitingReply {
@@ -967,8 +999,7 @@ mod tests {
             .sessions
             .get_mut(&(bob_jid.to_string(), bob_device_id))
         {
-            *sent_at = std::time::Instant::now()
-                - std::time::Duration::from_secs(25 * 3600);
+            *sent_at = std::time::Instant::now() - std::time::Duration::from_secs(25 * 3600);
         } else {
             panic!("expected InitiatorAwaitingReply after first send");
         }
@@ -980,12 +1011,11 @@ mod tests {
             .expect("second encrypt should succeed");
 
         assert!(msg2.is_prekey, "message after timeout must be a PreKey");
-        let base_key_2 = PreKeySignalMessage::deserialize(
-            msg2.encrypted_keys.get(&bob_device_id).unwrap(),
-        )
-        .expect("should be PreKeySignalMessage")
-        .base_key
-        .clone();
+        let base_key_2 =
+            PreKeySignalMessage::deserialize(msg2.encrypted_keys.get(&bob_device_id).unwrap())
+                .expect("should be PreKeySignalMessage")
+                .base_key
+                .clone();
 
         assert_ne!(
             base_key_1, base_key_2,
@@ -1016,7 +1046,11 @@ mod tests {
             .add_bundle(bob_jid, bob_device_id, bob.key_bundle.as_ref().unwrap())
             .await;
         pubsub
-            .add_bundle(alice_jid, alice_device_id, alice.key_bundle.as_ref().unwrap())
+            .add_bundle(
+                alice_jid,
+                alice_device_id,
+                alice.key_bundle.as_ref().unwrap(),
+            )
             .await;
 
         let seed = alice.encrypt_message(bob_jid, "seed").await.unwrap();
@@ -1076,7 +1110,11 @@ mod tests {
             .add_bundle(bob_jid, bob_device_id, bob.key_bundle.as_ref().unwrap())
             .await;
         pubsub
-            .add_bundle(alice_jid, alice_device_id, alice.key_bundle.as_ref().unwrap())
+            .add_bundle(
+                alice_jid,
+                alice_device_id,
+                alice.key_bundle.as_ref().unwrap(),
+            )
             .await;
 
         // Establish a real session so we have a valid RatchetState to extract
@@ -1091,15 +1129,24 @@ mod tests {
             .clone();
 
         // Verify the state itself is initialized
-        assert!(ratchet_state.initialized, "ratchet_state must be initialized");
+        assert!(
+            ratchet_state.initialized,
+            "ratchet_state must be initialized"
+        );
         assert_eq!(ratchet_state.remote_jid, bob_jid);
         assert_eq!(ratchet_state.remote_device_id, bob_device_id);
 
         // from_state must produce a correctly wired, initialized session
         let session = OmemoSession::from_state(alice_device_id, ratchet_state);
 
-        assert!(session.is_initialized(), "from_state session must be initialized");
-        assert_eq!(session.remote_jid, bob_jid, "JID must come from RatchetState");
+        assert!(
+            session.is_initialized(),
+            "from_state session must be initialized"
+        );
+        assert_eq!(
+            session.remote_jid, bob_jid,
+            "JID must come from RatchetState"
+        );
         assert_eq!(
             session.remote_device_id, bob_device_id,
             "device_id must come from RatchetState"
@@ -1154,8 +1201,8 @@ mod tests {
             .encrypted_keys
             .get(&bob_device_id)
             .expect("key for Bob's device must exist");
-        let prekey_msg = PreKeySignalMessage::deserialize(raw_key)
-            .expect("should parse as PreKeySignalMessage");
+        let prekey_msg =
+            PreKeySignalMessage::deserialize(raw_key).expect("should parse as PreKeySignalMessage");
         let old_spk_id = prekey_msg.signed_pre_key_id;
         // SPK id after initialization may be >1 because check_and_rotate_prekeys
         // fires on first startup; just capture whatever id was actually used.
@@ -1175,7 +1222,10 @@ mod tests {
             )
             .unwrap();
             let mut history = old_bundle.signed_pre_key_history.clone();
-            history.insert(old_bundle.signed_pre_key_id, old_bundle.signed_pre_key_pair.clone());
+            history.insert(
+                old_bundle.signed_pre_key_id,
+                old_bundle.signed_pre_key_pair.clone(),
+            );
             bob.key_bundle = Some(X3DHKeyBundle {
                 device_id: old_bundle.device_id,
                 identity_key_pair: old_bundle.identity_key_pair,
@@ -1249,7 +1299,9 @@ mod tests {
         let tampered_key = parsed.serialize_with_inner_bytes(&parsed.raw_message_bytes.clone());
 
         let mut tampered_msg = omemo_msg.clone();
-        tampered_msg.encrypted_keys.insert(bob_device_id, tampered_key);
+        tampered_msg
+            .encrypted_keys
+            .insert(bob_device_id, tampered_key);
 
         let err = bob
             .decrypt_message(alice_jid, alice_device_id, &tampered_msg)
@@ -1295,7 +1347,9 @@ mod tests {
 
         let err_str = err.to_string();
         assert!(
-            err_str.contains("No device") || err_str.contains("recipient") || err_str.contains("failed"),
+            err_str.contains("No device")
+                || err_str.contains("recipient")
+                || err_str.contains("failed"),
             "error should explain why encryption failed, got: {}",
             err_str
         );
@@ -1320,21 +1374,16 @@ mod tests {
 
         // --- First Alice instance ---
         let alice_storage =
-            crate::omemo::storage::OmemoStorage::new(Some(alice_dir.path().to_path_buf()))
-                .unwrap();
+            crate::omemo::storage::OmemoStorage::new(Some(alice_dir.path().to_path_buf())).unwrap();
         {
             let meta = alice_dir.path().join("metadata");
             std::fs::create_dir_all(&meta).unwrap();
             std::fs::write(meta.join("device_id"), alice_device_id.to_string()).unwrap();
         }
-        let mut alice1 = OmemoManager::new(
-            alice_storage,
-            alice_jid.to_string(),
-            None,
-            pubsub.clone(),
-        )
-        .await
-        .unwrap();
+        let mut alice1 =
+            OmemoManager::new(alice_storage, alice_jid.to_string(), None, pubsub.clone())
+                .await
+                .unwrap();
 
         let (mut bob, _bob_dir) = create_manager(bob_jid, bob_device_id, pubsub.clone()).await;
 
@@ -1344,7 +1393,11 @@ mod tests {
             .add_bundle(bob_jid, bob_device_id, bob.key_bundle.as_ref().unwrap())
             .await;
         pubsub
-            .add_bundle(alice_jid, alice_device_id, alice1.key_bundle.as_ref().unwrap())
+            .add_bundle(
+                alice_jid,
+                alice_device_id,
+                alice1.key_bundle.as_ref().unwrap(),
+            )
             .await;
 
         // First encryption establishes session and persists ratchet state
@@ -1363,16 +1416,11 @@ mod tests {
         drop(alice1);
 
         let alice_storage2 =
-            crate::omemo::storage::OmemoStorage::new(Some(alice_dir.path().to_path_buf()))
+            crate::omemo::storage::OmemoStorage::new(Some(alice_dir.path().to_path_buf())).unwrap();
+        let mut alice2 =
+            OmemoManager::new(alice_storage2, alice_jid.to_string(), None, pubsub.clone())
+                .await
                 .unwrap();
-        let mut alice2 = OmemoManager::new(
-            alice_storage2,
-            alice_jid.to_string(),
-            None,
-            pubsub.clone(),
-        )
-        .await
-        .unwrap();
 
         // Second encryption must succeed — if the ratchet state was not
         // persisted, alice2 would start at counter 0 again and Bob (who
@@ -1408,9 +1456,7 @@ mod tests {
         storage1
             .set_session_rebuild_needed("alice@example.com", 42)
             .unwrap();
-        storage1
-            .set_prekey_pending("bob@example.com", 99)
-            .unwrap();
+        storage1.set_prekey_pending("bob@example.com", 99).unwrap();
         storage1
             .persist_failed_message_id("msg-id-deadbeef")
             .unwrap();
@@ -1440,8 +1486,12 @@ mod tests {
         );
 
         // Verify clear works
-        storage2.clear_session_rebuild_needed("alice@example.com", 42).unwrap();
-        storage2.clear_prekey_pending("bob@example.com", 99).unwrap();
+        storage2
+            .clear_session_rebuild_needed("alice@example.com", 42)
+            .unwrap();
+        storage2
+            .clear_prekey_pending("bob@example.com", 99)
+            .unwrap();
 
         let rebuild_after = storage2.load_all_rebuild_pending();
         assert!(

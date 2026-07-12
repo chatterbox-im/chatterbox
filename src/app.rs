@@ -945,7 +945,10 @@ async fn handle_user_command(
             if let Ok(device_id) = parts[1].parse::<u32>() {
                 let jid = parts[2];
                 let trusted = flag == "1";
-                if let Err(e) = xmpp_client.set_single_device_trust(jid, device_id, trusted).await {
+                if let Err(e) = xmpp_client
+                    .set_single_device_trust(jid, device_id, trusted)
+                    .await
+                {
                     info!("MAIN: set_single_device_trust failed: {}", e);
                 }
             }
@@ -1157,8 +1160,7 @@ async fn handle_show_device_fingerprints(
             let current_device_id = xmpp_client.get_own_device_id().await.ok();
             let mut own_rows: Vec<(String, String, TrustLevel, bool)> = Vec::new();
             for device_id in &device_ids {
-                let (fp, trust) =
-                    fetch_fp_trust(xmpp_client, bare_jid, *device_id).await;
+                let (fp, trust) = fetch_fp_trust(xmpp_client, bare_jid, *device_id).await;
                 let is_current = current_device_id.map_or(false, |id| id == *device_id);
                 own_rows.push((device_id.to_string(), fp, trust, is_current));
             }
@@ -1167,8 +1169,7 @@ async fn handle_show_device_fingerprints(
             let active_contact = chat_ui.get_active_contact();
             let (contact_jid, contact_rows) =
                 if !active_contact.is_empty() && active_contact != bare_jid {
-                    let contact_bare =
-                        active_contact.split('/').next().unwrap_or(&active_contact);
+                    let contact_bare = active_contact.split('/').next().unwrap_or(&active_contact);
                     let mut rows: Vec<(String, String, TrustLevel)> = Vec::new();
                     if let Ok(Ok(contact_device_ids)) = tokio::time::timeout(
                         std::time::Duration::from_secs(5),
@@ -1193,7 +1194,12 @@ async fn handle_show_device_fingerprints(
                     "No device fingerprints could be retrieved.",
                 ));
             } else {
-                chat_ui.show_device_fingerprints_dialog(bare_jid.to_string(), own_rows, contact_jid, contact_rows);
+                chat_ui.show_device_fingerprints_dialog(
+                    bare_jid.to_string(),
+                    own_rows,
+                    contact_jid,
+                    contact_rows,
+                );
             }
             if let Err(e) = terminal.draw(|f| chat_ui.draw(f)) {
                 chat_ui.reset_device_fingerprints_dialog();

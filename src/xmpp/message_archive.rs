@@ -105,12 +105,12 @@ impl super::XMPPClient {
         };
 
         // Build query element
-        let mut query =
-            xmpp_parsers::minidom::Element::builder("query", custom_ns::MAM).attr("queryid".try_into().unwrap(), &query_id);
+        let mut query = xmpp_parsers::minidom::Element::builder("query", custom_ns::MAM)
+            .attr("queryid".try_into().unwrap(), &query_id);
 
         // Create the data form
-        let mut x_data =
-            xmpp_parsers::minidom::Element::builder("x", "jabber:x:data").attr("type".try_into().unwrap(), "submit");
+        let mut x_data = xmpp_parsers::minidom::Element::builder("x", "jabber:x:data")
+            .attr("type".try_into().unwrap(), "submit");
 
         // Add form type field
         let mut form_type_field = xmpp_parsers::minidom::Element::builder("field", "jabber:x:data")
@@ -118,7 +118,8 @@ impl super::XMPPClient {
             .attr("type".try_into().unwrap(), "hidden")
             .build();
 
-        let mut value_element = xmpp_parsers::minidom::Element::builder("value", "jabber:x:data").build();
+        let mut value_element =
+            xmpp_parsers::minidom::Element::builder("value", "jabber:x:data").build();
         value_element.append_text_node("urn:xmpp:mam:2");
         form_type_field.append_child(value_element);
 
@@ -130,7 +131,8 @@ impl super::XMPPClient {
                 .attr("var".try_into().unwrap(), "with")
                 .build();
 
-            let mut with_value = xmpp_parsers::minidom::Element::builder("value", "jabber:x:data").build();
+            let mut with_value =
+                xmpp_parsers::minidom::Element::builder("value", "jabber:x:data").build();
             with_value.append_text_node(with_jid);
             with_field.append_child(with_value);
 
@@ -145,7 +147,8 @@ impl super::XMPPClient {
                 .attr("var".try_into().unwrap(), "start")
                 .build();
 
-            let mut start_value = xmpp_parsers::minidom::Element::builder("value", "jabber:x:data").build();
+            let mut start_value =
+                xmpp_parsers::minidom::Element::builder("value", "jabber:x:data").build();
             start_value.append_text_node(&start_str);
             start_field.append_child(start_value);
 
@@ -160,7 +163,8 @@ impl super::XMPPClient {
                 .attr("var".try_into().unwrap(), "end")
                 .build();
 
-            let mut end_value = xmpp_parsers::minidom::Element::builder("value", "jabber:x:data").build();
+            let mut end_value =
+                xmpp_parsers::minidom::Element::builder("value", "jabber:x:data").build();
             end_value.append_text_node(&end_str);
             end_field.append_child(end_value);
 
@@ -169,18 +173,21 @@ impl super::XMPPClient {
 
         // Add Result Set Management (RSM) for pagination
         let mut set =
-            xmpp_parsers::minidom::Element::builder("set", "http://jabber.org/protocol/rsm").build();
+            xmpp_parsers::minidom::Element::builder("set", "http://jabber.org/protocol/rsm")
+                .build();
 
         if let Some(limit) = options.limit {
             let mut max_element =
-                xmpp_parsers::minidom::Element::builder("max", "http://jabber.org/protocol/rsm").build();
+                xmpp_parsers::minidom::Element::builder("max", "http://jabber.org/protocol/rsm")
+                    .build();
             max_element.append_text_node(&limit.to_string());
             set.append_child(max_element);
         }
 
         if let Some(after) = &options.after {
             let mut after_element =
-                xmpp_parsers::minidom::Element::builder("after", "http://jabber.org/protocol/rsm").build();
+                xmpp_parsers::minidom::Element::builder("after", "http://jabber.org/protocol/rsm")
+                    .build();
             after_element.append_text_node(after);
             set.append_child(after_element);
         }
@@ -318,8 +325,10 @@ impl super::XMPPClient {
                         // our own bare JID) omit the `to` attribute.  Fall back to
                         // our own bare JID so that OMEMO processing is not silently
                         // skipped for such messages.
-                        let our_bare_jid = self.jid.split('/').next().unwrap_or(&self.jid).to_string();
-                        let to = message_stanza.attr("to")
+                        let our_bare_jid =
+                            self.jid.split('/').next().unwrap_or(&self.jid).to_string();
+                        let to = message_stanza
+                            .attr("to")
                             .map(|s| s.to_string())
                             .or_else(|| Some(our_bare_jid));
 
@@ -464,18 +473,19 @@ impl super::XMPPClient {
         };
 
         // Build query element with minimal parameters for a quick check
-        let mut query =
-            xmpp_parsers::minidom::Element::builder("query", custom_ns::MAM).attr("queryid".try_into().unwrap(), &query_id);
+        let mut query = xmpp_parsers::minidom::Element::builder("query", custom_ns::MAM)
+            .attr("queryid".try_into().unwrap(), &query_id);
 
-        let mut x_data =
-            xmpp_parsers::minidom::Element::builder("x", "jabber:x:data").attr("type".try_into().unwrap(), "submit");
+        let mut x_data = xmpp_parsers::minidom::Element::builder("x", "jabber:x:data")
+            .attr("type".try_into().unwrap(), "submit");
 
         let mut form_type_field = xmpp_parsers::minidom::Element::builder("field", "jabber:x:data")
             .attr("var".try_into().unwrap(), "FORM_TYPE")
             .attr("type".try_into().unwrap(), "hidden")
             .build();
 
-        let mut value_element = xmpp_parsers::minidom::Element::builder("value", "jabber:x:data").build();
+        let mut value_element =
+            xmpp_parsers::minidom::Element::builder("value", "jabber:x:data").build();
         value_element.append_text_node("urn:xmpp:mam:2");
         form_type_field.append_child(value_element);
 
@@ -486,7 +496,8 @@ impl super::XMPPClient {
             .attr("var".try_into().unwrap(), "with")
             .build();
 
-        let mut with_value = xmpp_parsers::minidom::Element::builder("value", "jabber:x:data").build();
+        let mut with_value =
+            xmpp_parsers::minidom::Element::builder("value", "jabber:x:data").build();
         with_value.append_text_node(jid);
         with_field.append_child(with_value);
 
@@ -494,9 +505,11 @@ impl super::XMPPClient {
 
         // Small limit
         let mut set =
-            xmpp_parsers::minidom::Element::builder("set", "http://jabber.org/protocol/rsm").build();
+            xmpp_parsers::minidom::Element::builder("set", "http://jabber.org/protocol/rsm")
+                .build();
         let mut max_element =
-            xmpp_parsers::minidom::Element::builder("max", "http://jabber.org/protocol/rsm").build();
+            xmpp_parsers::minidom::Element::builder("max", "http://jabber.org/protocol/rsm")
+                .build();
         max_element.append_text_node(&limit.to_string());
         set.append_child(max_element);
 

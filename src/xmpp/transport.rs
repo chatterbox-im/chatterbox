@@ -25,10 +25,7 @@ pub struct TransportHandle {
 }
 
 /// Send a stanza via the transport channel.
-pub fn send_stanza(
-    tx: &StanzaTx,
-    element: Element,
-) -> anyhow::Result<()> {
+pub fn send_stanza(tx: &StanzaTx, element: Element) -> anyhow::Result<()> {
     tx.send(element).map_err(|e| anyhow::anyhow!("{}", e))
 }
 

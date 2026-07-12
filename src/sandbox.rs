@@ -201,7 +201,14 @@ mod linux {
         cage.add_exception(Exception::Networking)?;
 
         for path in [
-            "/usr/lib", "/usr/lib64", "/lib", "/lib64", "/usr/bin", "/bin", "/usr/sbin", "/sbin",
+            "/usr/lib",
+            "/usr/lib64",
+            "/lib",
+            "/lib64",
+            "/usr/bin",
+            "/bin",
+            "/usr/sbin",
+            "/sbin",
         ] {
             let p = Path::new(path);
             if p.exists() {

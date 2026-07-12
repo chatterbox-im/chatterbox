@@ -382,7 +382,8 @@ impl OmemoStorage {
                 jid, device_id
             );
             self.set_trust_level(jid, device_id, TrustLevel::Untrusted)?;
-            if let Err(e) = self.store_pending_device_verification(jid, device_id, new_fingerprint) {
+            if let Err(e) = self.store_pending_device_verification(jid, device_id, new_fingerprint)
+            {
                 warn!(
                     "Failed to record pending verification for changed key {}:{}: {}",
                     jid, device_id, e
@@ -1090,9 +1091,7 @@ impl OmemoStorage {
             };
             for device_entry in device_entries.flatten() {
                 if device_entry.path().join("rebuild_needed").exists() {
-                    if let Ok(id) =
-                        device_entry.file_name().to_string_lossy().parse::<u32>()
-                    {
+                    if let Ok(id) = device_entry.file_name().to_string_lossy().parse::<u32>() {
                         result.push((jid.clone(), id));
                     }
                 }
@@ -1121,9 +1120,7 @@ impl OmemoStorage {
             };
             for device_entry in device_entries.flatten() {
                 if device_entry.path().join("prekey_pending_since").exists() {
-                    if let Ok(id) =
-                        device_entry.file_name().to_string_lossy().parse::<u32>()
-                    {
+                    if let Ok(id) = device_entry.file_name().to_string_lossy().parse::<u32>() {
                         result.push((jid.clone(), id));
                     }
                 }
@@ -1231,8 +1228,13 @@ mod tests {
         assert!(!changed, "first save must not be flagged as a key change");
 
         // User verifies the device.
-        storage.set_trust_level(jid, dev, TrustLevel::Verified).unwrap();
-        assert_eq!(storage.get_trust_level(jid, dev).unwrap(), TrustLevel::Verified);
+        storage
+            .set_trust_level(jid, dev, TrustLevel::Verified)
+            .unwrap();
+        assert_eq!(
+            storage.get_trust_level(jid, dev).unwrap(),
+            TrustLevel::Verified
+        );
 
         // Same key refetched → trust preserved, no pending verification raised.
         let changed = storage.save_fetched_identity(jid, &id_a, "FP_A").unwrap();
@@ -1254,7 +1256,10 @@ mod tests {
             "trust MUST be reset to Untrusted on key change (no MITM trust transfer)"
         );
         // New key is persisted.
-        assert_eq!(storage.load_device_identity(jid, dev).unwrap().identity_key, id_b.identity_key);
+        assert_eq!(
+            storage.load_device_identity(jid, dev).unwrap().identity_key,
+            id_b.identity_key
+        );
         // UI re-verification is flagged with the new fingerprint.
         assert_eq!(
             storage.get_pending_device_verification(jid).unwrap(),
