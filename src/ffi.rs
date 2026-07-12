@@ -67,6 +67,15 @@ pub struct FfiMessage {
     pub status: String,
 }
 
+/// An OMEMO device fingerprint as seen by the iOS UI.
+#[derive(uniffi::Record)]
+pub struct FfiFingerprint {
+    pub device_id: u32,
+    /// 64-char hex string, space-grouped for display: "AABB CCDD …"
+    pub fingerprint: String,
+    pub is_trusted: bool,
+}
+
 /// Events the Swift layer receives via `nextEvent()`.
 #[derive(uniffi::Enum)]
 pub enum FfiEvent {
@@ -238,6 +247,49 @@ impl ChatterboxClient {
         })
         .await;
     }
+
+    /// Fetch OMEMO fingerprints for every known device of `jid`.
+    ///
+    /// Returns an empty list if OMEMO is not yet initialised or the contact
+    /// has no known devices.
+    pub async fn get_fingerprints(&self, jid: String) -> Result<Vec<FfiFingerprint>, FfiError> {
+        let inner = Arc::clone(&self.inner);
+        RUNTIME.spawn(async move {
+            let guard = inner.lock().await;
+            let state = guard.as_ref().ok_or(FfiError::NotConnected)?;
+            let bare_jid = jid.split('/').next().unwrap_or(&jid).to_string();
+
+            let device_ids = match state.xmpp.get_omemo_manager() {
+                Some(mgr) => mgr
+                    .lock()
+                    .await
+                    .get_device_ids_for_test(&bare_jid)
+                    .await
+                    .unwrap_or_default(),
+                None => return Ok(vec![]),
+            };
+
+            let mut result = Vec::new();
+            for device_id in device_ids {
+                let fp = state.xmpp.get_device_fingerprint(&bare_jid, device_id).await;
+                let trusted = state
+                    .xmpp
+                    .is_device_trusted(&bare_jid, device_id)
+                    .await
+                    .unwrap_or(false);
+                if let Ok(raw) = fp {
+                    result.push(FfiFingerprint {
+                        device_id,
+                        fingerprint: format_fingerprint(&raw),
+                        is_trusted: trusted,
+                    });
+                }
+            }
+            Ok(result)
+        })
+        .await
+        .map_err(|e| FfiError::Roster { reason: e.to_string() })?
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -272,4 +324,16 @@ fn to_ffi_message(m: Message) -> FfiMessage {
         is_encrypted: m.encrypted,
         status: format!("{:?}", m.delivery_status).to_lowercase(),
     }
+}
+
+/// Group a hex fingerprint into 4-char blocks separated by spaces for readability.
+/// e.g. "aabbccddeeff…" → "AABB CCDD EEFF …"
+fn format_fingerprint(raw: &str) -> String {
+    raw.chars()
+        .enumerate()
+        .fold(String::new(), |mut s, (i, c)| {
+            if i > 0 && i % 4 == 0 { s.push(' '); }
+            s.push(c.to_ascii_uppercase());
+            s
+        })
 }
