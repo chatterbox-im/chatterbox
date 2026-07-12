@@ -4,6 +4,12 @@ pub mod omemo; // OMEMO module
 pub mod storage; // Local message persistence
 pub mod xmpp; // Our new modular XMPP implementation
 
+#[cfg(feature = "ffi")]
+uniffi::setup_scaffolding!("chatterbox");
+
+#[cfg(feature = "ffi")]
+pub mod ffi;
+
 // Re-export main types for convenience
 pub use models::*;
 pub use xmpp::XMPPClient; // Expose the XMPPClient directly

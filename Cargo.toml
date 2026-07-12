@@ -3,9 +3,19 @@ name = "chatterbox"
 version = "1.1.0"
 edition = "2021"
 
+[lib]
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+default = ["tui"]
+# Desktop TUI — ratatui/crossterm/notify-rust. Disable for iOS/library-only builds.
+tui = ["dep:ratatui", "dep:crossterm", "dep:tui-input", "dep:notify-rust"]
+# iOS / Swift FFI layer via UniFFI.
+ffi = ["dep:uniffi"]
+
 [dependencies]
-ratatui = "0.29"
-crossterm = "0.28"
+ratatui = { version = "0.29", optional = true }
+crossterm = { version = "0.28", optional = true }
 xmpp-parsers = "0.23.0"
 tokio = { version = "1.28.2", features = ["full"] }
 tokio-xmpp = { version = "6.0.0", default-features = false, features = ["native-tls", "starttls"] }
@@ -15,7 +25,8 @@ anyhow = "1.0.75"
 thiserror = "1.0.48"
 log = "0.4.20"
 env_logger = "0.10.0"
-tui-input = "0.10"
+tui-input = { version = "0.10", optional = true }
+uniffi = { version = "0.29", features = ["tokio", "cli"], optional = true }
 uuid = { version = "1.4.1", features = ["v4"] }
 chrono = "0.4.31"
 serde = { version = "1.0", features = ["derive"] }
@@ -49,7 +60,7 @@ textwrap = "0.16.0"
 clap = { version = "4.5", features = ["derive"] }
 regex = "1.11.1"
 rusqlite = { version = "0.31", features = ["bundled"] }
-notify-rust = "4.11"
+notify-rust = { version = "4.11", optional = true }
 
 [dev-dependencies]
 proptest = "1"
