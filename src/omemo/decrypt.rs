@@ -405,12 +405,20 @@ impl OmemoManager {
                     // Replenish OPKs if supply is low
                     let remaining = bundle.one_time_pre_key_pairs.len() as u32;
                     if remaining < self.prekey_rotation_config.min_one_time_prekeys {
+                        // Use max of remaining IDs AND the consumed ID so the
+                        // new OPK never re-uses the just-consumed ID.  Without
+                        // this, if the consumed OPK happened to have the
+                        // highest ID (e.g. 20), max_id would be 19 and the
+                        // replenished OPK would get ID 20 again — making the
+                        // stale-OPK detection think the old message used a
+                        // valid key when it does not.
                         let max_id = bundle
                             .one_time_pre_key_pairs
                             .keys()
                             .copied()
                             .max()
-                            .unwrap_or(0);
+                            .unwrap_or(0)
+                            .max(opk_id);
                         let to_generate =
                             self.prekey_rotation_config.min_one_time_prekeys - remaining;
                         for i in 1..=to_generate {
