@@ -136,10 +136,13 @@ impl super::XMPPClient {
             return self.process_carbon_omemo(message, is_sent).await;
         }
 
-        // Extract message details
+        // Extract message details.
+        // For <sent> carbons the server may omit `from` (it is implicitly the
+        // connected JID); fall back to our own JID rather than failing.
+        let own_jid_sent = self.jid.split('/').next().unwrap_or(&self.jid).to_string();
         let from = message
             .attr("from")
-            .ok_or_else(|| anyhow!("No from attribute in carbon message"))?;
+            .unwrap_or(if is_sent { own_jid_sent.as_str() } else { "unknown@server.example" });
         let to = message
             .attr("to")
             .ok_or_else(|| anyhow!("No to attribute in carbon message"))?;
@@ -236,10 +239,12 @@ impl super::XMPPClient {
     ) -> Result<()> {
         debug!("Processing OMEMO encrypted carbon message");
 
-        // Extract message details
+        // Extract message details.
+        // For <sent> carbons the server may omit `from`; fall back to own JID.
+        let own_jid_omemo = self.jid.split('/').next().unwrap_or(&self.jid).to_string();
         let from = message
             .attr("from")
-            .ok_or_else(|| anyhow!("No from attribute in carbon message"))?;
+            .unwrap_or(if is_sent { own_jid_omemo.as_str() } else { "unknown@server.example" });
         let to = message
             .attr("to")
             .ok_or_else(|| anyhow!("No to attribute in carbon message"))?;
@@ -482,7 +487,18 @@ impl super::XMPPClient {
                 }
                 Err(e) => {
                     error!("Failed to decrypt OMEMO carbon message: {}", e);
-                    return Err(anyhow!("Failed to decrypt OMEMO carbon message: {}", e));
+                    // Don't propagate — a decryption failure on a carbon should not
+                    // crash the event loop.  Show a placeholder instead.
+                    return self
+                        .send_carbon_to_ui(
+                            from,
+                            to,
+                            is_sent,
+                            message.attr("id"),
+                            "[Encrypted message could not be decrypted]",
+                            true,
+                        )
+                        .await;
                 }
             }
         };

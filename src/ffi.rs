@@ -20,11 +20,13 @@
 //!   }
 
 use once_cell::sync::Lazy;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::{mpsc, Mutex};
+use uuid::Uuid;
 
 use crate::{
-    models::Message,
+    models::{DeliveryStatus, Message},
+    storage::MessageStore,
     xmpp::XMPPClient,
 };
 
@@ -85,6 +87,11 @@ pub enum FfiEvent {
     ContactUpdate { contact: FfiContact },
     /// The connection was lost.
     Disconnected { reason: String },
+    /// The delivery status of a previously sent message changed.
+    StatusUpdate { msg_id: String, status: String },
+    /// A contact started or stopped composing a message.
+    /// `is_typing` = true → composing; false → paused/inactive/gone.
+    TypingUpdate { jid: String, is_typing: bool },
 }
 
 // ---------------------------------------------------------------------------
@@ -105,6 +112,8 @@ pub struct ChatterboxClient {
 
 struct ClientState {
     xmpp: XMPPClient,
+    /// SQLite message store — None if the DB failed to open (graceful degradation).
+    store: Option<Arc<StdMutex<MessageStore>>>,
 }
 
 #[uniffi::export]
@@ -112,6 +121,15 @@ impl ChatterboxClient {
     /// Create a new (disconnected) client.
     #[uniffi::constructor]
     pub fn new() -> Arc<Self> {
+        // Initialise the log backend once.  env_logger writes to stderr, which
+        // Xcode captures and shows in the debug console when running from Xcode
+        // or via `make run` (--console-pty).  try_init is a no-op on subsequent
+        // calls so it is safe to call from every ChatterboxClient::new().
+        let _ = env_logger::Builder::from_env(
+            env_logger::Env::default().default_filter_or("info"),
+        )
+        .try_init();
+
         let (event_tx, event_rx) = mpsc::channel(256);
         Arc::new(Self {
             inner: Arc::new(Mutex::new(None)),
@@ -149,15 +167,90 @@ impl ChatterboxClient {
 
             crate::xmpp::publish_late_state(&xmpp);
 
-            *inner.lock().await = Some(ClientState { xmpp });
+            // XEP-0280: receive copies of messages sent from your other clients
+            if let Err(e) = xmpp.enable_carbons_compat().await {
+                log::warn!("Failed to enable message carbons: {e}");
+            }
 
-            // Background pump: forward incoming messages as FfiEvents.
+            // XEP-0085: wire up typing state notifications
+            let (typing_tx, mut typing_rx) =
+                tokio::sync::mpsc::channel::<(String, crate::xmpp::chat_states::TypingStatus)>(64);
+            xmpp.typing_tx = Some(typing_tx);
+            crate::xmpp::publish_late_state(&xmpp);
+
+            // Pump typing events into the FfiEvent stream
+            let event_tx_typing = event_tx.clone();
+            tokio::spawn(async move {
+                while let Some((jid, status)) = typing_rx.recv().await {
+                    use crate::xmpp::chat_states::TypingStatus;
+                    let is_typing = matches!(status, TypingStatus::Composing);
+                    let _ = event_tx_typing
+                        .send(FfiEvent::TypingUpdate { jid, is_typing })
+                        .await;
+                }
+            });
+
+            // Open (or create) the message database for this JID.
+            let store: Option<Arc<StdMutex<MessageStore>>> =
+                match MessageStore::open(&bare_jid) {
+                    Ok(s) => Some(Arc::new(StdMutex::new(s))),
+                    Err(e) => {
+                        log::warn!("Failed to open message store: {e}. History will not be persisted.");
+                        None
+                    }
+                };
+
+            *inner.lock().await = Some(ClientState { xmpp, store: store.clone() });
+
+            // Background pump: store + forward incoming messages as FfiEvents.
             tokio::spawn(async move {
                 let mut rx = msg_rx;
                 loop {
                     match rx.recv().await {
                         Some(m) => {
-                            let _ = event_tx.send(FfiEvent::Message { msg: to_ffi_message(m) }).await;
+                            // A delivery_update reuses the original message ID with
+                            // sender_id = "me".  If the store already has that ID, treat
+                            // it as a status update rather than a new message.
+                            let is_update = if let Some(ref s) = store {
+                                s.lock().ok().map_or(false, |guard| {
+                                    // Check if this ID already exists by trying to load it.
+                                    // A single-row query is cheap; we reuse load_messages
+                                    // with limit=1 and filter by id via SQL.
+                                    guard
+                                        .load_messages(&m.recipient_id, 1)
+                                        .ok()
+                                        .map_or(false, |msgs| {
+                                            msgs.iter().any(|existing| existing.id == m.id)
+                                        })
+                                })
+                            } else {
+                                false
+                            };
+
+                            if is_update {
+                                // Update the stored row's delivery status
+                                if let Some(ref s) = store {
+                                    if let Ok(guard) = s.lock() {
+                                        let _ = guard.update_delivery_status(
+                                            &m.id,
+                                            m.delivery_status.clone(),
+                                        );
+                                    }
+                                }
+                                let status = format!("{:?}", m.delivery_status).to_lowercase();
+                                let _ = event_tx
+                                    .send(FfiEvent::StatusUpdate { msg_id: m.id, status })
+                                    .await;
+                            } else {
+                                if let Some(ref s) = store {
+                                    if let Ok(guard) = s.lock() {
+                                        let _ = guard.store_message(&m);
+                                    }
+                                }
+                                let _ = event_tx
+                                    .send(FfiEvent::Message { msg: to_ffi_message(m) })
+                                    .await;
+                            }
                         }
                         None => {
                             let _ = event_tx
@@ -178,16 +271,42 @@ impl ChatterboxClient {
     }
 
     /// Send an OMEMO-encrypted (or plaintext-fallback) message to `to_jid`.
-    pub async fn send_message(&self, to_jid: String, body: String) -> Result<(), FfiError> {
+    /// Returns the stored `FfiMessage` so the caller can display it immediately.
+    pub async fn send_message(&self, to_jid: String, body: String) -> Result<FfiMessage, FfiError> {
         let inner = Arc::clone(&self.inner);
         RUNTIME.spawn(async move {
             let mut guard = inner.lock().await;
             let state = guard.as_mut().ok_or(FfiError::NotConnected)?;
+
+            // Generate the ID first — it is used BOTH on the wire and in storage so
+            // that when the echo comes back through msg_rx the deduplication catches it.
+            let msg_id = Uuid::new_v4().to_string();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+
             state
                 .xmpp
-                .send_message(&to_jid, &body)
+                .send_message_with_id(&to_jid, &body, &msg_id)
                 .await
-                .map_err(|e| FfiError::Send { reason: e.to_string() })
+                .map_err(|e| FfiError::Send { reason: e.to_string() })?;
+
+            let record = Message {
+                id: msg_id,
+                sender_id: "me".to_string(),
+                recipient_id: to_jid.clone(),
+                content: body.clone(),
+                timestamp: now,
+                delivery_status: DeliveryStatus::Sent,
+                encrypted: true,
+            };
+            if let Some(ref s) = state.store {
+                if let Ok(guard) = s.lock() {
+                    let _ = guard.store_message(&record);
+                }
+            }
+            Ok(to_ffi_message(record))
         })
         .await
         .map_err(|e| FfiError::Send { reason: e.to_string() })?
@@ -237,6 +356,156 @@ impl ChatterboxClient {
         })
         .await
         .unwrap_or(None)
+    }
+
+    /// Load the most recent `limit` messages for a conversation partner.
+    /// Returns oldest-first so the UI can append them in order.
+    pub async fn load_history(&self, jid: String, limit: u32) -> Result<Vec<FfiMessage>, FfiError> {
+        let inner = Arc::clone(&self.inner);
+        RUNTIME.spawn(async move {
+            let guard = inner.lock().await;
+            let state = guard.as_ref().ok_or(FfiError::NotConnected)?;
+            let msgs = match &state.store {
+                Some(s) => s
+                    .lock()
+                    .map_err(|_| FfiError::Roster { reason: "store lock poisoned".into() })?
+                    .load_messages(&jid, limit as usize)
+                    .map_err(|e| FfiError::Roster { reason: e.to_string() })?,
+                None => vec![],
+            };
+            Ok(msgs.into_iter().map(to_ffi_message).collect())
+        })
+        .await
+        .map_err(|e| FfiError::Roster { reason: e.to_string() })?
+    }
+
+    /// Return all contact JIDs that have stored message history, newest-first.
+    /// Call this after `connect()` to restore previous conversations.
+    pub async fn list_conversations(&self) -> Result<Vec<String>, FfiError> {
+        let inner = Arc::clone(&self.inner);
+        RUNTIME.spawn(async move {
+            let guard = inner.lock().await;
+            let state = guard.as_ref().ok_or(FfiError::NotConnected)?;
+            match &state.store {
+                Some(s) => s
+                    .lock()
+                    .map_err(|_| FfiError::Roster { reason: "store lock poisoned".into() })?
+                    .list_contacts()
+                    .map_err(|e| FfiError::Roster { reason: e.to_string() }),
+                None => Ok(vec![]),
+            }
+        })
+        .await
+        .map_err(|e| FfiError::Roster { reason: e.to_string() })?
+    }
+
+    /// Fetch server-side message archive (MAM, XEP-0313) for `jid` and store
+    /// any messages newer than `since_unix_secs`.  Returns the new messages
+    /// oldest-first so the caller can append them to local history.
+    pub async fn fetch_mam(&self, jid: String, since_unix_secs: i64) -> Result<Vec<FfiMessage>, FfiError> {
+        let inner = Arc::clone(&self.inner);
+        RUNTIME.spawn(async move {
+            let guard = inner.lock().await;
+            let state = guard.as_ref().ok_or(FfiError::NotConnected)?;
+
+            let start = chrono::DateTime::from_timestamp(since_unix_secs, 0)
+                .unwrap_or_else(chrono::Utc::now);
+            let opts = crate::xmpp::message_archive::MAMQueryOptions {
+                with: Some(jid.clone()),
+                start: Some(start),
+                end: None,
+                ..crate::xmpp::message_archive::MAMQueryOptions::new()
+            };
+
+            let msgs = state
+                .xmpp
+                .get_message_history(opts)
+                .await
+                .map_err(|e| FfiError::Roster { reason: e.to_string() })?;
+
+            // Store new messages; dedup is handled by INSERT OR IGNORE in SQLite
+            let mut new_msgs = Vec::new();
+            if let Some(ref s) = state.store {
+                if let Ok(guard) = s.lock() {
+                    for m in &msgs {
+                        let _ = guard.store_message(m);
+                        new_msgs.push(to_ffi_message(m.clone()));
+                    }
+                }
+            } else {
+                new_msgs = msgs.into_iter().map(to_ffi_message).collect();
+            }
+            Ok(new_msgs)
+        })
+        .await
+        .map_err(|e| FfiError::Roster { reason: e.to_string() })?
+    }
+
+    /// Send an XEP-0085 chat state: `is_typing = true` → Composing, false → Paused.
+    pub async fn send_typing(&self, jid: String, is_typing: bool) -> Result<(), FfiError> {
+        let inner = Arc::clone(&self.inner);
+        RUNTIME.spawn(async move {
+            let guard = inner.lock().await;
+            let state = guard.as_ref().ok_or(FfiError::NotConnected)?;
+            use crate::xmpp::chat_states::TypingStatus;
+            let status = if is_typing { TypingStatus::Composing } else { TypingStatus::Paused };
+            state
+                .xmpp
+                .send_chat_state(&jid, &status)
+                .map_err(|e| FfiError::Send { reason: e.to_string() })
+        })
+        .await
+        .map_err(|e| FfiError::Send { reason: e.to_string() })?
+    }
+
+    /// Mark an OMEMO device as trusted.
+    pub async fn trust_device(&self, jid: String, device_id: u32) -> Result<(), FfiError> {
+        let inner = Arc::clone(&self.inner);
+        RUNTIME.spawn(async move {
+            let guard = inner.lock().await;
+            let state = guard.as_ref().ok_or(FfiError::NotConnected)?;
+            state
+                .xmpp
+                .mark_device_trusted(&jid, device_id)
+                .await
+                .map_err(|e| FfiError::Omemo { reason: e.to_string() })
+        })
+        .await
+        .map_err(|e| FfiError::Omemo { reason: e.to_string() })?
+    }
+
+    /// Mark an OMEMO device as untrusted.
+    pub async fn distrust_device(&self, jid: String, device_id: u32) -> Result<(), FfiError> {
+        let inner = Arc::clone(&self.inner);
+        RUNTIME.spawn(async move {
+            let guard = inner.lock().await;
+            let state = guard.as_ref().ok_or(FfiError::NotConnected)?;
+            state
+                .xmpp
+                .mark_device_untrusted(&jid, device_id)
+                .await
+                .map_err(|e| FfiError::Omemo { reason: e.to_string() })
+        })
+        .await
+        .map_err(|e| FfiError::Omemo { reason: e.to_string() })?
+    }
+
+    /// Delete all stored messages for a conversation partner.
+    pub async fn delete_conversation(&self, jid: String) -> Result<(), FfiError> {
+        let inner = Arc::clone(&self.inner);
+        RUNTIME.spawn(async move {
+            let guard = inner.lock().await;
+            let state = guard.as_ref().ok_or(FfiError::NotConnected)?;
+            if let Some(ref s) = state.store {
+                s.lock()
+                    .map_err(|_| FfiError::Roster { reason: "store lock poisoned".into() })?
+                    .delete_conversation(&jid)
+                    .map_err(|e| FfiError::Roster { reason: e.to_string() })?;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| FfiError::Roster { reason: e.to_string() })?
     }
 
     /// Gracefully disconnect and close the event stream.

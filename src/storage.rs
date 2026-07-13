@@ -84,6 +84,13 @@ impl MessageStore {
             .conn
             .execute_batch("ALTER TABLE messages ADD COLUMN encrypted INTEGER NOT NULL DEFAULT 0;");
 
+        // Purge rows with known-bad contact_jid sentinel values written by early
+        // buggy builds.  This is safe to run repeatedly (DELETE is idempotent).
+        let _ = self.conn.execute_batch(
+            "DELETE FROM messages WHERE contact_jid IN ('me', 'unknown', 'system')
+             OR contact_jid NOT LIKE '%@%';"
+        );
+
         Ok(())
     }
 
@@ -156,6 +163,26 @@ impl MessageStore {
         self.conn.execute(
             "UPDATE messages SET delivery_status = ?1 WHERE id = ?2",
             params![status as i32, msg_id],
+        )?;
+        Ok(())
+    }
+
+    /// Return all contact JIDs that have stored messages, ordered by most recent activity.
+    pub fn list_contacts(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT contact_jid FROM messages
+             GROUP BY contact_jid
+             ORDER BY MAX(timestamp) DESC",
+        )?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Delete all messages for a contact (conversation delete).
+    pub fn delete_conversation(&self, contact_jid: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM messages WHERE contact_jid = ?1",
+            rusqlite::params![contact_jid],
         )?;
         Ok(())
     }

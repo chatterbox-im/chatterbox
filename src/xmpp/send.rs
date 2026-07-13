@@ -10,28 +10,27 @@ use super::{custom_ns, XMPPClient};
 use crate::models::{DeliveryStatus, Message, PendingMessage};
 
 impl XMPPClient {
-    /// Send a message (encrypted if OMEMO is enabled, plaintext otherwise)
+    /// Send a message (encrypted if OMEMO is enabled, plaintext otherwise).
+    /// `msg_id` is caller-supplied so the wire ID matches what was stored/returned.
     pub async fn send_message(&mut self, recipient: &str, content: &str) -> Result<()> {
+        self.send_message_with_id(recipient, content, &uuid::Uuid::new_v4().to_string()).await
+    }
+
+    /// Like `send_message` but uses a specific message ID.
+    pub async fn send_message_with_id(&mut self, recipient: &str, content: &str, msg_id: &str) -> Result<()> {
         info!(
             "SEND_MESSAGE CALLED: recipient={}, content_starts_with={}",
             recipient,
             content.chars().take(30).collect::<String>()
         );
 
-        // Check if OMEMO is enabled - if it is, always use encrypted messaging
         let omemo_enabled = self.is_omemo_enabled().await;
 
         if omemo_enabled {
-            info!(
-                "OMEMO is enabled, sending encrypted message to: {}",
-                recipient
-            );
-            self.send_encrypted_message(recipient, content).await
+            info!("OMEMO is enabled, sending encrypted message to: {}", recipient);
+            self.send_encrypted_message_with_id(recipient, content, msg_id).await
         } else {
-            info!(
-                "OMEMO is disabled, sending plaintext message to: {}",
-                recipient
-            );
+            info!("OMEMO is disabled, sending plaintext message to: {}", recipient);
             warn!("⚠️ WARNING: Message is being sent in plaintext without encryption!");
             self.send_message_with_receipt(recipient, content).await
         }
@@ -39,6 +38,11 @@ impl XMPPClient {
 
     /// Send an encrypted message using OMEMO
     pub async fn send_encrypted_message(&mut self, to: &str, content: &str) -> Result<()> {
+        self.send_encrypted_message_with_id(to, content, &uuid::Uuid::new_v4().to_string()).await
+    }
+
+    /// Send an encrypted message using a specific message ID (used by the FFI layer).
+    pub async fn send_encrypted_message_with_id(&mut self, to: &str, content: &str, msg_id: &str) -> Result<()> {
         info!("Sending encrypted message to {}", to);
 
         // Get our OMEMO manager
@@ -87,8 +91,8 @@ impl XMPPClient {
 
         drop(omemo_manager_guard);
 
-        // Generate a message ID
-        let id = uuid::Uuid::new_v4().to_string();
+        // Use the caller-supplied message ID so the wire ID matches storage.
+        let id = msg_id.to_string();
 
         // Create the OMEMO message stanza
         let mut message_element = Element::builder("message", "jabber:client").build();
