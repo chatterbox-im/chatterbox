@@ -448,6 +448,23 @@ impl OmemoManager {
 
     /// Evict stale entries from bounded collections.
     /// Call periodically (e.g., before each encrypt) to prevent unbounded growth.
+    /// Reset the consecutive-failure counter for a device.
+    /// Called after MAM replay failures to prevent false-positive session resets.
+    pub async fn reset_failure_count(&mut self, jid: &str, device_id: u32) -> Result<(), crate::omemo::OmemoError> {
+        let bare = Self::normalize_jid_to_bare(jid);
+        let storage = self.storage.lock().await;
+        let _ = storage.reset_device_failure_count(&bare, device_id);
+        Ok(())
+    }
+
+    /// Clear the ignore status for a device so it is eligible for encryption again.
+    pub async fn clear_device_ignore(&mut self, jid: &str, device_id: u32) -> Result<(), crate::omemo::OmemoError> {
+        let bare = Self::normalize_jid_to_bare(jid);
+        let storage = self.storage.lock().await;
+        let _ = storage.clear_device_ignore_status(&bare, device_id);
+        Ok(())
+    }
+
     pub fn evict_stale_entries(&mut self) {
         use std::time::Duration;
         let ttl = Duration::from_secs(Self::PENDING_TTL_SECS);

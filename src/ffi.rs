@@ -172,6 +172,17 @@ impl ChatterboxClient {
                 log::warn!("Failed to enable message carbons: {e}");
             }
 
+            // Clear any stale ignore/failure state for our own OMEMO device.
+            // Self-session replay failures from previous MAM catch-ups are always
+            // false positives — they must never block outgoing messages.
+            if let Some(ref mgr) = xmpp.omemo_manager {
+                if let Ok((own_device_id, _)) = crate::omemo::device_id::load_or_generate_device_id() {
+                    let mut manager = mgr.lock().await;
+                    let _ = manager.reset_failure_count(&bare_jid, own_device_id).await;
+                    let _ = manager.clear_device_ignore(&bare_jid, own_device_id).await;
+                }
+            }
+
             // XEP-0085: wire up typing state notifications
             let (typing_tx, mut typing_rx) =
                 tokio::sync::mpsc::channel::<(String, crate::xmpp::chat_states::TypingStatus)>(64);

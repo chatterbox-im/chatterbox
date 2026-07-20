@@ -528,6 +528,19 @@ impl OmemoManager {
             sender_jid, device_id, session_error
         );
 
+        // "Counter too old" / "already processed" errors are Double Ratchet replay
+        // detection working correctly — the message was already decrypted in a
+        // previous session (e.g. a MAM re-delivery).  Do NOT count these as failures;
+        // doing so would incorrectly trigger session resets for working sessions.
+        let error_str = session_error.to_string();
+        if error_str.contains("too old")
+            || error_str.contains("already processed")
+            || error_str.contains("no stored key")
+        {
+            return Err(OmemoError::SessionError(session_error));
+        }
+
+
         // Check for AEAD errors specifically
         if let crate::omemo::session::SessionError::DoubleRatchetError(ref ratchet_error) =
             session_error

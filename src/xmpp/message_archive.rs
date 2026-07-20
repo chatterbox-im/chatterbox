@@ -633,6 +633,18 @@ impl super::XMPPClient {
             manager.get_device_id()
         };
 
+        // If the sender is our own device, this is an archive echo of a message
+        // WE sent.  The ratchet for the self-session has already advanced; trying
+        // to re-decrypt it will always fail and corrupt the session state.
+        // Skip decryption — we already have the plaintext from when we sent it.
+        if sender_device_id == own_device_id {
+            debug!(
+                "Skipping MAM decryption of own-device message (device {})",
+                sender_device_id
+            );
+            return Ok(None);
+        }
+
         // Look for a key element intended for our device
         let mut key_data = None;
 
@@ -752,7 +764,16 @@ impl super::XMPPClient {
             {
                 Ok(content) => content,
                 Err(e) => {
-                    error!("Failed to decrypt OMEMO message: {}", e);
+                    // Ratchet replay errors ("counter too old", "MAC verification failed")
+                    // are expected when MAM re-delivers already-processed messages.
+                    // Log at WARN — these are not bugs, just normal MAM catch-up noise.
+                    // Also reset the failure counter so replays never accumulate into a
+                    // session reset that would destroy a working live-message session.
+                    warn!("Failed to decrypt OMEMO message (likely a MAM replay): {}", e);
+                    {
+                        let mut mgr = omemo_manager.lock().await;
+                        let _ = mgr.reset_failure_count(&sender_jid, sender_device_id).await;
+                    }
                     return Err(anyhow!("Failed to decrypt OMEMO message: {}", e));
                 }
             }
