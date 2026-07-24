@@ -20,6 +20,7 @@
 //!   }
 
 use once_cell::sync::Lazy;
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::{mpsc, Mutex};
 use uuid::Uuid;
@@ -95,6 +96,134 @@ pub enum FfiEvent {
 }
 
 // ---------------------------------------------------------------------------
+// In-memory log buffer — ring buffer of the last N formatted log lines,
+// accessible via get_log_contents() so the iOS app can export them.
+// ---------------------------------------------------------------------------
+
+const LOG_BUFFER_CAP: usize = 10_000;
+
+static LOG_BUFFER: Lazy<StdMutex<VecDeque<String>>> =
+    Lazy::new(|| StdMutex::new(VecDeque::with_capacity(LOG_BUFFER_CAP)));
+
+/// The persistent log file opened by `set_log_file()`.  Written on every log
+/// call so the file is useful even if the process is killed before the user
+/// taps "Export".
+static LOG_FILE: Lazy<StdMutex<Option<std::fs::File>>> =
+    Lazy::new(|| StdMutex::new(None));
+
+/// Open (and truncate) the persistent log file at `path`.  Call this once at
+/// app startup, before `connect()`.  All subsequent log lines will be written
+/// to that file AND to the in-memory buffer.  Any lines already in the buffer
+/// are flushed to the file first so no early logs are lost.
+///
+/// The file is kept open for the lifetime of the process so every log line
+/// reaches disk even if the app is killed, unlike an in-memory buffer.
+#[uniffi::export]
+pub fn set_log_file(path: String) {
+    use std::io::Write;
+    let result = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&path);
+    match result {
+        Ok(mut file) => {
+            let header = format!(
+                "=== Chatterbox session started {} ===\n",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+            );
+            let _ = file.write_all(header.as_bytes());
+            // Write any lines buffered before the file was opened (early init logs).
+            if let Ok(buf) = LOG_BUFFER.lock() {
+                for line in buf.iter() {
+                    let _ = writeln!(file, "{}", line);
+                }
+            }
+            let _ = file.flush();
+            if let Ok(mut guard) = LOG_FILE.lock() {
+                *guard = Some(file);
+            }
+        }
+        Err(e) => {
+            eprintln!("ChatterboxLogger: failed to open log file '{}': {}", path, e);
+        }
+    }
+}
+
+/// Custom log backend: writes to stderr (Xcode console) AND the in-memory
+/// ring buffer so the iOS app can export the logs at any time.
+struct ChatterboxLogger {
+    /// Handles filtering and stderr formatting.
+    inner: env_logger::Logger,
+}
+
+impl log::Log for ChatterboxLogger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        self.inner.enabled(metadata)
+    }
+
+    fn log(&self, record: &log::Record) {
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+        // Forward to env_logger so Xcode console output is unchanged.
+        self.inner.log(record);
+
+        let line = format!(
+            "{} [{:<5}] {} — {}",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
+            record.level(),
+            record.target(),
+            record.args()
+        );
+
+        // Append to in-memory ring buffer.
+        if let Ok(mut buf) = LOG_BUFFER.try_lock() {
+            if buf.len() == LOG_BUFFER_CAP {
+                buf.pop_front();
+            }
+            buf.push_back(line.clone());
+        }
+
+        // Append to the persistent log file.  try_lock avoids stalling when
+        // the logger is called from within set_log_file() itself.
+        if let Ok(mut guard) = LOG_FILE.try_lock() {
+            if let Some(ref mut file) = *guard {
+                use std::io::Write;
+                let _ = writeln!(file, "{}", line);
+                // Flush after every write so the file is usable after a crash.
+                let _ = file.flush();
+            }
+        }
+    }
+
+    fn flush(&self) {
+        self.inner.flush();
+        if let Ok(mut guard) = LOG_FILE.try_lock() {
+            if let Some(ref mut file) = *guard {
+                use std::io::Write;
+                let _ = file.flush();
+            }
+        }
+    }
+}
+
+/// Return all buffered log lines as a single newline-separated string.
+/// Call from Swift to get the full in-session log for export.
+#[uniffi::export]
+pub fn get_log_contents() -> String {
+    LOG_BUFFER
+        .lock()
+        .map(|buf| {
+            buf.iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------
 // Main client object
 // ---------------------------------------------------------------------------
 
@@ -121,14 +250,26 @@ impl ChatterboxClient {
     /// Create a new (disconnected) client.
     #[uniffi::constructor]
     pub fn new() -> Arc<Self> {
-        // Initialise the log backend once.  env_logger writes to stderr, which
-        // Xcode captures and shows in the debug console when running from Xcode
-        // or via `make run` (--console-pty).  try_init is a no-op on subsequent
-        // calls so it is safe to call from every ChatterboxClient::new().
-        let _ = env_logger::Builder::from_env(
-            env_logger::Env::default().default_filter_or("info"),
-        )
-        .try_init();
+        // Initialise the log backend once. We install a custom logger that
+        // writes to stderr (Xcode console) AND our in-memory ring buffer.
+        static LOGGER_ONCE: std::sync::Once = std::sync::Once::new();
+        LOGGER_ONCE.call_once(|| {
+            let inner = env_logger::Builder::from_env(
+                env_logger::Env::default().default_filter_or("info"),
+            )
+            .build();
+            let max_level = inner.filter();
+            let logger = ChatterboxLogger { inner };
+            // session header so exported logs are easy to orientate
+            if let Ok(mut buf) = LOG_BUFFER.try_lock() {
+                buf.push_back(format!(
+                    "=== Chatterbox session started {} ===",
+                    chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+                ));
+            }
+            let _ = log::set_boxed_logger(Box::new(logger));
+            log::set_max_level(max_level);
+        });
 
         let (event_tx, event_rx) = mpsc::channel(256);
         Arc::new(Self {
