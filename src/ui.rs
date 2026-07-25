@@ -1347,6 +1347,36 @@ fn draw_messages(f: &mut Frame, messages: &[Message], area: Rect, ui: &ChatUI) {
 
     // Render the widget with state to allow scrolling to the selected (last) message
     f.render_stateful_widget(messages_list, chunks[0], &mut list_state);
+
+    // Typing indicator row (chunks[1]) ----------------------------------------
+    let typing_text = {
+        let base = ChatUI::get_base_jid(&ui.contact);
+        if let Some((status, _)) = ui.typing_states.get(&base) {
+            let display = base.split('@').next().unwrap_or(&base);
+            match status {
+                TypingStatus::Composing => {
+                    // Animate the trailing dots: cycle through 1-3 every ~400 ms.
+                    let dots_phase =
+                        (chrono::Utc::now().timestamp_subsec_millis() / 400) % 3 + 1;
+                    let dots = ".".repeat(dots_phase as usize);
+                    Some((
+                        format!(" ✍  {} is typing{}", display, dots),
+                        Style::default().fg(Color::DarkGray),
+                    ))
+                }
+                TypingStatus::Paused => Some((
+                    format!(" ✍  {} has paused", display),
+                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+                )),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    };
+    if let Some((text, style)) = typing_text {
+        f.render_widget(Paragraph::new(text).style(style), chunks[1]);
+    }
 }
 
 fn draw_key_confirmation(f: &mut Frame, key_conf: &KeyConfirmation, area: Rect) {
