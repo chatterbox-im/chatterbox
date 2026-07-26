@@ -24,6 +24,16 @@ impl XMPPClient {
             content.chars().take(30).collect::<String>()
         );
 
+        // Normalize JIDs for self-message detection (strip resource, lowercase)
+        let recipient_bare = recipient.split('/').next().unwrap_or(recipient).to_lowercase();
+        let self_bare = self.jid.split('/').next().unwrap_or(&self.jid).to_lowercase();
+        let is_self_message = recipient_bare == self_bare;
+
+        if is_self_message {
+            info!("Self-message detected, sending plaintext to: {}", recipient);
+            return self.send_message_with_receipt(recipient, content).await;
+        }
+
         let omemo_enabled = self.is_omemo_enabled().await;
 
         if omemo_enabled {

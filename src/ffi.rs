@@ -464,6 +464,29 @@ impl ChatterboxClient {
         .map_err(|e| FfiError::Send { reason: e.to_string() })?
     }
 
+    /// Reset the OMEMO session for a specific contact and device ID.
+    ///
+    /// This is used to recover from cryptographic desynchronization.
+    /// It deletes the existing session state for the given device ID.
+    pub async fn reset_omemo_session(&self, jid: String, device_id: u32) -> Result<(), FfiError> {
+        let inner = Arc::clone(&self.inner);
+        RUNTIME.spawn(async move {
+            let mut guard = inner.lock().await;
+            let state = guard.as_mut().ok_or(FfiError::NotConnected)?;
+            
+            let session_key = format!("{}:{}", jid, device_id);
+            
+            if let Some(ref mgr) = state.xmpp.omemo_manager {
+                let mut mgr_guard = mgr.lock().await;
+                mgr_guard.reset_session(&jid, device_id).await
+                    .map_err(|e| FfiError::Omemo { reason: e.to_string() })?;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| FfiError::Omemo { reason: e.to_string() })?
+    }
+
     /// Fetch the roster (contact list) from the server.
     pub async fn get_contacts(&self) -> Result<Vec<FfiContact>, FfiError> {
         let inner = Arc::clone(&self.inner);

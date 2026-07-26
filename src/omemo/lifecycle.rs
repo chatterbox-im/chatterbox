@@ -360,8 +360,8 @@ impl OmemoManager {
         {
             let standard_node = format!("{}:devices", OMEMO_NAMESPACE);
             info!("[OMEMO] Trying standard node: {}", standard_node);
-            match self.pubsub.request_items(bare_jid, &standard_node).await {
-                Ok(xml) => match self.parse_device_list_response(&xml) {
+            match timeout(Duration::from_secs(5), self.pubsub.request_items(bare_jid, &standard_node)).await {
+                Ok(Ok(xml)) => match self.parse_device_list_response(&xml) {
                     Ok(devices) if !devices.is_empty() => {
                         info!(
                             "[OMEMO] Found {} devices with standard namespace: {:?}",
@@ -377,15 +377,18 @@ impl OmemoManager {
                         warn!("[OMEMO] Failed to parse standard namespace response: {}", e);
                     }
                 },
-                Err(e) => {
+                Ok(Err(e)) => {
                     info!("[OMEMO] Standard namespace failed: {}, trying legacy", e);
+                }
+                Err(_) => {
+                    info!("[OMEMO] Timeout fetching standard namespace, trying legacy");
                 }
             }
 
             let legacy_node = "eu.siacs.conversations.axolotl:devices";
             info!("[OMEMO] Trying legacy node: {}", legacy_node);
-            match self.pubsub.request_items(bare_jid, &legacy_node).await {
-                Ok(xml) => match self.parse_device_list_response(&xml) {
+            match timeout(Duration::from_secs(5), self.pubsub.request_items(bare_jid, &legacy_node)).await {
+                Ok(Ok(xml)) => match self.parse_device_list_response(&xml) {
                     Ok(devices) => {
                         info!(
                             "[OMEMO] Found {} devices with legacy namespace: {:?}",
@@ -399,12 +402,18 @@ impl OmemoManager {
                         return Err(e);
                     }
                 },
-                Err(e) => {
-                    error!("[OMEMO] Both standard and legacy namespace failed: {}", e);
+                Ok(Err(e)) => {
+                    error!("[OMEMO] Legacy namespace failed: {}", e);
                     return Err(OmemoError::ProtocolError(format!(
-                        "Failed to fetch device list from both namespaces: {}",
+                        "Failed to fetch device list from legacy namespace: {}",
                         e
                     )));
+                }
+                Err(_) => {
+                    error!("[OMEMO] Timeout fetching legacy namespace");
+                    return Err(OmemoError::TimeoutError(
+                        "Device list fetch timeout".to_string(),
+                    ));
                 }
             }
         }

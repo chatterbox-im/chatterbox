@@ -249,7 +249,7 @@ pub async fn fetch_device_list_with_fallbacks(
     }
 
     let mut combined_devices = Vec::new();
-    let any_success = false;
+    let mut any_success = false;
 
     // Try each namespace
     for namespace in &OMEMO_NAMESPACES {
@@ -305,6 +305,7 @@ pub async fn fetch_device_list_with_fallbacks(
                             debug!("[OMEMO] No devices found with node {} (empty list or item-not-found)", node);
                             // This is a valid response but with no devices - continue to next namespace
                             namespace_had_valid_response = true;
+                            any_success = true;
                         }
                         Err(e) => {
                             debug!(
@@ -363,32 +364,47 @@ pub async fn fetch_device_list_with_fallbacks(
 
     // If we didn't find any devices, try the standard node as a final attempt
     let standard_node = format!("{}:devices", OMEMO_NAMESPACE);
-    match pubsub.request_items(bare_jid, &standard_node).await {
-        Ok(xml) => {
+    match timeout(
+        Duration::from_secs(DEVICE_LIST_TIMEOUT_SECS),
+        pubsub.request_items(bare_jid, &standard_node),
+    )
+    .await
+    {
+        Ok(Ok(xml)) => {
             if let Ok(devices) = parse_device_list_response_static(&xml) {
                 if !devices.is_empty() {
                     return Ok(devices);
                 }
             }
         }
-        Err(e) => {
-            // Try legacy format as final attempt
-            let legacy_node = format!("{}:devicelist", OMEMO_NAMESPACE);
-            match pubsub.request_items(bare_jid, &legacy_node).await {
-                Ok(xml) => {
-                    if let Ok(devices) = parse_device_list_response_static(&xml) {
-                        if !devices.is_empty() {
-                            return Ok(devices);
-                        }
-                    }
-                }
-                Err(e_legacy) => {
-                    warn!(
-                        "[OMEMO] Final attempts to fetch device list failed: {} and {}",
-                        e, e_legacy
-                    );
+        Ok(Err(e)) => {
+            debug!("[OMEMO] Failed to fetch standard node: {}", e);
+        }
+        Err(_) => {
+            debug!("[OMEMO] Timeout fetching standard node");
+        }
+    }
+
+    // Try legacy format as final attempt
+    let legacy_node = format!("{}:devicelist", OMEMO_NAMESPACE);
+    match timeout(
+        Duration::from_secs(DEVICE_LIST_TIMEOUT_SECS),
+        pubsub.request_items(bare_jid, &legacy_node),
+    )
+    .await
+    {
+        Ok(Ok(xml)) => {
+            if let Ok(devices) = parse_device_list_response_static(&xml) {
+                if !devices.is_empty() {
+                    return Ok(devices);
                 }
             }
+        }
+        Ok(Err(e)) => {
+            debug!("[OMEMO] Failed to fetch legacy node: {}", e);
+        }
+        Err(_) => {
+            debug!("[OMEMO] Timeout fetching legacy node");
         }
     }
 
@@ -409,8 +425,13 @@ async fn try_fetch_bundle_for_common_device_ids(
 
     for &device_id in &common_device_ids {
         let bundle_node = format!("{}.bundles:{}", OMEMO_NAMESPACE, device_id);
-        match pubsub.request_items(jid, &bundle_node).await {
-            Ok(_) => {
+        match timeout(
+            Duration::from_secs(DEVICE_LIST_TIMEOUT_SECS),
+            pubsub.request_items(jid, &bundle_node),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {
                 // If we can fetch a bundle, this device likely exists
                 info!(
                     "[OMEMO] Found device {} for {} by directly checking bundle",
@@ -418,16 +439,38 @@ async fn try_fetch_bundle_for_common_device_ids(
                 );
                 found_devices.push(device_id);
             }
+            Ok(Err(e)) => {
+                debug!("[OMEMO] Failed to fetch bundle for device {}: {}", device_id, e);
+            }
             Err(_) => {
-                // Try alternative format (legacy with colon)
-                let alt_bundle_node = format!("{}:bundles:{}", OMEMO_NAMESPACE, device_id);
-                if let Ok(_) = pubsub.request_items(jid, &alt_bundle_node).await {
-                    info!(
-                        "[OMEMO] Found device {} for {} by checking legacy bundle format",
-                        device_id, jid
-                    );
-                    found_devices.push(device_id);
-                }
+                debug!("[OMEMO] Timeout fetching bundle for device {}", device_id);
+            }
+        }
+
+        if found_devices.contains(&device_id) {
+            continue;
+        }
+
+        // Try alternative format (legacy with colon)
+        let alt_bundle_node = format!("{}:bundles:{}", OMEMO_NAMESPACE, device_id);
+        match timeout(
+            Duration::from_secs(DEVICE_LIST_TIMEOUT_SECS),
+            pubsub.request_items(jid, &alt_bundle_node),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {
+                info!(
+                    "[OMEMO] Found device {} for {} by checking legacy bundle format",
+                    device_id, jid
+                );
+                found_devices.push(device_id);
+            }
+            Ok(Err(e)) => {
+                debug!("[OMEMO] Failed to fetch legacy bundle for device {}: {}", device_id, e);
+            }
+            Err(_) => {
+                debug!("[OMEMO] Timeout fetching legacy bundle for device {}", device_id);
             }
         }
     }

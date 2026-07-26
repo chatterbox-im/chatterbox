@@ -125,6 +125,10 @@ impl OmemoStorage {
         fs::create_dir_all(base_path.join("key_bundles"))?;
         fs::create_dir_all(base_path.join("metadata"))?;
 
+        // Remove any orphaned .tmp files left by interrupted writes (e.g. app
+        // killed between write and rename).  Errors are non-fatal.
+        Self::cleanup_orphaned_tmp_files(&base_path);
+
         // Load or generate device ID
         let device_id = Self::load_or_generate_device_id(&base_path)?;
 
@@ -137,6 +141,19 @@ impl OmemoStorage {
     /// Create a new OMEMO storage with default settings
     pub fn new_default() -> Result<Self> {
         Self::new(None)
+    }
+
+    fn cleanup_orphaned_tmp_files(path: &Path) {
+        if let Ok(entries) = fs::read_dir(path) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    Self::cleanup_orphaned_tmp_files(&path);
+                } else if path.extension().and_then(|ext| ext.to_str()) == Some("tmp") {
+                    let _ = fs::remove_file(path);
+                }
+            }
+        }
     }
 
     /// Load or generate device ID
@@ -163,8 +180,16 @@ impl OmemoStorage {
             fs::create_dir_all(parent)?;
         }
 
-        // Write to temporary file first, then rename for atomicity
-        let temp_path = path.with_extension("tmp");
+        // Write to temporary file first, then rename for atomicity.
+        // Use a unique suffix for the same reason as write_binary_file: concurrent
+        // writers to the same path must not share the same temp filename.
+        let unique = uuid::Uuid::new_v4().simple().to_string();
+        let temp_name = format!(
+            "{}.{}.tmp",
+            path.file_name().unwrap_or_default().to_string_lossy(),
+            unique
+        );
+        let temp_path = path.with_file_name(temp_name);
         fs::write(&temp_path, content)?;
         fs::rename(&temp_path, path)?;
         Ok(())
@@ -187,7 +212,17 @@ impl OmemoStorage {
 
         let encoded = bincode::serialize(data)?;
 
-        let temp_path = path.with_extension("tmp");
+        // Use a unique suffix so that two concurrent writes to the same target
+        // (e.g. two OmemoManager instances racing during a reconnect) each get
+        // their own temp file and the rename of one doesn't remove the temp file
+        // the other is about to rename, which would produce ENOENT.
+        let unique = uuid::Uuid::new_v4().simple().to_string();
+        let temp_name = format!(
+            "{}.{}.tmp",
+            path.file_name().unwrap_or_default().to_string_lossy(),
+            unique
+        );
+        let temp_path = path.with_file_name(temp_name);
 
         // Step 1+2: write and fsync the temp file
         {

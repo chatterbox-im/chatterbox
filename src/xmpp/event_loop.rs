@@ -405,7 +405,9 @@ impl XMPPClient {
                                         "Received pubsub request but OMEMO manager not available"
                                     );
                                 }
-                            } else if stanza.attr("type") == Some("result") {
+                            } else if stanza.attr("type") == Some("result")
+                                || stanza.attr("type") == Some("error")
+                            {
                                 if let Some(stanza_id) = stanza.attr("id") {
                                     debug!("Received pubsub response with ID: {}", stanza_id);
                                     let xml_string =
@@ -421,20 +423,6 @@ impl XMPPClient {
                                         )
                                         .await;
                                     }
-                                }
-                            }
-                        } else if stanza.attr("type") == Some("error") {
-                            if let Some(stanza_id) = stanza.attr("id") {
-                                let xml_string =
-                                    crate::xmpp::omemo_integration::element_to_xml_string(&stanza);
-                                let responses = late_state.borrow().pubsub_responses.clone();
-                                if let Some(ref responses) = responses {
-                                    crate::xmpp::omemo_integration::store_pubsub_response_to(
-                                        responses,
-                                        stanza_id.to_string(),
-                                        xml_string,
-                                    )
-                                    .await;
                                 }
                             }
                         }
