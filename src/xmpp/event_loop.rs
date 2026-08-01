@@ -83,9 +83,7 @@ impl XMPPClient {
 
                         let from = stanza.attr("from").unwrap_or("");
                         let to = stanza.attr("to").unwrap_or("");
-                        info!("Received message stanza from='{}', to='{}'", from, to);
-                        // Don't dump the full stanza — it may contain a plaintext body.
-                        debug!("Received <{}> stanza from {}", stanza.name(), from);
+                        debug!("Received message stanza from='{}', to='{}'", from, to);
 
                         fn has_omemo_encryption(
                             msg_stanza: &xmpp_parsers::minidom::Element,
@@ -168,7 +166,7 @@ impl XMPPClient {
                         }
 
                         if has_any_omemo || has_mam_omemo {
-                            info!("Detected OMEMO encrypted message (outer: v1={}, axolotl={}, MAM: v1={}, axolotl={})", 
+                            debug!("Detected OMEMO encrypted message (outer: v1={}, axolotl={}, MAM: v1={}, axolotl={})", 
                                 has_omemo_v1, has_omemo_axolotl, mam_has_omemo_v1, mam_has_omemo_axolotl);
 
                             let target_stanza = if has_mam_omemo && mam_message_stanza.is_some() {
@@ -223,9 +221,7 @@ impl XMPPClient {
                                 }
                             });
                         } else {
-                            info!("Processing non-OMEMO message from {}", from);
-                            // Don't dump the full stanza — it contains the plaintext body.
-                            debug!("Non-OMEMO message <{}> from {}", stanza.name(), from);
+                            debug!("Processing non-OMEMO message from {}", from);
 
                             if let Err(e) = delivery_receipts::handle_receipt(
                                 &stanza,
@@ -318,7 +314,7 @@ impl XMPPClient {
                                         content.clone(),
                                     );
 
-                                    info!(
+                                    debug!(
                                         "Sending message to UI: from='{}' (bare: '{}', {} bytes)",
                                         from,
                                         sender_bare_jid,
@@ -328,7 +324,7 @@ impl XMPPClient {
                                     if let Err(e) = msg_tx.send(message).await {
                                         error!("Failed to send message to UI: {}", e);
                                     } else {
-                                        info!("Successfully sent message to UI channel");
+                                        debug!("Successfully sent message to UI channel");
                                     }
 
                                     // Send a receipt if requested

@@ -360,7 +360,7 @@ impl super::XMPPClient {
                             let has_omemo_axolotl =
                                 message_stanza.has_child("encrypted", custom_ns::OMEMO_V1);
                             if has_omemo_v1 || has_omemo_axolotl {
-                                info!(
+                                debug!(
                                     "Found OMEMO encrypted message in archive from {}",
                                     sender_id
                                 );
@@ -770,10 +770,9 @@ impl super::XMPPClient {
                     // Also reset the failure counter so replays never accumulate into a
                     // session reset that would destroy a working live-message session.
                     warn!("Failed to decrypt OMEMO message (likely a MAM replay): {}", e);
-                    {
-                        let mut mgr = omemo_manager.lock().await;
-                        let _ = mgr.reset_failure_count(&sender_jid, sender_device_id).await;
-                    }
+                    // Reuse the guard we already hold — acquiring the same lock again
+                    // from the same task would deadlock on Tokio's async Mutex.
+                    let _ = manager.reset_failure_count(sender_jid, sender_device_id).await;
                     return Err(anyhow!("Failed to decrypt OMEMO message: {}", e));
                 }
             }

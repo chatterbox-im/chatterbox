@@ -757,13 +757,9 @@ impl OmemoManager {
     pub async fn ensure_bundle_published(&self) -> Result<()> {
         debug!("Ensuring bundle is published for device {}", self.device_id);
         let storage = self.storage.lock().await;
-        info!(
-            "[DEBUG] Forcing OMEMO bundle publication for device {}",
-            self.device_id
-        );
-        let has_published = false;
+        let has_published = storage.is_bundle_published(self.device_id)?;
         if !has_published {
-            info!("Bundle not found or forced, publishing new bundle");
+            info!("Bundle not yet published for device {}, publishing now", self.device_id);
             let bundle = match self.generate_bundle().await {
                 Ok(bundle) => bundle,
                 Err(e) => {
@@ -783,7 +779,7 @@ impl OmemoManager {
                 warn!("Failed to mark bundle as published: {}", e);
             }
         } else {
-            debug!("Bundle already published");
+            debug!("Bundle already published for device {}, skipping", self.device_id);
         }
         Ok(())
     }

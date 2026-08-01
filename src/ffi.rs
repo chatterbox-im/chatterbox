@@ -163,7 +163,14 @@ impl log::Log for ChatterboxLogger {
     }
 
     fn log(&self, record: &log::Record) {
+        static LOG_CALL_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        if LOG_CALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 20 {
+            eprintln!("LOGGER_DEBUG: log called level={} target={} msg={}",
+                      record.level(), record.target(), record.args());
+        }
+
         if !self.enabled(record.metadata()) {
+            eprintln!("LOGGER_DEBUG: NOT enabled, returning early");
             return;
         }
         // Forward to env_logger so Xcode console output is unchanged.
@@ -187,12 +194,22 @@ impl log::Log for ChatterboxLogger {
 
         // Append to the persistent log file.  try_lock avoids stalling when
         // the logger is called from within set_log_file() itself.
-        if let Ok(mut guard) = LOG_FILE.try_lock() {
-            if let Some(ref mut file) = *guard {
-                use std::io::Write;
-                let _ = writeln!(file, "{}", line);
-                // Flush after every write so the file is usable after a crash.
-                let _ = file.flush();
+        match LOG_FILE.try_lock() {
+            Ok(mut guard) => {
+                if let Some(ref mut file) = *guard {
+                    use std::io::Write;
+                    if let Err(e) = writeln!(file, "{}", line) {
+                        eprintln!("LOGGER_DEBUG: file write error: {}", e);
+                    }
+                    if let Err(e) = file.flush() {
+                        eprintln!("LOGGER_DEBUG: file flush error: {}", e);
+                    }
+                } else {
+                    eprintln!("LOGGER_DEBUG: LOG_FILE is None");
+                }
+            }
+            Err(e) => {
+                eprintln!("LOGGER_DEBUG: LOG_FILE try_lock failed: {:?}", e);
             }
         }
     }
@@ -234,15 +251,22 @@ pub fn get_log_contents() -> String {
 pub struct ChatterboxClient {
     /// Locked state — `None` before connect, `Some` while connected.
     inner: Arc<Mutex<Option<ClientState>>>,
-    /// Channel on which the background pump sends events to `nextEvent()`.
-    event_tx: mpsc::Sender<FfiEvent>,
-    event_rx: Arc<Mutex<mpsc::Receiver<FfiEvent>>>,
+    /// The event stream for the current connection.  It is created per
+    /// connection and removed on disconnect so `next_event()` can finish.
+    event_stream: Arc<Mutex<Option<EventStream>>>,
 }
 
 struct ClientState {
-    xmpp: XMPPClient,
+    /// Shared reference — FFI methods clone the Arc to avoid holding `inner`
+    /// across long-running OMEMO encrypt / server-fetch operations.
+    xmpp: Arc<tokio::sync::Mutex<XMPPClient>>,
     /// SQLite message store — None if the DB failed to open (graceful degradation).
     store: Option<Arc<StdMutex<MessageStore>>>,
+}
+
+struct EventStream {
+    sender: mpsc::Sender<FfiEvent>,
+    receiver: Arc<Mutex<mpsc::Receiver<FfiEvent>>>,
 }
 
 #[uniffi::export]
@@ -259,6 +283,8 @@ impl ChatterboxClient {
             )
             .build();
             let max_level = inner.filter();
+            eprintln!("FFI_DEBUG: Logger initialized max_level={:?} RUST_LOG={:?}",
+                      max_level, std::env::var("RUST_LOG"));
             let logger = ChatterboxLogger { inner };
             // session header so exported logs are easy to orientate
             if let Ok(mut buf) = LOG_BUFFER.try_lock() {
@@ -271,11 +297,9 @@ impl ChatterboxClient {
             log::set_max_level(max_level);
         });
 
-        let (event_tx, event_rx) = mpsc::channel(256);
         Arc::new(Self {
             inner: Arc::new(Mutex::new(None)),
-            event_tx,
-            event_rx: Arc::new(Mutex::new(event_rx)),
+            event_stream: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -287,7 +311,7 @@ impl ChatterboxClient {
         password: String,
     ) -> Result<(), FfiError> {
         let inner = Arc::clone(&self.inner);
-        let event_tx = self.event_tx.clone();
+        let event_stream = Arc::clone(&self.event_stream);
 
         // Spawn onto our dedicated runtime so that tokio::spawn / I/O inside
         // xmpp.connect() can find a reactor.  JoinHandle<T> is Send, so the
@@ -312,6 +336,15 @@ impl ChatterboxClient {
             if let Err(e) = xmpp.enable_carbons_compat().await {
                 log::warn!("Failed to enable message carbons: {e}");
             }
+
+            // A client can be connected again after a disconnect.  Give each
+            // connection its own channel so dropping it wakes any old
+            // `next_event()` call instead of leaving it suspended forever.
+            let (event_tx, event_rx) = mpsc::channel(256);
+            *event_stream.lock().await = Some(EventStream {
+                sender: event_tx.clone(),
+                receiver: Arc::new(Mutex::new(event_rx)),
+            });
 
             // Clear any stale ignore/failure state for our own OMEMO device.
             // Self-session replay failures from previous MAM catch-ups are always
@@ -352,9 +385,13 @@ impl ChatterboxClient {
                     }
                 };
 
-            *inner.lock().await = Some(ClientState { xmpp, store: store.clone() });
+            *inner.lock().await = Some(ClientState {
+                xmpp: Arc::new(Mutex::new(xmpp)),
+                store: store.clone(),
+            });
 
             // Background pump: store + forward incoming messages as FfiEvents.
+            let event_stream_pump = Arc::clone(&event_stream);
             tokio::spawn(async move {
                 let mut rx = msg_rx;
                 loop {
@@ -410,6 +447,15 @@ impl ChatterboxClient {
                                     reason: "Connection closed".to_string(),
                                 })
                                 .await;
+                            // Close this connection's stream after publishing its
+                            // final event.  Do not remove a newer stream if a
+                            // reconnect has already installed one.
+                            let mut current_stream = event_stream_pump.lock().await;
+                            if let Some(stream) = current_stream.as_ref() {
+                                if stream.sender.same_channel(&event_tx) {
+                                    current_stream.take();
+                                }
+                            }
                             break;
                         }
                     }
@@ -425,24 +471,46 @@ impl ChatterboxClient {
     /// Send an OMEMO-encrypted (or plaintext-fallback) message to `to_jid`.
     /// Returns the stored `FfiMessage` so the caller can display it immediately.
     pub async fn send_message(&self, to_jid: String, body: String) -> Result<FfiMessage, FfiError> {
+        eprintln!("FFI_DEBUG: send_message called to_jid={}", to_jid);
         let inner = Arc::clone(&self.inner);
         RUNTIME.spawn(async move {
-            let mut guard = inner.lock().await;
-            let state = guard.as_mut().ok_or(FfiError::NotConnected)?;
+            eprintln!("FFI_DEBUG: send_message task started to_jid={}", to_jid);
 
-            // Generate the ID first — it is used BOTH on the wire and in storage so
-            // that when the echo comes back through msg_rx the deduplication catches it.
+            // Extract shared references — inner MUST NOT be held across OMEMO
+            // encrypt because other FFI calls (get_fingerprints etc.) would
+            // block for the entire send duration (up to 15-45 s).
+            let (xmpp, store) = {
+                let mut guard = inner.lock().await;
+                eprintln!("FFI_DEBUG: send_message inner locked");
+                let state = guard.as_mut().ok_or_else(|| {
+                    eprintln!("FFI_DEBUG: inner state is NONE!");
+                    FfiError::NotConnected
+                })?;
+                (Arc::clone(&state.xmpp), state.store.clone())
+            }; // inner lock released here
+
+            eprintln!("FFI_DEBUG: send_message got xmpp Arc");
+
             let msg_id = Uuid::new_v4().to_string();
+            eprintln!("FFI_DEBUG: send_message msg_id={}", msg_id);
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
 
-            state
-                .xmpp
+            eprintln!("FFI_DEBUG: send_message about to lock xmpp");
+            let mut xmpp_guard = xmpp.lock().await;
+            eprintln!("FFI_DEBUG: send_message xmpp guard acquired");
+            let send_result = xmpp_guard
                 .send_message_with_id(&to_jid, &body, &msg_id)
-                .await
-                .map_err(|e| FfiError::Send { reason: e.to_string() })?;
+                .await;
+            eprintln!("FFI_DEBUG: send_message_with_id returned send_result={:?}", send_result.is_ok());
+            send_result
+                .map_err(|e| {
+                    eprintln!("FFI_DEBUG: send_message_with_id error: {}", e);
+                    FfiError::Send { reason: e.to_string() }
+                })?;
+            drop(xmpp_guard);
 
             let record = Message {
                 id: msg_id,
@@ -453,7 +521,7 @@ impl ChatterboxClient {
                 delivery_status: DeliveryStatus::Sent,
                 encrypted: true,
             };
-            if let Some(ref s) = state.store {
+            if let Some(ref s) = store {
                 if let Ok(guard) = s.lock() {
                     let _ = guard.store_message(&record);
                 }
@@ -471,12 +539,14 @@ impl ChatterboxClient {
     pub async fn reset_omemo_session(&self, jid: String, device_id: u32) -> Result<(), FfiError> {
         let inner = Arc::clone(&self.inner);
         RUNTIME.spawn(async move {
-            let mut guard = inner.lock().await;
-            let state = guard.as_mut().ok_or(FfiError::NotConnected)?;
-            
+            let xmpp = {
+                let mut guard = inner.lock().await;
+                let state = guard.as_mut().ok_or(FfiError::NotConnected)?;
+                Arc::clone(&state.xmpp)
+            };
             let session_key = format!("{}:{}", jid, device_id);
-            
-            if let Some(ref mgr) = state.xmpp.omemo_manager {
+            let xmpp_guard = xmpp.lock().await;
+            if let Some(ref mgr) = xmpp_guard.omemo_manager {
                 let mut mgr_guard = mgr.lock().await;
                 mgr_guard.reset_session(&jid, device_id).await
                     .map_err(|e| FfiError::Omemo { reason: e.to_string() })?;
@@ -489,16 +559,31 @@ impl ChatterboxClient {
 
     /// Fetch the roster (contact list) from the server.
     pub async fn get_contacts(&self) -> Result<Vec<FfiContact>, FfiError> {
+        eprintln!("FFI_DEBUG: get_contacts called");
         let inner = Arc::clone(&self.inner);
         RUNTIME.spawn(async move {
-            let guard = inner.lock().await;
-            let state = guard.as_ref().ok_or(FfiError::NotConnected)?;
-            let jids = state
-                .xmpp
+            eprintln!("FFI_DEBUG: get_contacts task started");
+            let xmpp = {
+                let guard = inner.lock().await;
+                eprintln!("FFI_DEBUG: get_contacts inner locked");
+                let state = guard.as_ref().ok_or_else(|| {
+                    eprintln!("FFI_DEBUG: get_contacts inner state NONE!");
+                    FfiError::NotConnected
+                })?;
+                Arc::clone(&state.xmpp)
+            };
+            eprintln!("FFI_DEBUG: get_contacts got xmpp Arc");
+            let mut xmpp_guard = xmpp.lock().await;
+            eprintln!("FFI_DEBUG: get_contacts xmpp guard acquired, calling get_roster");
+            let jids = xmpp_guard
                 .get_roster()
                 .await
-                .map_err(|e| FfiError::Roster { reason: e.to_string() })?
+                .map_err(|e| {
+                    eprintln!("FFI_DEBUG: get_roster error: {}", e);
+                    FfiError::Roster { reason: e.to_string() }
+                })?
                 .unwrap_or_default();
+            eprintln!("FFI_DEBUG: get_roster returned {} contacts: {:?}", jids.len(), jids);
             Ok(jids
                 .into_iter()
                 .map(|jid| FfiContact {
@@ -514,7 +599,7 @@ impl ChatterboxClient {
 
     /// Wait for the next event (message, presence update, or disconnect).
     ///
-    /// Returns `None` only after `disconnect()` is called and the channel drains.
+    /// Returns `None` after `disconnect()` closes the current event stream.
     /// Drive this in a Swift Task:
     ///
     /// ```swift
@@ -525,7 +610,13 @@ impl ChatterboxClient {
     /// }
     /// ```
     pub async fn next_event(&self) -> Option<FfiEvent> {
-        let event_rx = Arc::clone(&self.event_rx);
+        let event_rx = self
+            .event_stream
+            .lock()
+            .await
+            .as_ref()
+            .map(|stream| Arc::clone(&stream.receiver));
+        let event_rx = event_rx?;
         RUNTIME.spawn(async move {
             event_rx.lock().await.recv().await
         })
@@ -580,8 +671,11 @@ impl ChatterboxClient {
     pub async fn fetch_mam(&self, jid: String, since_unix_secs: i64) -> Result<Vec<FfiMessage>, FfiError> {
         let inner = Arc::clone(&self.inner);
         RUNTIME.spawn(async move {
-            let guard = inner.lock().await;
-            let state = guard.as_ref().ok_or(FfiError::NotConnected)?;
+            let (xmpp, store) = {
+                let guard = inner.lock().await;
+                let state = guard.as_ref().ok_or(FfiError::NotConnected)?;
+                (Arc::clone(&state.xmpp), state.store.clone())
+            };
 
             let start = chrono::DateTime::from_timestamp(since_unix_secs, 0)
                 .unwrap_or_else(chrono::Utc::now);
@@ -592,15 +686,16 @@ impl ChatterboxClient {
                 ..crate::xmpp::message_archive::MAMQueryOptions::new()
             };
 
-            let msgs = state
-                .xmpp
+            let mut xmpp_guard = xmpp.lock().await;
+            let msgs = xmpp_guard
                 .get_message_history(opts)
                 .await
                 .map_err(|e| FfiError::Roster { reason: e.to_string() })?;
+            drop(xmpp_guard);
 
             // Store new messages; dedup is handled by INSERT OR IGNORE in SQLite
             let mut new_msgs = Vec::new();
-            if let Some(ref s) = state.store {
+            if let Some(ref s) = store {
                 if let Ok(guard) = s.lock() {
                     for m in &msgs {
                         let _ = guard.store_message(m);
@@ -620,13 +715,15 @@ impl ChatterboxClient {
     pub async fn send_typing(&self, jid: String, is_typing: bool) -> Result<(), FfiError> {
         let inner = Arc::clone(&self.inner);
         RUNTIME.spawn(async move {
-            let guard = inner.lock().await;
-            let state = guard.as_ref().ok_or(FfiError::NotConnected)?;
+            let xmpp = {
+                let guard = inner.lock().await;
+                let state = guard.as_ref().ok_or(FfiError::NotConnected)?;
+                Arc::clone(&state.xmpp)
+            };
             use crate::xmpp::chat_states::TypingStatus;
             let status = if is_typing { TypingStatus::Composing } else { TypingStatus::Paused };
-            state
-                .xmpp
-                .send_chat_state(&jid, &status)
+            let mut guard = xmpp.lock().await;
+            guard.send_chat_state(&jid, &status)
                 .map_err(|e| FfiError::Send { reason: e.to_string() })
         })
         .await
@@ -637,10 +734,13 @@ impl ChatterboxClient {
     pub async fn trust_device(&self, jid: String, device_id: u32) -> Result<(), FfiError> {
         let inner = Arc::clone(&self.inner);
         RUNTIME.spawn(async move {
-            let guard = inner.lock().await;
-            let state = guard.as_ref().ok_or(FfiError::NotConnected)?;
-            state
-                .xmpp
+            let xmpp = {
+                let guard = inner.lock().await;
+                let state = guard.as_ref().ok_or(FfiError::NotConnected)?;
+                Arc::clone(&state.xmpp)
+            };
+            let mut guard = xmpp.lock().await;
+            guard
                 .mark_device_trusted(&jid, device_id)
                 .await
                 .map_err(|e| FfiError::Omemo { reason: e.to_string() })
@@ -653,10 +753,13 @@ impl ChatterboxClient {
     pub async fn distrust_device(&self, jid: String, device_id: u32) -> Result<(), FfiError> {
         let inner = Arc::clone(&self.inner);
         RUNTIME.spawn(async move {
-            let guard = inner.lock().await;
-            let state = guard.as_ref().ok_or(FfiError::NotConnected)?;
-            state
-                .xmpp
+            let xmpp = {
+                let guard = inner.lock().await;
+                let state = guard.as_ref().ok_or(FfiError::NotConnected)?;
+                Arc::clone(&state.xmpp)
+            };
+            let mut guard = xmpp.lock().await;
+            guard
                 .mark_device_untrusted(&jid, device_id)
                 .await
                 .map_err(|e| FfiError::Omemo { reason: e.to_string() })
@@ -686,7 +789,12 @@ impl ChatterboxClient {
     /// Gracefully disconnect and close the event stream.
     pub async fn disconnect(&self) {
         let inner = Arc::clone(&self.inner);
+        let event_stream = Arc::clone(&self.event_stream);
         let _ = RUNTIME.spawn(async move {
+            // Drop the client-owned sender first.  Once the XMPP/typing pumps
+            // are dropped with `inner`, any waiter on this receiver observes
+            // the closed channel and returns `None`.
+            event_stream.lock().await.take();
             *inner.lock().await = None;
         })
         .await;
@@ -699,25 +807,31 @@ impl ChatterboxClient {
     pub async fn get_fingerprints(&self, jid: String) -> Result<Vec<FfiFingerprint>, FfiError> {
         let inner = Arc::clone(&self.inner);
         RUNTIME.spawn(async move {
-            let guard = inner.lock().await;
-            let state = guard.as_ref().ok_or(FfiError::NotConnected)?;
+            let xmpp = {
+                let guard = inner.lock().await;
+                let state = guard.as_ref().ok_or(FfiError::NotConnected)?;
+                Arc::clone(&state.xmpp)
+            };
             let bare_jid = jid.split('/').next().unwrap_or(&jid).to_string();
 
-            let device_ids = match state.xmpp.get_omemo_manager() {
-                Some(mgr) => mgr
-                    .lock()
-                    .await
-                    .get_device_ids_for_test(&bare_jid)
-                    .await
-                    .unwrap_or_default(),
-                None => return Ok(vec![]),
+            let device_ids = {
+                let xmpp_guard = xmpp.lock().await;
+                match xmpp_guard.get_omemo_manager() {
+                    Some(mgr) => mgr
+                        .lock()
+                        .await
+                        .get_device_ids_for_test(&bare_jid)
+                        .await
+                        .unwrap_or_default(),
+                    None => return Ok(vec![]),
+                }
             };
 
             let mut result = Vec::new();
             for device_id in device_ids {
-                let fp = state.xmpp.get_device_fingerprint(&bare_jid, device_id).await;
-                let trusted = state
-                    .xmpp
+                let xmpp_guard = xmpp.lock().await;
+                let fp = xmpp_guard.get_device_fingerprint(&bare_jid, device_id).await;
+                let trusted = xmpp_guard
                     .is_device_trusted(&bare_jid, device_id)
                     .await
                     .unwrap_or(false);

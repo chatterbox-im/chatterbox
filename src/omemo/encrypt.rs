@@ -439,34 +439,70 @@ impl OmemoManager {
         // Evict stale pending entries to prevent unbounded growth
         self.evict_stale_entries();
 
-        // Get the device list for the recipient with timeout protection
+        // Get the device list for the recipient with timeout protection.
+        // Use the cached list when available — the cache is populated on connect and
+        // updated via PEP device-list subscriptions. Only hit the server when the
+        // cache is empty (first message to this contact this session).
         let device_discovery_timeout = Duration::from_secs(15);
-        info!(
-            "Forcing fresh device list fetch for {} (NO CACHE FALLBACK)",
-            recipient
-        );
+        let cached_recipient_device_ids = self.cached_or_session_device_ids_for(recipient).await;
+        let force_refresh_recipient = cached_recipient_device_ids.is_empty();
+        if force_refresh_recipient {
+            info!("No cached device list for {}, fetching from server", recipient);
+        } else {
+            info!("Using cached device list for {}: {:?}", recipient, cached_recipient_device_ids);
+        }
         let recipient_device_ids = match timeout(
             device_discovery_timeout,
-            self.get_device_ids_with_force_refresh(recipient, true),
+            self.get_device_ids_with_force_refresh(recipient, force_refresh_recipient),
         )
         .await
         {
-            Ok(Ok(devices)) => devices,
+            Ok(Ok(devices)) if !devices.is_empty() => {
+                info!("Device list for {} resolved: {:?}", recipient, devices);
+                devices
+            }
+            Ok(Ok(empty)) => {
+                if !cached_recipient_device_ids.is_empty() {
+                    warn!(
+                        "Device list for {} was empty; falling back to cached/session devices {:?}",
+                        recipient, cached_recipient_device_ids
+                    );
+                    cached_recipient_device_ids.clone()
+                } else {
+                    empty
+                }
+            }
             Ok(Err(e)) => {
-                error!(
-                    "Fresh device list fetch failed for {}: {} - NO FALLBACK, failing fast",
-                    recipient, e
-                );
-                return Err(e);
+                if !cached_recipient_device_ids.is_empty() {
+                    warn!(
+                        "Device list fetch failed for {}: {}; falling back to cached/session devices {:?}",
+                        recipient, e, cached_recipient_device_ids
+                    );
+                    cached_recipient_device_ids.clone()
+                } else {
+                    error!(
+                        "Device list fetch failed for {}: {} with no cache fallback",
+                        recipient, e
+                    );
+                    return Err(e);
+                }
             }
             Err(_) => {
-                error!(
-                    "Timeout while fetching fresh device list for {} - NO FALLBACK, failing fast",
-                    recipient
-                );
-                return Err(OmemoError::TimeoutError(
-                    "Device list fetch timeout".to_string(),
-                ));
+                if !cached_recipient_device_ids.is_empty() {
+                    warn!(
+                        "Timeout fetching device list for {}; falling back to cached/session devices {:?}",
+                        recipient, cached_recipient_device_ids
+                    );
+                    cached_recipient_device_ids.clone()
+                } else {
+                    error!(
+                        "Timeout fetching device list for {} with no cache fallback",
+                        recipient
+                    );
+                    return Err(OmemoError::TimeoutError(
+                        "Device list fetch timeout".to_string(),
+                    ));
+                }
             }
         };
 
@@ -522,20 +558,22 @@ impl OmemoManager {
             }
             devices
         };
-        info!(
-            "Forcing fresh device list fetch for own JID {} (NO CACHE FALLBACK)",
-            user_bare_jid
-        );
+        let force_refresh_own = cached_own_device_ids.is_empty();
+        if force_refresh_own {
+            info!("No cached own device list for {}, fetching from server", user_bare_jid);
+        } else {
+            info!("Using cached own device list for {}: {:?}", user_bare_jid, cached_own_device_ids);
+        }
         let own_device_ids = match timeout(
             device_discovery_timeout,
-            self.get_device_ids_with_force_refresh(&user_bare_jid, true),
+            self.get_device_ids_with_force_refresh(&user_bare_jid, force_refresh_own),
         )
         .await
         {
             Ok(Ok(devices)) if !devices.is_empty() => merge_cached_own_device_ids(devices),
             Ok(Ok(_)) if !cached_own_device_ids.is_empty() => {
                 warn!(
-                    "Fresh own device list for {} was empty; using cached/session devices {:?}",
+                    "Own device list for {} was empty; using cached/session devices {:?}",
                     user_bare_jid, cached_own_device_ids
                 );
                 cached_own_device_ids.clone()
@@ -543,11 +581,11 @@ impl OmemoManager {
             Ok(Ok(devices)) => devices,
             Ok(Err(e)) => {
                 if cached_own_device_ids.is_empty() {
-                    warn!("Failed to get fresh own device list: {} - continuing with recipient devices only", e);
+                    warn!("Failed to get own device list: {} - continuing with recipient devices only", e);
                     Vec::new()
                 } else {
                     warn!(
-                        "Failed to get fresh own device list: {}; using cached/session devices {:?}",
+                        "Failed to get own device list: {}; using cached/session devices {:?}",
                         e, cached_own_device_ids
                     );
                     cached_own_device_ids.clone()
@@ -555,11 +593,11 @@ impl OmemoManager {
             }
             Err(_) => {
                 if cached_own_device_ids.is_empty() {
-                    warn!("Timeout while fetching fresh own device list - continuing with recipient devices only");
+                    warn!("Timeout fetching own device list - continuing with recipient devices only");
                     Vec::new()
                 } else {
                     warn!(
-                        "Timeout while fetching fresh own device list; using cached/session devices {:?}",
+                        "Timeout fetching own device list; using cached/session devices {:?}",
                         cached_own_device_ids
                     );
                     cached_own_device_ids.clone()
