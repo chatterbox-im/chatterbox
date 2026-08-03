@@ -167,7 +167,7 @@ impl super::XMPPClient {
                 PendingMessage {
                     id: msg_id.clone(),
                     to: recipient.to_string(),
-                    timestamp: chrono::Utc::now().timestamp() as u64,
+                    timestamp: chrono::Utc::now().timestamp_millis() as u64,
                     status: DeliveryStatus::Sending,
                     content: content.to_string(),
                 },
@@ -302,12 +302,9 @@ impl super::XMPPClient {
             }
 
             // Evict stale entries older than 1 hour to prevent unbounded growth
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
+            let now = chrono::Utc::now().timestamp_millis() as u64;
             if pending_receipts_lock.len() > 100 {
-                pending_receipts_lock.retain(|_, v| now - v.timestamp < 3600);
+                pending_receipts_lock.retain(|_, v| now.saturating_sub(v.timestamp) < 3_600_000);
             }
         }
 

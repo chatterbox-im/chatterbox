@@ -19,7 +19,6 @@ use tokio_xmpp::Client as XMPPAsyncClient;
 // Import our submodules - making them public
 pub mod chat_states;
 pub mod connection;
-pub mod coordinator;
 pub mod delivery_receipts;
 pub mod discovery;
 mod event_loop;
@@ -36,7 +35,6 @@ pub mod transport;
 
 // Re-export our submodules
 pub use chat_states::*;
-pub use coordinator::{spawn_coordinator, CoordinatorCommand, CoordinatorHandle};
 pub use discovery::ServiceDiscovery;
 pub use presence::*;
 
@@ -66,7 +64,6 @@ const NS_JABBER_CLIENT: &str = "jabber:client";
 #[derive(Clone, Default)]
 pub(crate) struct LateState {
     pub omemo_manager: Option<Arc<TokioMutex<crate::omemo::OmemoManager>>>,
-    pub pubsub_responses: Option<crate::xmpp::omemo_integration::PubSubResponses>,
     pub jid: String,
     pub typing_tx: Option<mpsc::Sender<(String, crate::xmpp::chat_states::TypingStatus)>>,
 }
@@ -85,7 +82,6 @@ pub struct XMPPClient {
     pub(crate) omemo_manager: Option<Arc<TokioMutex<crate::omemo::OmemoManager>>>,
     pub(crate) carbons_enabled: Arc<AtomicBool>,
     pub(crate) iq_registry: Arc<TokioMutex<iq_registry::IqResponseRegistry>>,
-    pub(crate) pubsub_responses: Option<crate::xmpp::omemo_integration::PubSubResponses>,
     /// Watch channel sender for publishing late-bound state to the event loop.
     /// `Some` on the real client, `None` on temporary clones.
     pub(crate) late_state_tx: Option<LateStateTx>,
@@ -122,7 +118,6 @@ impl XMPPClient {
                 omemo_manager: None,
                 carbons_enabled: Arc::new(AtomicBool::new(true)),
                 iq_registry: Arc::new(TokioMutex::new(iq_registry::IqResponseRegistry::new())),
-                pubsub_responses: None,
                 late_state_tx: Some(late_state_tx),
                 typing_tx: None,
                 omemo_dir: None,
@@ -251,7 +246,6 @@ impl XMPPClient {
             omemo_manager: self.omemo_manager.clone(),
             carbons_enabled: self.carbons_enabled.clone(),
             iq_registry: self.iq_registry.clone(),
-            pubsub_responses: self.pubsub_responses.clone(),
             late_state_tx: None, // clones don't publish state
             typing_tx: self.typing_tx.clone(),
             omemo_dir: self.omemo_dir.clone(),
@@ -331,15 +325,13 @@ pub fn publish_late_state(client: &XMPPClient) {
     if let Some(ref tx) = client.late_state_tx {
         let state = LateState {
             omemo_manager: client.omemo_manager.clone(),
-            pubsub_responses: client.pubsub_responses.clone(),
             jid: client.jid.clone(),
             typing_tx: client.typing_tx.clone(),
         };
         let _ = tx.send(state);
         info!(
-            "Published late state to event loop (OMEMO: {}, PubSub: {})",
-            client.omemo_manager.is_some(),
-            client.pubsub_responses.is_some()
+            "Published late state to event loop (OMEMO: {})",
+            client.omemo_manager.is_some()
         );
     }
 }

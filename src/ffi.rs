@@ -257,9 +257,9 @@ pub struct ChatterboxClient {
 }
 
 struct ClientState {
-    /// Shared reference — FFI methods clone the Arc to avoid holding `inner`
-    /// across long-running OMEMO encrypt / server-fetch operations.
-    xmpp: Arc<tokio::sync::Mutex<XMPPClient>>,
+    /// Shared reference — all XMPPClient methods used at runtime take `&self`
+    /// so no outer lock is needed; inner mutable state uses its own Arc<Mutex<...>>.
+    xmpp: Arc<XMPPClient>,
     /// SQLite message store — None if the DB failed to open (graceful degradation).
     store: Option<Arc<StdMutex<MessageStore>>>,
 }
@@ -386,7 +386,7 @@ impl ChatterboxClient {
                 };
 
             *inner.lock().await = Some(ClientState {
-                xmpp: Arc::new(Mutex::new(xmpp)),
+                xmpp: Arc::new(xmpp),
                 store: store.clone(),
             });
 
@@ -498,19 +498,14 @@ impl ChatterboxClient {
                 .unwrap_or_default()
                 .as_secs();
 
-            eprintln!("FFI_DEBUG: send_message about to lock xmpp");
-            let mut xmpp_guard = xmpp.lock().await;
-            eprintln!("FFI_DEBUG: send_message xmpp guard acquired");
-            let send_result = xmpp_guard
-                .send_message_with_id(&to_jid, &body, &msg_id)
-                .await;
-            eprintln!("FFI_DEBUG: send_message_with_id returned send_result={:?}", send_result.is_ok());
-            send_result
+            eprintln!("FFI_DEBUG: send_message calling send_message_with_id (no lock held)");
+            xmpp.send_message_with_id(&to_jid, &body, &msg_id)
+                .await
                 .map_err(|e| {
                     eprintln!("FFI_DEBUG: send_message_with_id error: {}", e);
                     FfiError::Send { reason: e.to_string() }
                 })?;
-            drop(xmpp_guard);
+            eprintln!("FFI_DEBUG: send_message_with_id returned ok");
 
             let record = Message {
                 id: msg_id,
@@ -544,9 +539,7 @@ impl ChatterboxClient {
                 let state = guard.as_mut().ok_or(FfiError::NotConnected)?;
                 Arc::clone(&state.xmpp)
             };
-            let session_key = format!("{}:{}", jid, device_id);
-            let xmpp_guard = xmpp.lock().await;
-            if let Some(ref mgr) = xmpp_guard.omemo_manager {
+            if let Some(ref mgr) = xmpp.omemo_manager {
                 let mut mgr_guard = mgr.lock().await;
                 mgr_guard.reset_session(&jid, device_id).await
                     .map_err(|e| FfiError::Omemo { reason: e.to_string() })?;
@@ -573,9 +566,8 @@ impl ChatterboxClient {
                 Arc::clone(&state.xmpp)
             };
             eprintln!("FFI_DEBUG: get_contacts got xmpp Arc");
-            let mut xmpp_guard = xmpp.lock().await;
-            eprintln!("FFI_DEBUG: get_contacts xmpp guard acquired, calling get_roster");
-            let jids = xmpp_guard
+            eprintln!("FFI_DEBUG: get_contacts calling get_roster (no lock held)");
+            let jids = xmpp
                 .get_roster()
                 .await
                 .map_err(|e| {
@@ -618,7 +610,14 @@ impl ChatterboxClient {
             .map(|stream| Arc::clone(&stream.receiver));
         let event_rx = event_rx?;
         RUNTIME.spawn(async move {
-            event_rx.lock().await.recv().await
+            // try_lock() returns Err immediately if another caller already holds the
+            // guard (i.e. is parked inside recv()). This enforces single-consumer
+            // semantics: a second concurrent call returns None instead of hanging
+            // permanently waiting for the mutex to be released.
+            match event_rx.try_lock() {
+                Ok(mut rx) => rx.recv().await,
+                Err(_) => None,
+            }
         })
         .await
         .unwrap_or(None)
@@ -686,12 +685,10 @@ impl ChatterboxClient {
                 ..crate::xmpp::message_archive::MAMQueryOptions::new()
             };
 
-            let mut xmpp_guard = xmpp.lock().await;
-            let msgs = xmpp_guard
+            let msgs = xmpp
                 .get_message_history(opts)
                 .await
                 .map_err(|e| FfiError::Roster { reason: e.to_string() })?;
-            drop(xmpp_guard);
 
             // Store new messages; dedup is handled by INSERT OR IGNORE in SQLite
             let mut new_msgs = Vec::new();
@@ -722,8 +719,7 @@ impl ChatterboxClient {
             };
             use crate::xmpp::chat_states::TypingStatus;
             let status = if is_typing { TypingStatus::Composing } else { TypingStatus::Paused };
-            let mut guard = xmpp.lock().await;
-            guard.send_chat_state(&jid, &status)
+            xmpp.send_chat_state(&jid, &status)
                 .map_err(|e| FfiError::Send { reason: e.to_string() })
         })
         .await
@@ -739,8 +735,7 @@ impl ChatterboxClient {
                 let state = guard.as_ref().ok_or(FfiError::NotConnected)?;
                 Arc::clone(&state.xmpp)
             };
-            let mut guard = xmpp.lock().await;
-            guard
+            xmpp
                 .mark_device_trusted(&jid, device_id)
                 .await
                 .map_err(|e| FfiError::Omemo { reason: e.to_string() })
@@ -758,8 +753,7 @@ impl ChatterboxClient {
                 let state = guard.as_ref().ok_or(FfiError::NotConnected)?;
                 Arc::clone(&state.xmpp)
             };
-            let mut guard = xmpp.lock().await;
-            guard
+            xmpp
                 .mark_device_untrusted(&jid, device_id)
                 .await
                 .map_err(|e| FfiError::Omemo { reason: e.to_string() })
@@ -815,8 +809,7 @@ impl ChatterboxClient {
             let bare_jid = jid.split('/').next().unwrap_or(&jid).to_string();
 
             let device_ids = {
-                let xmpp_guard = xmpp.lock().await;
-                match xmpp_guard.get_omemo_manager() {
+                match xmpp.get_omemo_manager() {
                     Some(mgr) => mgr
                         .lock()
                         .await
@@ -829,9 +822,8 @@ impl ChatterboxClient {
 
             let mut result = Vec::new();
             for device_id in device_ids {
-                let xmpp_guard = xmpp.lock().await;
-                let fp = xmpp_guard.get_device_fingerprint(&bare_jid, device_id).await;
-                let trusted = xmpp_guard
+                let fp = xmpp.get_device_fingerprint(&bare_jid, device_id).await;
+                let trusted = xmpp
                     .is_device_trusted(&bare_jid, device_id)
                     .await
                     .unwrap_or(false);

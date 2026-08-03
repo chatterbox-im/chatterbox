@@ -207,11 +207,8 @@ async fn start_initial_history_load(
     if !chat_ui.has_active_contact() {
         return;
     }
-    if chat_ui.contacts.is_empty() {
-        return;
-    }
 
-    let active_contact = chat_ui.contacts[0].clone();
+    let active_contact = chat_ui.get_active_contact();
 
     if disable_mam {
         chat_ui.add_message(create_system_message(
@@ -298,9 +295,11 @@ async fn setup_contacts(chat_ui: &mut ChatUI, xmpp_client: &mut XMPPClient, _dis
         }
     }
 
-    if !chat_ui.has_active_contact() && !chat_ui.contacts.is_empty() {
-        let first_contact = chat_ui.contacts[0].clone();
-        chat_ui.set_active_contact(&first_contact);
+    if !chat_ui.has_active_contact() {
+        // Skip own JID; select the first real roster contact
+        if let Some(contact) = chat_ui.contacts.iter().find(|c| **c != our_bare_jid).cloned() {
+            chat_ui.set_active_contact(&contact);
+        }
     }
 }
 
@@ -482,7 +481,7 @@ fn load_message_history_with_catchup(
 
         // If we have local history, only fetch messages newer than what we have
         if let Some(ts) = since {
-            let start_time = chrono::DateTime::from_timestamp(ts as i64 + 1, 0)
+            let start_time = chrono::DateTime::from_timestamp_millis(ts as i64)
                 .unwrap_or_else(|| chrono::Utc::now());
             options = options.with_start(start_time);
         }
@@ -595,10 +594,17 @@ async fn run_main_loop(
             terminal_event = terminal_events.recv(), if !terminal_events_closed => {
                 match terminal_event {
                     Some(event) => {
-                        let is_key_press = matches!(&event, crossterm::event::Event::Key(key) if key.kind == crossterm::event::KeyEventKind::Press);
+                        let is_composing_key = matches!(
+                            &event,
+                            crossterm::event::Event::Key(key)
+                                if key.kind == crossterm::event::KeyEventKind::Press
+                                    && matches!(key.code, crossterm::event::KeyCode::Char(_))
+                                    && !key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+                                    && !key.modifiers.contains(crossterm::event::KeyModifiers::ALT)
+                        );
                         let input_result = chat_ui.handle_terminal_event(event)?;
 
-                        if is_key_press {
+                        if is_composing_key && chat_ui.has_pending_input() {
                             last_key_press = std::time::Instant::now();
                             typing_failures = 0;
                         }
@@ -841,7 +847,7 @@ fn update_outbound_typing_state(
     } else if elapsed < std::time::Duration::from_secs(30) {
         Some(TypingStatus::Paused)
     } else {
-        Some(TypingStatus::Active)
+        Some(TypingStatus::Inactive)
     };
 
     if next_state == *last_state_sent {
@@ -885,8 +891,7 @@ async fn handle_user_command(
     store: Option<&MessageStore>,
     app_settings: &mut AppSettings,
 ) -> Result<()> {
-    if content.starts_with("/plain ") {
-        let plain_content = content.trim_start_matches("/plain ");
+    if let Some(plain_content) = content.strip_prefix("/plain ") {
         warn!(
             "⚠️ SENDING UNENCRYPTED MESSAGE to {} ({} bytes)",
             recipient,
@@ -915,8 +920,7 @@ async fn handle_user_command(
         return Ok(());
     }
 
-    if recipient.starts_with("__VERIFY_KEYS__:") {
-        let actual_recipient = recipient.trim_start_matches("__VERIFY_KEYS__:");
+    if let Some(actual_recipient) = recipient.strip_prefix("__VERIFY_KEYS__:") {
         handle_verify_keys_send(
             chat_ui,
             terminal,
@@ -934,8 +938,7 @@ async fn handle_user_command(
         return Ok(());
     }
 
-    if content.starts_with("__SET_DEVICE_TRUST__:") {
-        let rest = content.trim_start_matches("__SET_DEVICE_TRUST__:");
+    if let Some(rest) = content.strip_prefix("__SET_DEVICE_TRUST__:") {
         // Format: <jid>:<device_id>:<1_or_0>
         // JID may contain ':', so use rsplitn from the right
         let parts: Vec<&str> = rest.rsplitn(3, ':').collect();
@@ -1535,7 +1538,6 @@ async fn handle_remove_contact(
                 chat_ui.set_active_contact(&first_contact);
                 chat_ui.clear_messages();
                 load_message_history_async(chat_ui, xmpp_client, &first_contact, disable_mam);
-                load_message_history_async(chat_ui, xmpp_client, &first_contact, disable_mam);
             }
         }
         Err(e) => {
@@ -1681,11 +1683,11 @@ async fn handle_send_message(
         Ok(_) => {
             chat_ui.remove_last_message();
             let message_id = uuid::Uuid::new_v4().to_string();
-            let message = Message::outgoing_encrypted(
-                message_id.clone(),
-                recipient.to_string(),
-                content.to_string(),
-            );
+            let message = if chat_ui.is_omemo_enabled() {
+                Message::outgoing_encrypted(message_id.clone(), recipient.to_string(), content.to_string())
+            } else {
+                Message::outgoing_plaintext(message_id.clone(), recipient.to_string(), content.to_string())
+            };
             chat_ui.add_message(message.clone());
             // Persist outgoing message locally
             if let Some(s) = store {

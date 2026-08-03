@@ -185,7 +185,7 @@ mod tests {
         let current_timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("Time went backwards")
-            .as_secs();
+            .as_millis() as u64;
 
         let current_message = Message {
             id: "msg_current".to_string(),
@@ -198,7 +198,7 @@ mod tests {
         };
 
         // Test with past timestamp
-        let past_timestamp = current_timestamp - 3600; // 1 hour ago
+        let past_timestamp = current_timestamp - 3_600_000; // 1 hour ago
         let past_message = Message {
             id: "msg_past".to_string(),
             sender_id: "sender1".to_string(),
@@ -213,6 +213,6 @@ mod tests {
         assert_eq!(current_message.timestamp, current_timestamp);
         assert_eq!(past_message.timestamp, past_timestamp);
         assert!(current_message.timestamp > past_message.timestamp);
-        assert_eq!(current_message.timestamp - past_message.timestamp, 3600);
+        assert_eq!(current_message.timestamp - past_message.timestamp, 3_600_000);
     }
 }

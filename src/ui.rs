@@ -231,7 +231,7 @@ impl ChatUI {
         } else {
             // Also check for matching content from the same sender within a recent timeframe
             // This helps deduplicate messages that might have different IDs but are the same message
-            let recent_threshold = chrono::Utc::now().timestamp() as u64 - 10; // Within last 10 seconds
+            let recent_threshold = chrono::Utc::now().timestamp_millis() as u64 - 10_000; // Within last 10 seconds
             if let Some(idx) = self.messages.iter().position(|m| {
                 m.sender_id == message.sender_id
                     && m.recipient_id == message.recipient_id
@@ -1158,6 +1158,10 @@ impl ChatUI {
         self.device_fingerprints_dialog = None;
     }
 
+    pub fn has_pending_input(&self) -> bool {
+        !self.input.value().is_empty()
+    }
+
     // Check and clear friend request notification if it's been shown for enough time
     pub fn clean_friend_request_notifications(&mut self, timeout_secs: i64) -> bool {
         if let Some(notification) = &self.friend_request_notification {
@@ -1244,7 +1248,7 @@ fn draw_messages(f: &mut Frame, messages: &[Message], area: Rect, ui: &ChatUI) {
     let messages_with_status: Vec<ListItem> = messages
         .iter()
         .flat_map(|m| {
-            let datetime = chrono::DateTime::from_timestamp(m.timestamp as i64, 0)
+            let datetime = chrono::DateTime::from_timestamp_millis(m.timestamp as i64)
                 .unwrap_or_else(|| chrono::Utc::now());
 
             let now = chrono::Utc::now();

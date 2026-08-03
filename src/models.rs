@@ -117,7 +117,7 @@ impl Message {
             sender_id: "me".to_string(),
             recipient_id: recipient.into(),
             content: content.into(),
-            timestamp: Utc::now().timestamp() as u64,
+            timestamp: Utc::now().timestamp_millis() as u64,
             delivery_status: DeliveryStatus::Sent,
             encrypted: true,
         }
@@ -134,7 +134,7 @@ impl Message {
             sender_id: "me".to_string(),
             recipient_id: recipient.into(),
             content: content.into(),
-            timestamp: Utc::now().timestamp() as u64,
+            timestamp: Utc::now().timestamp_millis() as u64,
             delivery_status: DeliveryStatus::Sent,
             encrypted: false,
         }
@@ -151,7 +151,7 @@ impl Message {
             sender_id: sender.into(),
             recipient_id: "me".to_string(),
             content: content.into(),
-            timestamp: Utc::now().timestamp() as u64,
+            timestamp: Utc::now().timestamp_millis() as u64,
             delivery_status: DeliveryStatus::Delivered,
             encrypted: true,
         }
@@ -168,7 +168,7 @@ impl Message {
             sender_id: sender.into(),
             recipient_id: "me".to_string(),
             content: content.into(),
-            timestamp: Utc::now().timestamp() as u64,
+            timestamp: Utc::now().timestamp_millis() as u64,
             delivery_status: DeliveryStatus::Delivered,
             encrypted: false,
         }
@@ -181,7 +181,7 @@ impl Message {
             sender_id: "system".to_string(),
             recipient_id: recipient.into(),
             content: content.into(),
-            timestamp: Utc::now().timestamp() as u64,
+            timestamp: Utc::now().timestamp_millis() as u64,
             delivery_status: DeliveryStatus::Delivered,
             encrypted: false,
         }
@@ -200,7 +200,7 @@ impl Message {
             sender_id: "me".to_string(),
             recipient_id: recipient.into(),
             content: content.into(),
-            timestamp: Utc::now().timestamp() as u64,
+            timestamp: Utc::now().timestamp_millis() as u64,
             delivery_status: status,
             encrypted,
         }

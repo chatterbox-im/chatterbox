@@ -4,9 +4,11 @@ use tokio::time::Duration;
 use uuid::Uuid;
 
 use crate::omemo::device_id::DeviceId;
-use crate::xmpp::transport::{self, StanzaTx};
+use std::sync::Arc;
+use tokio::sync::Mutex as TokioMutex;
 
-use super::PubSubResponses;
+use crate::xmpp::iq_registry::IqResponseRegistry;
+use crate::xmpp::transport::{self, StanzaTx};
 
 /// Publish an item to a PubSub node (for OMEMO implementation)
 /// This function is called by the OMEMO manager to publish key bundles and device lists
@@ -888,17 +890,22 @@ pub async fn request_pubsub_items(_from: &str, _node: &str) -> Result<String> {
     Err(anyhow!("No client available (legacy global path removed)"))
 }
 
-/// Request items from a PubSub node — uses explicit client and response map
+/// Request items from a PubSub node — registers with the IQ registry and awaits
+/// the oneshot response instead of polling a shared HashMap.
 pub async fn request_pubsub_items_with_client(
     stanza_tx: &StanzaTx,
-    responses_map: &PubSubResponses,
+    iq_registry: &Arc<TokioMutex<IqResponseRegistry>>,
     from: &str,
     node: &str,
 ) -> Result<String> {
-    // Generate a unique ID for this request
     let request_id = uuid::Uuid::new_v4().to_string();
 
-    // Create the IQ stanza
+    // Register BEFORE sending so no response is missed.
+    let rx = {
+        let mut registry = iq_registry.lock().await;
+        registry.register(request_id.clone())
+    };
+
     let iq = xmpp_parsers::minidom::Element::builder("iq", "jabber:client")
         .attr("type".try_into().unwrap(), "get")
         .attr("id".try_into().unwrap(), &request_id)
@@ -917,61 +924,19 @@ pub async fn request_pubsub_items_with_client(
         )
         .build();
 
-    // Send the stanza
     if let Err(e) = transport::send_stanza(stanza_tx, iq) {
         error!("Failed to send PubSub request: {}", e);
         return Err(anyhow!("Failed to send PubSub request: {}", e));
     }
 
-    // Wait for the response with a timeout
-    let timeout = Duration::from_secs(10);
-    let start_time = tokio::time::Instant::now();
-
-    while tokio::time::Instant::now().duration_since(start_time) < timeout {
-        // Check if we have the response in our map
-        if let Some(response) = get_pubsub_response_from(responses_map, &request_id).await {
-            return Ok(response);
-        }
-
-        // Sleep briefly before checking again
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-
-    // Clean up: remove the entry in case a late response arrives after we give up
-    get_pubsub_response_from(responses_map, &request_id).await;
-
-    error!(
-        "Timeout waiting for PubSub response for request {}",
-        request_id
-    );
-    Err(anyhow!("Timeout waiting for PubSub response"))
-}
-
-/// Store a pubsub response into a specific response map
-pub async fn store_pubsub_response_to(
-    responses_map: &PubSubResponses,
-    request_id: String,
-    xml_response: String,
-) {
-    let mut responses = responses_map.lock().await;
-    // Cap the map size to prevent unbounded growth from orphaned responses
-    if responses.len() > 100 {
-        // Remove some old entries (HashMap order is arbitrary but sufficient for eviction)
-        let keys_to_remove: Vec<String> = responses.keys().take(20).cloned().collect();
-        for key in keys_to_remove {
-            responses.remove(&key);
+    match tokio::time::timeout(Duration::from_secs(10), rx).await {
+        Ok(Ok(element)) => Ok(element_to_xml_string(&element)),
+        Ok(Err(_)) => Err(anyhow!("PubSub IQ response channel closed (connection dropped?)")),
+        Err(_) => {
+            error!("Timeout waiting for PubSub response for request {}", request_id);
+            Err(anyhow!("Timeout waiting for PubSub response"))
         }
     }
-    responses.insert(request_id, xml_response);
-}
-
-/// Retrieve a pubsub response from a specific response map
-pub async fn get_pubsub_response_from(
-    responses_map: &PubSubResponses,
-    request_id: &str,
-) -> Option<String> {
-    let mut responses = responses_map.lock().await;
-    responses.remove(request_id)
 }
 
 /// Convert an Element to XML string

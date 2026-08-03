@@ -12,12 +12,12 @@ use crate::models::{DeliveryStatus, Message, PendingMessage};
 impl XMPPClient {
     /// Send a message (encrypted if OMEMO is enabled, plaintext otherwise).
     /// `msg_id` is caller-supplied so the wire ID matches what was stored/returned.
-    pub async fn send_message(&mut self, recipient: &str, content: &str) -> Result<()> {
+    pub async fn send_message(&self, recipient: &str, content: &str) -> Result<()> {
         self.send_message_with_id(recipient, content, &uuid::Uuid::new_v4().to_string()).await
     }
 
     /// Like `send_message` but uses a specific message ID.
-    pub async fn send_message_with_id(&mut self, recipient: &str, content: &str, msg_id: &str) -> Result<()> {
+    pub async fn send_message_with_id(&self, recipient: &str, content: &str, msg_id: &str) -> Result<()> {
         eprintln!("SEND_DEBUG: send_message_with_id entered recipient={} msg_id={}", recipient, msg_id);
         info!(
             "SEND_MESSAGE CALLED: recipient={}, content_starts_with={}",
@@ -48,28 +48,19 @@ impl XMPPClient {
     }
 
     /// Send an encrypted message using OMEMO
-    pub async fn send_encrypted_message(&mut self, to: &str, content: &str) -> Result<()> {
+    pub async fn send_encrypted_message(&self, to: &str, content: &str) -> Result<()> {
         self.send_encrypted_message_with_id(to, content, &uuid::Uuid::new_v4().to_string()).await
     }
 
     /// Send an encrypted message using a specific message ID (used by the FFI layer).
-    pub async fn send_encrypted_message_with_id(&mut self, to: &str, content: &str, msg_id: &str) -> Result<()> {
+    pub async fn send_encrypted_message_with_id(&self, to: &str, content: &str, msg_id: &str) -> Result<()> {
         info!("Sending encrypted message to {}", to);
 
-        // Get our OMEMO manager
-        let omemo_manager = match &self.omemo_manager {
-            Some(manager) => manager.clone(),
-            None => {
-                self.initialize_client().await?;
-                match &self.omemo_manager {
-                    Some(manager) => manager.clone(),
-                    None => {
-                        error!("Failed to initialize OMEMO manager");
-                        return Err(anyhow!("Failed to initialize OMEMO manager"));
-                    }
-                }
-            }
-        };
+        // OMEMO must be initialized before sending — initialize_client() is
+        // called during connect(), so this should never be None in practice.
+        let omemo_manager = self.omemo_manager.as_ref()
+            .ok_or_else(|| anyhow!("OMEMO not initialized — call connect() first"))?
+            .clone();
 
         // Encrypt the message.
         // NOTE: The lock is held across the entire encrypt_message() call because the
@@ -216,7 +207,7 @@ impl XMPPClient {
                 id: id.clone(),
                 to: to.to_string(),
                 content: content.to_string(),
-                timestamp: chrono::Utc::now().timestamp() as u64,
+                timestamp: chrono::Utc::now().timestamp_millis() as u64,
                 status: DeliveryStatus::Sent,
             };
             pending_receipts_guard.insert(id.clone(), pending_message);
@@ -240,7 +231,7 @@ impl XMPPClient {
             id: message_id.to_string(),
             to: recipient.to_string(),
             content: String::new(),
-            timestamp: chrono::Utc::now().timestamp() as u64,
+            timestamp: chrono::Utc::now().timestamp_millis() as u64,
             status: DeliveryStatus::Sent,
         };
 

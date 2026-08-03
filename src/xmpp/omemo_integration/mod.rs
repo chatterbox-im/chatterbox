@@ -27,40 +27,27 @@ pub use message::{
     XmppClient,
 };
 pub use pubsub::{
-    element_to_xml_string, get_pubsub_response_from, publish_bundle_alternative_format,
+    element_to_xml_string, publish_bundle_alternative_format,
     publish_bundle_alternative_format_with_client, publish_pubsub_item,
     publish_pubsub_item_device_list, publish_pubsub_item_device_list_with_client,
     publish_pubsub_item_with_client, request_pubsub_items, request_pubsub_items_with_client,
-    store_pubsub_response_to,
 };
 
-/// Shared map for storing pubsub responses by IQ request ID.
-/// The event loop writes into this; the bridge polls from it.
-pub type PubSubResponses = Arc<TokioMutex<std::collections::HashMap<String, String>>>;
-
-/// Create a new empty PubSubResponses map.
-pub fn new_pubsub_responses() -> PubSubResponses {
-    Arc::new(TokioMutex::new(std::collections::HashMap::new()))
-}
-
 /// Implementation of OmemoPubSub that delegates to the XMPP connection.
-/// Holds the transport channel sender and the shared pubsub response map.
+/// Holds the transport channel sender and the IQ registry for oneshot response routing.
 #[derive(Clone)]
 pub struct XmppPubSubBridge {
     pub(super) stanza_tx: StanzaTx,
-    pub(super) responses: PubSubResponses,
     pub(super) iq_registry: Arc<TokioMutex<IqResponseRegistry>>,
 }
 
 impl XmppPubSubBridge {
     pub fn new(
         stanza_tx: StanzaTx,
-        responses: PubSubResponses,
         iq_registry: Arc<TokioMutex<IqResponseRegistry>>,
     ) -> Self {
         Self {
             stanza_tx,
-            responses,
             iq_registry,
         }
     }
@@ -69,7 +56,7 @@ impl XmppPubSubBridge {
 #[async_trait]
 impl OmemoPubSub for XmppPubSubBridge {
     async fn request_items(&self, from: &str, node: &str) -> Result<String> {
-        request_pubsub_items_with_client(&self.stanza_tx, &self.responses, from, node).await
+        request_pubsub_items_with_client(&self.stanza_tx, &self.iq_registry, from, node).await
     }
 
     async fn publish_item(

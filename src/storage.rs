@@ -91,6 +91,12 @@ impl MessageStore {
              OR contact_jid NOT LIKE '%@%';"
         );
 
+        // Migrate second-precision timestamps to milliseconds (idempotent: ms values
+        // are already > 9_999_999_999 and won't match the WHERE clause).
+        let _ = self.conn.execute_batch(
+            "UPDATE messages SET timestamp = timestamp * 1000 WHERE timestamp < 9999999999;"
+        );
+
         Ok(())
     }
 
