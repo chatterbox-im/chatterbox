@@ -850,7 +850,7 @@ impl DoubleRatchet {
         // Check if we need to perform a DH ratchet step
         if !state.remote_ratchet_key.eq(&message.ratchet_key) {
             // Ratchet key has changed, perform a DH ratchet step
-            Self::dh_ratchet(state, &message.ratchet_key)?;
+            Self::dh_ratchet(state, &message.ratchet_key, message.previous_counter)?;
         }
 
         // Try to find a skipped message key
@@ -962,7 +962,13 @@ impl DoubleRatchet {
     fn dh_ratchet(
         state: &mut RatchetState,
         their_ratchet_key: &[u8],
+        previous_counter: u32,
     ) -> Result<(), DoubleRatchetError> {
+        // Drain the remaining previous receiving chain before ratcheting.
+        // remote_ratchet_key is still the OLD key here, so skip keys are stored
+        // under (old_key, counter) and remain reachable for delayed messages.
+        Self::skip_message_keys(state, previous_counter)?;
+
         // Save previous state
         state.prev_remote_ratchet_key = state.remote_ratchet_key.clone();
         state.remote_ratchet_key = their_ratchet_key.to_vec();
@@ -1104,7 +1110,7 @@ impl DoubleRatchet {
                 && signal_msg.ratchet_key != candidate.remote_ratchet_key
             {
                 debug!("Double Ratchet decrypt_key: performing DH ratchet step (new ratchet key)");
-                Self::dh_ratchet(&mut candidate, &signal_msg.ratchet_key)?;
+                Self::dh_ratchet(&mut candidate, &signal_msg.ratchet_key, signal_msg.previous_counter)?
             }
 
             if signal_msg.counter < candidate.receive_message_number {
@@ -1773,6 +1779,54 @@ mod tests {
         let k1 = vec![0x21u8; 32];
         let m1 = DoubleRatchet::encrypt_key(&mut alice, &k1).unwrap();
         assert_eq!(DoubleRatchet::decrypt_key(&mut bob, &m1).unwrap(), k1);
+    }
+
+    #[test]
+    fn test_dh_ratchet_drains_previous_chain() {
+        // Scenario: Alice sends m0 (received by Bob, establishes chains), then m1 and m2
+        // (delayed).  Bob replies r0 forcing Alice to ratchet.  Alice then sends m3 on
+        // the new chain (previous_counter=3).  When Bob receives m3, the DH ratchet
+        // must pre-derive and store keys for (old_ratchet_key, 1) and (old_ratchet_key, 2)
+        // so the delayed m1 and m2 can still be decrypted afterwards.
+        let (mut alice, mut bob) = paired_sessions();
+
+        let k0 = vec![0x10u8; 32];
+        let k1 = vec![0x11u8; 32];
+        let k2 = vec![0x12u8; 32];
+        let k3 = vec![0x13u8; 32];
+
+        // Step 1: Alice sends m0; Bob receives it immediately (seeds Bob's chains).
+        let m0 = DoubleRatchet::encrypt_key(&mut alice, &k0).unwrap();
+        let d0 = DoubleRatchet::decrypt_key(&mut bob, &m0).unwrap();
+        assert_eq!(d0, k0);
+
+        // Step 2: Alice sends m1, m2 — these are delayed (Bob hasn't received them).
+        let m1 = DoubleRatchet::encrypt_key(&mut alice, &k1).unwrap();
+        let m2 = DoubleRatchet::encrypt_key(&mut alice, &k2).unwrap();
+
+        // Step 3: Bob sends r0; Alice receives it, triggering Alice's DH ratchet.
+        //         Alice's prev_send_message_number becomes 3 (sent m0, m1, m2).
+        let kr = vec![0xBBu8; 32];
+        let r0 = DoubleRatchet::encrypt_key(&mut bob, &kr).unwrap();
+        let dr = DoubleRatchet::decrypt_key(&mut alice, &r0).unwrap();
+        assert_eq!(dr, kr);
+
+        // Step 4: Alice sends m3 on her NEW chain (previous_counter = 3).
+        let m3 = DoubleRatchet::encrypt_key(&mut alice, &k3).unwrap();
+
+        // Step 5: Bob receives m3.  Bob's receive_message_number == 1 (received m0 only).
+        //         m3 carries a new ratchet key → DH ratchet fires.
+        //         With the fix, the ratchet pre-stores keys for (R_A, 1) and (R_A, 2)
+        //         before discarding the old receiving chain.
+        let d3 = DoubleRatchet::decrypt_key(&mut bob, &m3).unwrap();
+        assert_eq!(d3, k3, "m3 on new chain must decrypt");
+
+        // Step 6: The delayed m1 and m2 now arrive.
+        let d1 = DoubleRatchet::decrypt_key(&mut bob, &m1).unwrap();
+        assert_eq!(d1, k1, "delayed m1 must decrypt via pre-stored key from old chain");
+
+        let d2 = DoubleRatchet::decrypt_key(&mut bob, &m2).unwrap();
+        assert_eq!(d2, k2, "delayed m2 must decrypt via pre-stored key from old chain");
     }
 
     #[test]
