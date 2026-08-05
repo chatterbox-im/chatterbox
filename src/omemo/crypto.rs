@@ -53,25 +53,6 @@ pub const AES_KEY_SIZE: usize = 16;
 /// The size of the IV in bytes for AES-GCM (96 bits)
 pub const AES_IV_SIZE: usize = 12;
 
-/// Generate a random initialization vector for AES-GCM
-pub fn generate_iv() -> Vec<u8> {
-    trace!("Generating random {}-bit IV for AES-GCM", AES_IV_SIZE * 8);
-    let mut iv = vec![0u8; AES_IV_SIZE];
-    let mut rng = rand::thread_rng();
-    rng.fill_bytes(&mut iv);
-    trace!("Generated IV: {}", hex::encode(&iv));
-    iv
-}
-
-/// Generate a random key for message encryption
-pub fn generate_message_key() -> Vec<u8> {
-    trace!("Generating random 128-bit message key");
-    let mut bytes = vec![0u8; 16]; // 128 bits for AES-128
-    let mut rng = rand::thread_rng();
-    rng.fill_bytes(&mut bytes);
-    bytes
-}
-
 // Constants for Dino-compatible AES-GCM
 pub const AES_GCM_KEY_SIZE: usize = 16; // 128-bit key for Dino compatibility
 pub const AES_GCM_IV_SIZE: usize = 12; // 96-bit IV for AES-GCM
@@ -284,25 +265,6 @@ pub fn sha256_hash(data: &[u8]) -> Vec<u8> {
 
     trace!("Hash result: {}", hex::encode(&hash));
     hash
-}
-
-/// Securely compare two byte arrays in constant time
-pub fn secure_compare(a: &[u8], b: &[u8]) -> bool {
-    trace!("Performing constant-time comparison of {} bytes", a.len());
-
-    if a.len() != b.len() {
-        trace!("Length mismatch: {} != {}", a.len(), b.len());
-        return false;
-    }
-
-    let mut result = 0;
-    for (x, y) in a.iter().zip(b.iter()) {
-        result |= x ^ y;
-    }
-
-    let equal = result == 0;
-    trace!("Secure comparison result: {}", equal);
-    equal
 }
 
 /// Generate an ephemeral X25519 key pair for the X3DH key agreement
@@ -522,60 +484,6 @@ pub fn hkdf_derive(
     trace!("Derived key (length {})", okm.len());
 
     Ok(okm)
-}
-
-/// Create a Diffie-Hellman shared secret
-pub fn calculate_dh(private_key: &[u8], public_key: &[u8]) -> Result<Vec<u8>, CryptoError> {
-    // Just use our x25519_diffie_hellman function
-    x25519_diffie_hellman(private_key, public_key)
-}
-
-/// Generate a key pair for X25519
-pub fn generate_dh_keypair() -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
-    // Just use our generate_x25519_keypair function
-    generate_x25519_keypair()
-}
-
-/// Derive X25519 public key from private key
-pub fn x25519_public_key_from_private(private_key: &[u8]) -> Result<Vec<u8>, CryptoError> {
-    trace!("Deriving X25519 public key from private key");
-
-    // Validate private key length
-    if private_key.len() != 32 {
-        error!("Invalid X25519 private key length: {}", private_key.len());
-        return Err(CryptoError::InvalidInputError(format!(
-            "X25519 private key must be 32 bytes, got {}",
-            private_key.len()
-        )));
-    }
-
-    // Convert to the appropriate type for x25519-dalek
-    let mut private_bytes = [0u8; 32];
-    private_bytes.copy_from_slice(private_key);
-
-    // Create the StaticSecret from bytes
-    let static_secret = StaticSecret::from(private_bytes);
-
-    // Derive the public key
-    let public_key = PublicKey::from(&static_secret);
-
-    Ok(public_key.as_bytes().to_vec())
-}
-
-/// Compute SHA-256 hash
-pub fn sha256(data: &[u8]) -> Vec<u8> {
-    sha256_hash(data)
-}
-
-/// Format a key fingerprint for human readability
-pub fn format_fingerprint(fingerprint: &[u8]) -> String {
-    let fp_hex = hex::encode(fingerprint);
-    let chunks: Vec<String> = fp_hex
-        .as_bytes()
-        .chunks(2)
-        .map(|chunk| String::from_utf8_lossy(chunk).to_string())
-        .collect();
-    chunks.join(":")
 }
 
 /// XEdDSA: Sign a message using an X25519 private key.
@@ -956,7 +864,7 @@ mod tests {
         // Previously the _associated_data parameter was silently discarded, so
         // decryption with wrong AAD would succeed — concealing an AEAD mismatch.
         let key = generate_aes_key();
-        let iv = generate_iv();
+        let iv = generate_gcm_iv();
         let plaintext = b"sensitive payload";
         let aad_a = b"correct context";
         let aad_b = b"wrong context";
@@ -978,11 +886,11 @@ mod tests {
 
     #[test]
     fn test_dh() {
-        let (priv_a, pub_a) = generate_dh_keypair().unwrap();
-        let (priv_b, pub_b) = generate_dh_keypair().unwrap();
+        let (priv_a, pub_a) = generate_x25519_keypair().unwrap();
+        let (priv_b, pub_b) = generate_x25519_keypair().unwrap();
 
-        let secret_a = calculate_dh(&priv_a, &pub_b).unwrap();
-        let secret_b = calculate_dh(&priv_b, &pub_a).unwrap();
+        let secret_a = x25519_diffie_hellman(&priv_a, &pub_b).unwrap();
+        let secret_b = x25519_diffie_hellman(&priv_b, &pub_a).unwrap();
 
         assert_eq!(secret_a, secret_b);
     }
@@ -1003,7 +911,7 @@ mod tests {
             [0xcd, 0xeb, 0x7a, 0x7c, 0x3b, 0x41, 0xb8, 0xae, 0x16, 0x56, 0xe3, 0xfa, 0xf1, 0x9f, 0xc4, 0x6a, 0xda, 0x09, 0x8d, 0xeb, 0x9c, 0x32, 0xb1, 0xfd, 0x86, 0x62, 0x05, 0x16, 0x5f, 0x49, 0xb8, 0x80],
         ];
 
-        let (priv_key, _) = generate_dh_keypair().unwrap();
+        let (priv_key, _) = generate_x25519_keypair().unwrap();
         for (i, low_order) in low_order_points.iter().enumerate() {
             let result = x25519_diffie_hellman(&priv_key, low_order);
             assert!(
@@ -1024,16 +932,8 @@ mod tests {
     }
 
     #[test]
-    fn test_sha256() {
-        let data = b"data";
-
-        let hash = sha256(data);
-        assert_eq!(hash.len(), 32); // SHA-256 produces a 32-byte hash
-    }
-
-    #[test]
     fn test_validate_iv() {
-        let valid_iv = generate_iv();
+        let valid_iv = generate_gcm_iv();
         assert!(validate_iv(&valid_iv).is_ok());
 
         let empty_iv: Vec<u8> = Vec::new();
@@ -1041,17 +941,6 @@ mod tests {
 
         let invalid_length_iv = vec![0; 16];
         assert!(validate_iv(&invalid_length_iv).is_err());
-    }
-
-    #[test]
-    fn test_format_fingerprint() {
-        let fingerprint = vec![
-            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54,
-            0x32, 0x10,
-        ];
-
-        let formatted = format_fingerprint(&fingerprint);
-        assert_eq!(formatted, "01:23:45:67:89:ab:cd:ef:fe:dc:ba:98:76:54:32:10");
     }
 
     #[test]
@@ -1093,27 +982,6 @@ mod tests {
         let result_33 = x25519_diffie_hellman(&private_key, &public_key_33).unwrap();
 
         assert_eq!(result_32, result_33);
-    }
-
-    #[test]
-    fn test_secure_compare() {
-        let data1 = vec![0x01, 0x02, 0x03, 0x04];
-        let data2 = vec![0x01, 0x02, 0x03, 0x04];
-        let data3 = vec![0x01, 0x02, 0x03, 0x05];
-        let data4 = vec![0x01, 0x02, 0x03]; // Different length
-
-        assert!(
-            secure_compare(&data1, &data2),
-            "Identical data should compare as equal"
-        );
-        assert!(
-            !secure_compare(&data1, &data3),
-            "Different data should compare as not equal"
-        );
-        assert!(
-            !secure_compare(&data1, &data4),
-            "Different length data should compare as not equal"
-        );
     }
 
     #[test]
