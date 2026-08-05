@@ -30,6 +30,21 @@ fn strip_key_prefix(key: Vec<u8>) -> Vec<u8> {
 /// MAC length appended to SignalMessage (8 bytes)
 pub(crate) const MAC_LENGTH: usize = 8;
 
+/// An 8-byte truncated HMAC-SHA256 MAC.  Can only be constructed from exactly
+/// MAC_LENGTH bytes, so `verify_mac` never receives a wrong-length slice.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Mac([u8; MAC_LENGTH]);
+
+impl Mac {
+    /// Construct from a slice.  Returns `None` if the length is not MAC_LENGTH.
+    pub fn from_bytes(b: &[u8]) -> Option<Self> {
+        <[u8; MAC_LENGTH]>::try_from(b).ok().map(Mac)
+    }
+    pub fn as_bytes(&self) -> &[u8; MAC_LENGTH] {
+        &self.0
+    }
+}
+
 // Protobuf field tags (field_number << 3 | wire_type)
 // Wire type 0 = varint, 2 = length-delimited
 // Tag byte layout: [field_number (high 5 bits)] [wire_type (low 3 bits)]
@@ -488,15 +503,12 @@ fn compute_mac(key: &[u8], data: &[u8]) -> Vec<u8> {
     mac.finalize().into_bytes().to_vec()
 }
 
-/// Verify an 8-byte truncated HMAC-SHA256
-pub fn verify_mac(key: &[u8], data: &[u8], expected_mac: &[u8]) -> bool {
-    if expected_mac.len() != MAC_LENGTH {
-        return false;
-    }
+/// Verify an 8-byte truncated HMAC-SHA256.  The `expected` type guarantees the
+/// slice is exactly MAC_LENGTH bytes — no runtime length check needed.
+pub fn verify_mac(key: &[u8], data: &[u8], expected: &Mac) -> bool {
     let computed = compute_mac(key, data);
-    // Constant-time comparison over exactly MAC_LENGTH bytes.
     let mut result = 0u8;
-    for (a, b) in computed[..MAC_LENGTH].iter().zip(expected_mac.iter()) {
+    for (a, b) in computed[..MAC_LENGTH].iter().zip(expected.0.iter()) {
         result |= a ^ b;
     }
     result == 0
@@ -574,12 +586,11 @@ mod tests {
 
     #[test]
     fn test_verify_mac_empty_mac_rejected() {
-        let key = vec![0x11u8; 32];
-        let data = b"test data";
-        assert!(
-            !verify_mac(&key, data, &[]),
-            "empty expected_mac must return false, not true"
-        );
+        // Mac::from_bytes rejects wrong lengths at construction — an empty MAC
+        // can never reach verify_mac, making the C3 bug unconstructible.
+        assert!(Mac::from_bytes(&[]).is_none(), "empty slice must not produce a Mac");
+        assert!(Mac::from_bytes(&[0u8; 1]).is_none(), "1-byte slice must not produce a Mac");
+        assert!(Mac::from_bytes(&[0u8; MAC_LENGTH]).is_some(), "correct length must succeed");
     }
 
     #[test]
@@ -587,34 +598,19 @@ mod tests {
         let key = vec![0x22u8; 32];
         let data = b"some data";
 
-        // Compute the real MAC so we know what to pass as partial inputs.
         let full_mac = compute_mac(&key, data);
-        assert_eq!(full_mac.len(), 32);
 
-        // 1-byte prefix must be rejected (≠ MAC_LENGTH).
-        assert!(
-            !verify_mac(&key, data, &full_mac[..1]),
-            "1-byte MAC prefix must be rejected"
-        );
-
-        // 32-byte full HMAC-SHA256 must be rejected (MAC_LENGTH is 8).
-        assert!(
-            !verify_mac(&key, data, &full_mac),
-            "32-byte full MAC must be rejected (expected exactly MAC_LENGTH=8 bytes)"
-        );
+        // 32-byte full HMAC-SHA256 must not construct a Mac (MAC_LENGTH is 8).
+        assert!(Mac::from_bytes(&full_mac).is_none());
 
         // Correct 8-byte truncated MAC must be accepted.
-        assert!(
-            verify_mac(&key, data, &full_mac[..MAC_LENGTH]),
-            "correct 8-byte MAC must be accepted"
-        );
+        let mac = Mac::from_bytes(&full_mac[..MAC_LENGTH]).unwrap();
+        assert!(verify_mac(&key, data, &mac));
 
-        // Tampered 8-byte MAC must be rejected.
-        let mut tampered = full_mac[..MAC_LENGTH].to_vec();
-        tampered[0] ^= 0xFF;
-        assert!(
-            !verify_mac(&key, data, &tampered),
-            "tampered MAC must be rejected"
-        );
+        // Tampered MAC must be rejected.
+        let mut tampered_bytes = full_mac[..MAC_LENGTH].to_vec();
+        tampered_bytes[0] ^= 0xFF;
+        let tampered = Mac::from_bytes(&tampered_bytes).unwrap();
+        assert!(!verify_mac(&key, data, &tampered));
     }
 }

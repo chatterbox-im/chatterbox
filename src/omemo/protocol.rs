@@ -1078,8 +1078,11 @@ impl DoubleRatchet {
         }
         let msg_without_mac =
             &raw_msg_bytes[..raw_msg_bytes.len() - crate::omemo::wire::MAC_LENGTH];
-        let received_mac =
-            &raw_msg_bytes[raw_msg_bytes.len() - crate::omemo::wire::MAC_LENGTH..];
+        // The C2 length guard above guarantees this slice is exactly MAC_LENGTH bytes.
+        let received_mac = crate::omemo::wire::Mac::from_bytes(
+            &raw_msg_bytes[raw_msg_bytes.len() - crate::omemo::wire::MAC_LENGTH..],
+        )
+        .expect("length guard guarantees exactly MAC_LENGTH bytes");
 
         let sender_prefixed =
             crypto::encode_public_key_with_prefix(&candidate.remote_identity_key);
@@ -1093,7 +1096,7 @@ impl DoubleRatchet {
         mac_input.extend_from_slice(&receiver_prefixed);
         mac_input.extend_from_slice(msg_without_mac);
 
-        if !crate::omemo::wire::verify_mac(mac_key, &mac_input, received_mac) {
+        if !crate::omemo::wire::verify_mac(mac_key, &mac_input, &received_mac) {
             return Err(DoubleRatchetError::CryptoError(
                 crypto::CryptoError::AesGcmError("MAC verification failed".to_string()),
             ));
