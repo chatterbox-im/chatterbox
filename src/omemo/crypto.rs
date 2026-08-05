@@ -45,7 +45,7 @@ pub enum CryptoError {
     InvalidIV(String),
 }
 
-/// The size of the AES key in bytes (256 bits)
+/// The size of the AES key in bytes (128 bits)
 pub const AES_KEY_SIZE: usize = 16;
 
 /// The size of the IV in bytes for AES-GCM (96 bits)
@@ -290,66 +290,7 @@ pub fn validate_iv(iv: &[u8]) -> Result<(), CryptoError> {
     Ok(())
 }
 
-/// Encrypt a message (currently uses GCM but I think it needs to be CBC for OMEMO)
-pub fn encrypt(
-    plaintext: &[u8],
-    key: &[u8],
-    iv: &[u8],
-    _associated_data: &[u8],
-) -> Result<Vec<u8>, CryptoError> {
-    trace!("Encryption key: {}", hex::encode(key));
-    trace!("IV: {}", hex::encode(iv));
-
-    // Validate key and IV sizes
-    if key.len() != AES_KEY_SIZE {
-        error!(
-            "Invalid key size: {} (expected {} bytes)",
-            key.len(),
-            AES_KEY_SIZE
-        );
-        return Err(CryptoError::InvalidInputError(format!(
-            "Invalid key size: {} (expected {} bytes)",
-            key.len(),
-            AES_KEY_SIZE
-        )));
-    }
-
-    // Validate the IV
-    validate_iv(iv)?;
-
-    // Create the cipher
-    let cipher = match Aes128Gcm::new_from_slice(key) {
-        Ok(c) => c,
-        Err(e) => {
-            error!("Failed to create AES-GCM cipher: {}", e);
-            return Err(CryptoError::AesGcmError(format!(
-                "Failed to create cipher: {}",
-                e
-            )));
-        }
-    };
-
-    // Create the nonce
-    let nonce = Nonce::from_slice(iv);
-
-    // Encrypt the plaintext
-    let ciphertext = match cipher.encrypt(nonce, plaintext) {
-        Ok(c) => c,
-        Err(e) => {
-            error!("AES-GCM encryption failed: {}", e);
-            return Err(CryptoError::AesGcmError(format!(
-                "Encryption failed: {}",
-                e
-            )));
-        }
-    };
-
-    trace!("Ciphertext: {}", hex::encode(&ciphertext));
-
-    Ok(ciphertext)
-}
-
-/// Decrypt a message using AES-256-GCM
+/// Decrypt a message using AES-128-GCM
 pub fn decrypt(
     ciphertext: &[u8],
     key: &[u8],
@@ -1088,20 +1029,6 @@ mod tests {
             result,
             "XEdDSA verify with 0x05-prefixed SPK should succeed"
         );
-    }
-
-    #[test]
-    fn test_encrypt_decrypt() {
-        let key = generate_message_key();
-        let iv = generate_iv();
-        let plaintext = b"Hello, world!";
-        let aad = b"additional data";
-
-        let ciphertext = encrypt(plaintext, &key, &iv, aad).unwrap();
-        assert_ne!(ciphertext, plaintext);
-
-        let decrypted = decrypt(&ciphertext, &key, &iv, aad).unwrap();
-        assert_eq!(decrypted, plaintext);
     }
 
     #[test]

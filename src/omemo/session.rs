@@ -362,41 +362,6 @@ impl OmemoSession {
         self.remote_device_id
     }
 
-    /// Encrypt a message
-    pub fn encrypt(&mut self, plaintext: &[u8]) -> Result<Vec<u8>, SessionError> {
-        if !self.ratchet_state.initialized {
-            return Err(SessionError::InvalidStateError(
-                "Session not initialized".to_string(),
-            ));
-        }
-
-        let message = DoubleRatchet::encrypt(&mut self.ratchet_state, plaintext)?;
-
-        // For this example, we'll use JSON serialization
-        let encoded = serde_json::to_vec(&message)
-            .map_err(|e| SessionError::SerializationError(e.to_string()))?;
-
-        Ok(encoded)
-    }
-
-    /// Decrypt a message
-    pub fn decrypt(&mut self, ciphertext: &[u8]) -> Result<Vec<u8>, SessionError> {
-        if !self.ratchet_state.initialized {
-            return Err(SessionError::InvalidStateError(
-                "Session not initialized".to_string(),
-            ));
-        }
-
-        // Deserialize the message
-        let message = serde_json::from_slice(ciphertext)
-            .map_err(|e| SessionError::SerializationError(e.to_string()))?;
-
-        // Decrypt it
-        let plaintext = DoubleRatchet::decrypt(&mut self.ratchet_state, &message)?;
-
-        Ok(plaintext)
-    }
-
     /// Encrypt a message key for transport (produces a SignalMessage in wire format)
     pub fn encrypt_key(&mut self, key: &[u8]) -> Result<Vec<u8>, SessionError> {
         if !self.ratchet_state.initialized {

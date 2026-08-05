@@ -320,7 +320,7 @@ pub(crate) mod legacy_ratchet {
 }
 
 /// An OMEMO message for double ratchet encryption
-#[derive(Clone, Serialize, Deserialize, Debug)]
+#[derive(Clone, Debug)]
 pub struct OmemoMessage {
     /// Sender device ID
     pub sender_device_id: DeviceId,
@@ -799,103 +799,6 @@ impl DoubleRatchet {
         state.ratchet_key_pair = spk_pair;
 
         Ok(state)
-    }
-
-    /// Encrypt a message
-    pub fn encrypt(
-        state: &mut RatchetState,
-        plaintext: &[u8],
-    ) -> Result<OmemoMessage, DoubleRatchetError> {
-        // Get the message key
-        let message_key = Self::derive_next_sending_key(state);
-
-        // Generate a random IV
-        let iv = crypto::generate_iv();
-
-        // Encrypt the message
-        let ciphertext = crypto::encrypt(plaintext, &message_key, &iv, &[])
-            .map_err(DoubleRatchetError::CryptoError)?;
-
-        // MAC: HMAC-SHA256(message_key, ciphertext), truncated to 16 bytes
-        let mac = crypto::hmac_sha256(&message_key, &ciphertext).expect("HMAC-SHA256 cannot fail")
-            [..16]
-            .to_vec();
-
-        // Create the message
-        let message = OmemoMessage {
-            sender_device_id: state.local_device_id,
-            ratchet_key: state.ratchet_key_pair.public_key.clone(),
-            previous_counter: state.prev_send_message_number, // Messages in previous sending chain
-            counter: state.send_message_number,
-            ciphertext,
-            mac,
-            iv,
-            encrypted_keys: std::collections::HashMap::new(),
-            is_prekey: false,
-            ephemeral_key: None,
-            prekey_devices: HashSet::new(),
-        };
-
-        // Increment message counter
-        state.send_message_number += 1;
-
-        Ok(message)
-    }
-
-    /// Decrypt a message
-    pub fn decrypt(
-        state: &mut RatchetState,
-        message: &OmemoMessage,
-    ) -> Result<Vec<u8>, DoubleRatchetError> {
-        // Check if we need to perform a DH ratchet step
-        if !state.remote_ratchet_key.eq(&message.ratchet_key) {
-            // Ratchet key has changed, perform a DH ratchet step
-            Self::dh_ratchet(state, &message.ratchet_key, message.previous_counter)?;
-        }
-
-        // Try to find a skipped message key
-        let key = (message.ratchet_key.clone(), message.counter);
-        if let Some(message_key) = state.skipped_message_keys.remove(&key) {
-            // We have a skipped message key, use it to decrypt
-            return Self::decrypt_message(message, &message_key);
-        }
-
-        // Check if we have already received this message
-        if message.counter < state.receive_message_number {
-            return Err(DoubleRatchetError::InvalidMessageFormatError(
-                "Message counter is too old".to_string(),
-            ));
-        }
-
-        // Skip forward if needed
-        if message.counter > state.receive_message_number {
-            Self::skip_message_keys(state, message.counter)?;
-        }
-
-        // Get the message key
-        let message_key = Self::derive_next_receiving_key(state);
-
-        // Decrypt the message
-        Self::decrypt_message(message, &message_key)
-    }
-
-    /// Decrypt a message with a key
-    fn decrypt_message(message: &OmemoMessage, key: &[u8]) -> Result<Vec<u8>, DoubleRatchetError> {
-        // Verify the MAC: HMAC-SHA256(message_key, ciphertext), truncated to 16 bytes
-        let calculated_mac = crypto::hmac_sha256(key, &message.ciphertext)
-            .expect("HMAC-SHA256 cannot fail")[..16]
-            .to_vec();
-        if !crypto::secure_compare(&calculated_mac, &message.mac) {
-            return Err(DoubleRatchetError::InvalidMessageFormatError(
-                "MAC verification failed".to_string(),
-            ));
-        }
-
-        // Decrypt the message
-        let plaintext = crypto::decrypt(&message.ciphertext, key, &message.iv, &[])
-            .map_err(DoubleRatchetError::CryptoError)?;
-
-        Ok(plaintext)
     }
 
     /// Skip message keys up to a specific counter
