@@ -67,7 +67,6 @@ pub fn generate_message_key() -> Vec<u8> {
     let mut bytes = vec![0u8; 16]; // 128 bits for AES-128
     let mut rng = rand::thread_rng();
     rng.fill_bytes(&mut bytes);
-    trace!("Generated message key: {}", hex::encode(&bytes));
     bytes
 }
 
@@ -297,7 +296,6 @@ pub fn decrypt(
     iv: &[u8],
     _associated_data: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
-    trace!("Decryption key: {}", hex::encode(key));
     trace!("IV: {}", hex::encode(iv));
     trace!("Ciphertext: {}", hex::encode(ciphertext));
 
@@ -351,7 +349,6 @@ pub fn decrypt(
 /// HMAC-SHA256 for message authentication
 pub fn hmac_sha256(key: &[u8], data: &[u8]) -> Result<Vec<u8>, CryptoError> {
     //debug!("Calculating HMAC-SHA256 for {} bytes of data", data.len());
-    trace!("HMAC key: {}", hex::encode(key));
 
     // Create the HMAC instance - using hmac::Mac trait's new_from_slice method
     let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(key).map_err(|e| {
@@ -374,7 +371,6 @@ pub fn hmac_sha256(key: &[u8], data: &[u8]) -> Result<Vec<u8>, CryptoError> {
 /// Derive a key using HKDF with SHA-256
 pub fn kdf(ikm: &[u8], salt: &[u8], info: &[u8]) -> Vec<u8> {
     //debug!("Deriving key using HKDF-SHA256");
-    trace!("Input key material: {}", hex::encode(ikm));
     trace!("Salt: {}", hex::encode(salt));
     trace!("Info: {}", String::from_utf8_lossy(info));
 
@@ -385,7 +381,6 @@ pub fn kdf(ikm: &[u8], salt: &[u8], info: &[u8]) -> Vec<u8> {
     hkdf.expand(info, &mut output)
         .expect("HKDF expansion failed");
 
-    trace!("Derived key: {}", hex::encode(&output));
     output
 }
 
@@ -437,7 +432,6 @@ pub fn generate_x25519_keypair() -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
 
     //debug!("X25519 key pair generation successful in {:?}", duration);
     trace!("Public key: {}", hex::encode(&public_key_bytes));
-    trace!("Private key: {}", hex::encode(&private_key_bytes));
 
     Ok((private_key_bytes, public_key_bytes))
 }
@@ -551,7 +545,6 @@ pub fn x25519_diffie_hellman(
     public_key: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
     trace!("Performing X25519 Diffie-Hellman key exchange");
-    trace!("Using private key: {}", hex::encode(private_key));
     trace!("Using public key: {}", hex::encode(public_key));
 
     // Validate private key length
@@ -582,7 +575,6 @@ pub fn x25519_diffie_hellman(
     let shared_bytes = shared_secret.as_bytes().to_vec();
 
     //debug!("X25519 key exchange completed successfully in {:?}", duration);
-    trace!("Shared secret: {}", hex::encode(&shared_bytes));
 
     Ok(shared_bytes)
 }
@@ -596,7 +588,6 @@ pub fn hkdf_derive(
 ) -> Result<Vec<u8>, CryptoError> {
     //debug!("Deriving key with HKDF: output_len={}", output_len);
     trace!("Salt: {}", hex::encode(salt));
-    trace!("Input key material: {}", hex::encode(ikm));
     trace!("Info: {}", hex::encode(info));
 
     let hk = Hkdf::<Sha256>::new(Some(salt), ikm);
@@ -610,7 +601,7 @@ pub fn hkdf_derive(
         )));
     }
 
-    trace!("Derived key: {}", hex::encode(&okm));
+    trace!("Derived key (length {})", okm.len());
 
     Ok(okm)
 }
