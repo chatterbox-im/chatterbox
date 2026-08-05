@@ -490,16 +490,13 @@ fn compute_mac(key: &[u8], data: &[u8]) -> Vec<u8> {
 
 /// Verify an 8-byte truncated HMAC-SHA256
 pub fn verify_mac(key: &[u8], data: &[u8], expected_mac: &[u8]) -> bool {
-    let computed = compute_mac(key, data);
-    if expected_mac.len() > computed.len() {
+    if expected_mac.len() != MAC_LENGTH {
         return false;
     }
-    // Constant-time comparison
+    let computed = compute_mac(key, data);
+    // Constant-time comparison over exactly MAC_LENGTH bytes.
     let mut result = 0u8;
-    for (a, b) in computed[..expected_mac.len()]
-        .iter()
-        .zip(expected_mac.iter())
-    {
+    for (a, b) in computed[..MAC_LENGTH].iter().zip(expected_mac.iter()) {
         result |= a ^ b;
     }
     result == 0
@@ -573,5 +570,51 @@ mod tests {
         // Two bytes
         assert_eq!(encode_varint(128), vec![0x80, 0x01]);
         assert_eq!(encode_varint(300), vec![0xAC, 0x02]);
+    }
+
+    #[test]
+    fn test_verify_mac_empty_mac_rejected() {
+        let key = vec![0x11u8; 32];
+        let data = b"test data";
+        assert!(
+            !verify_mac(&key, data, &[]),
+            "empty expected_mac must return false, not true"
+        );
+    }
+
+    #[test]
+    fn test_verify_mac_length_enforcement() {
+        let key = vec![0x22u8; 32];
+        let data = b"some data";
+
+        // Compute the real MAC so we know what to pass as partial inputs.
+        let full_mac = compute_mac(&key, data);
+        assert_eq!(full_mac.len(), 32);
+
+        // 1-byte prefix must be rejected (≠ MAC_LENGTH).
+        assert!(
+            !verify_mac(&key, data, &full_mac[..1]),
+            "1-byte MAC prefix must be rejected"
+        );
+
+        // 32-byte full HMAC-SHA256 must be rejected (MAC_LENGTH is 8).
+        assert!(
+            !verify_mac(&key, data, &full_mac),
+            "32-byte full MAC must be rejected (expected exactly MAC_LENGTH=8 bytes)"
+        );
+
+        // Correct 8-byte truncated MAC must be accepted.
+        assert!(
+            verify_mac(&key, data, &full_mac[..MAC_LENGTH]),
+            "correct 8-byte MAC must be accepted"
+        );
+
+        // Tampered 8-byte MAC must be rejected.
+        let mut tampered = full_mac[..MAC_LENGTH].to_vec();
+        tampered[0] ^= 0xFF;
+        assert!(
+            !verify_mac(&key, data, &tampered),
+            "tampered MAC must be rejected"
+        );
     }
 }
