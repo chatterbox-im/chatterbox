@@ -28,7 +28,7 @@ fn strip_key_prefix(key: Vec<u8>) -> Vec<u8> {
 }
 
 /// MAC length appended to SignalMessage (8 bytes)
-const MAC_LENGTH: usize = 8;
+pub(crate) const MAC_LENGTH: usize = 8;
 
 // Protobuf field tags (field_number << 3 | wire_type)
 // Wire type 0 = varint, 2 = length-delimited

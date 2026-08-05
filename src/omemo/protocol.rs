@@ -1141,29 +1141,37 @@ impl DoubleRatchet {
         // Verify MAC before decryption.
         // MAC covers: sender_identity(33) || receiver_identity(33) || version || protobuf
         // The raw_msg_bytes contain version || proto || mac[8]
-        if raw_msg_bytes.len() > 8 {
-            let msg_without_mac = &raw_msg_bytes[..raw_msg_bytes.len() - 8];
-            let received_mac = &raw_msg_bytes[raw_msg_bytes.len() - 8..];
-
-            let sender_prefixed =
-                crypto::encode_public_key_with_prefix(&candidate.remote_identity_key);
-            let receiver_prefixed = crypto::encode_public_key_with_prefix(
-                &candidate.local_identity_key_pair.public_key,
-            );
-            let mut mac_input = Vec::with_capacity(
-                sender_prefixed.len() + receiver_prefixed.len() + msg_without_mac.len(),
-            );
-            mac_input.extend_from_slice(&sender_prefixed);
-            mac_input.extend_from_slice(&receiver_prefixed);
-            mac_input.extend_from_slice(msg_without_mac);
-
-            if !crate::omemo::wire::verify_mac(mac_key, &mac_input, received_mac) {
-                return Err(DoubleRatchetError::CryptoError(
-                    crypto::CryptoError::AesGcmError("MAC verification failed".to_string()),
-                ));
-            }
-            debug!("Double Ratchet decrypt_key: MAC verified successfully");
+        // Explicit guard so that MAC verification is never skipped (C2 fix).
+        if raw_msg_bytes.len() < 1 + crate::omemo::wire::MAC_LENGTH {
+            return Err(DoubleRatchetError::InvalidMessageFormatError(format!(
+                "Message too short for MAC: {} bytes (need >= {})",
+                raw_msg_bytes.len(),
+                1 + crate::omemo::wire::MAC_LENGTH
+            )));
         }
+        let msg_without_mac =
+            &raw_msg_bytes[..raw_msg_bytes.len() - crate::omemo::wire::MAC_LENGTH];
+        let received_mac =
+            &raw_msg_bytes[raw_msg_bytes.len() - crate::omemo::wire::MAC_LENGTH..];
+
+        let sender_prefixed =
+            crypto::encode_public_key_with_prefix(&candidate.remote_identity_key);
+        let receiver_prefixed = crypto::encode_public_key_with_prefix(
+            &candidate.local_identity_key_pair.public_key,
+        );
+        let mut mac_input = Vec::with_capacity(
+            sender_prefixed.len() + receiver_prefixed.len() + msg_without_mac.len(),
+        );
+        mac_input.extend_from_slice(&sender_prefixed);
+        mac_input.extend_from_slice(&receiver_prefixed);
+        mac_input.extend_from_slice(msg_without_mac);
+
+        if !crate::omemo::wire::verify_mac(mac_key, &mac_input, received_mac) {
+            return Err(DoubleRatchetError::CryptoError(
+                crypto::CryptoError::AesGcmError("MAC verification failed".to_string()),
+            ));
+        }
+        debug!("Double Ratchet decrypt_key: MAC verified successfully");
 
         // Decrypt using AES-256-CBC with PKCS7 padding
         let key = crypto::aes_256_cbc_decrypt(cipher_key, iv, &signal_msg.ciphertext)
@@ -1765,6 +1773,35 @@ mod tests {
         let k1 = vec![0x21u8; 32];
         let m1 = DoubleRatchet::encrypt_key(&mut alice, &k1).unwrap();
         assert_eq!(DoubleRatchet::decrypt_key(&mut bob, &m1).unwrap(), k1);
+    }
+
+    #[test]
+    fn test_decrypt_key_mac_check_is_unconditional() {
+        // Structural guard: verify that MAC failure always produces
+        // InvalidMessageFormatError / CryptoError, never falls through to
+        // decryption.  This is a regression guard for the fail-open `if len > 8`
+        // that previously had no else-branch (C2).
+        //
+        // Note: SignalMessage::deserialize already enforces len >= 1 + MAC_LENGTH,
+        // so the fail-open path is unreachable through normal deserialization.
+        // This test confirms the MAC is checked for every valid-length message.
+        let (mut alice, mut bob) = paired_sessions();
+
+        let k0 = vec![0x55u8; 32];
+        let mut msg = DoubleRatchet::encrypt_key(&mut alice, &k0).unwrap();
+
+        // Flip a bit in the MAC region — decrypt must fail with a crypto error,
+        // not succeed (which would mean MAC was bypassed).
+        let last = msg.len() - 1;
+        msg[last] ^= 0xFF;
+
+        let result = DoubleRatchet::decrypt_key(&mut bob, &msg);
+        assert!(result.is_err(), "corrupted MAC must always be rejected");
+        // Verify it's a MAC error (CryptoError), not a downstream decrypt error.
+        assert!(
+            matches!(result.unwrap_err(), DoubleRatchetError::CryptoError(_)),
+            "corrupted MAC must be rejected at the MAC layer, not by AES-CBC"
+        );
     }
 
     #[test]
