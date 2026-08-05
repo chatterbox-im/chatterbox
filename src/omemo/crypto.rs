@@ -294,56 +294,9 @@ pub fn decrypt(
     ciphertext: &[u8],
     key: &[u8],
     iv: &[u8],
-    _associated_data: &[u8],
+    associated_data: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
-    trace!("IV: {}", hex::encode(iv));
-    trace!("Ciphertext: {}", hex::encode(ciphertext));
-
-    // Validate key and IV sizes
-    if key.len() != AES_KEY_SIZE {
-        error!(
-            "Invalid key size: {} (expected {} bytes)",
-            key.len(),
-            AES_KEY_SIZE
-        );
-        return Err(CryptoError::InvalidInputError(format!(
-            "Invalid key size: {} (expected {} bytes)",
-            key.len(),
-            AES_KEY_SIZE
-        )));
-    }
-
-    // Validate the IV
-    validate_iv(iv)?;
-
-    // Create the cipher
-    let cipher = match Aes128Gcm::new_from_slice(key) {
-        Ok(c) => c,
-        Err(e) => {
-            error!("Failed to create AES-GCM cipher: {}", e);
-            return Err(CryptoError::AesGcmError(format!(
-                "Failed to create cipher: {}",
-                e
-            )));
-        }
-    };
-
-    // Create the nonce
-    let nonce = Nonce::from_slice(iv);
-
-    // Decrypt the ciphertext
-    let plaintext = match cipher.decrypt(nonce, ciphertext) {
-        Ok(p) => p,
-        Err(e) => {
-            error!("AES-GCM decryption failed: {}", e);
-            return Err(CryptoError::AesGcmError(format!(
-                "Decryption failed: {}",
-                e
-            )));
-        }
-    };
-
-    Ok(plaintext)
+    aes_gcm_decrypt_with_ad(ciphertext, key, iv, associated_data)
 }
 
 /// HMAC-SHA256 for message authentication
@@ -1030,6 +983,29 @@ mod tests {
 
         let key = hkdf_derive(salt, ikm, info, 32).unwrap();
         assert_eq!(key.len(), 32);
+    }
+
+    #[test]
+    fn test_decrypt_binds_aad() {
+        // crypto::decrypt must reject ciphertext authenticated under different AAD.
+        // Previously the _associated_data parameter was silently discarded, so
+        // decryption with wrong AAD would succeed — concealing an AEAD mismatch.
+        let key = generate_aes_key();
+        let iv = generate_iv();
+        let plaintext = b"sensitive payload";
+        let aad_a = b"correct context";
+        let aad_b = b"wrong context";
+
+        let ciphertext = aes_gcm_encrypt_with_ad(plaintext, &key, &iv, aad_a).unwrap();
+
+        // Correct AAD must decrypt successfully.
+        assert!(decrypt(&ciphertext, &key, &iv, aad_a).is_ok());
+
+        // Wrong AAD must fail with an authentication error.
+        assert!(
+            decrypt(&ciphertext, &key, &iv, aad_b).is_err(),
+            "decryption with wrong AAD must fail — AAD was not bound"
+        );
     }
 
     #[test]
