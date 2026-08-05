@@ -11,7 +11,7 @@ use thiserror::Error;
 
 use crate::omemo::crypto;
 use crate::omemo::device_id::DeviceId;
-use crate::omemo::keys::Secret;
+use crate::omemo::keys::{AesCbcKey, CbcIv, Ikm, Salt, Secret};
 
 /// Errors that can occur in double ratchet operations
 #[derive(Debug, Error)]
@@ -513,7 +513,7 @@ impl X3DHProtocol {
         // HKDF(salt=0x00*32, IKM, info="WhisperText", L=32)
         // info="WhisperText" matches libsignal's X3DH key derivation
         let salt = vec![0u8; 32];
-        let shared_secret = crypto::hkdf_derive(&salt, &ikm, b"WhisperText", 32)
+        let shared_secret = crypto::hkdf_derive(Salt(&salt), Ikm(&ikm), b"WhisperText", 32)
             .map_err(DoubleRatchetError::CryptoError)?;
 
         debug!("X3DH initiator key agreement complete");
@@ -591,7 +591,7 @@ impl X3DHProtocol {
         // HKDF(salt=0x00*32, IKM, info="WhisperText", L=32)
         // info="WhisperText" matches libsignal's X3DH key derivation
         let salt = vec![0u8; 32];
-        let shared_key = crypto::hkdf_derive(&salt, &ikm, b"WhisperText", 32)
+        let shared_key = crypto::hkdf_derive(Salt(&salt), Ikm(&ikm), b"WhisperText", 32)
             .map_err(DoubleRatchetError::CryptoError)?;
 
         debug!("X3DH recipient key agreement complete");
@@ -666,7 +666,7 @@ impl DoubleRatchet {
                     .map_err(DoubleRatchetError::CryptoError)?;
 
             // KDF_RK(SK, DH) -> (root_key, send_chain_key)
-            let kdf_output = crypto::hkdf_derive(&shared_secret, &dh_output, b"WhisperRatchet", 64)
+            let kdf_output = crypto::hkdf_derive(Salt(&shared_secret), Ikm(&dh_output), b"WhisperRatchet", 64)
                 .map_err(DoubleRatchetError::CryptoError)?;
             let root_key = Secret::from_slice(&kdf_output[..32])
                 .expect("KDF output is always 32 bytes");
@@ -902,7 +902,7 @@ impl DoubleRatchet {
 ;
 
         // KDF_RK(root_key, dh_recv) -> (new_root_key, receive_chain_key)
-        let kdf_recv = crypto::hkdf_derive(state.root_key.expose_secret(), &dh_recv, b"WhisperRatchet", 64)
+        let kdf_recv = crypto::hkdf_derive(Salt::from(&state.root_key), Ikm(&dh_recv), b"WhisperRatchet", 64)
             .map_err(DoubleRatchetError::CryptoError)?;
         state.root_key = Secret::from_slice(&kdf_recv[..32]).expect("KDF is always 64 bytes");
         state.receive_chain_key = Secret::from_slice(&kdf_recv[32..64]).expect("KDF is always 64 bytes");
@@ -918,7 +918,7 @@ impl DoubleRatchet {
                 .map_err(DoubleRatchetError::CryptoError)?;
 
         // KDF_RK(root_key, dh_send) -> (new_root_key, send_chain_key)
-        let kdf_send = crypto::hkdf_derive(state.root_key.expose_secret(), &dh_send, b"WhisperRatchet", 64)
+        let kdf_send = crypto::hkdf_derive(Salt::from(&state.root_key), Ikm(&dh_send), b"WhisperRatchet", 64)
             .map_err(DoubleRatchetError::CryptoError)?;
         state.root_key = Secret::from_slice(&kdf_send[..32]).expect("KDF is always 64 bytes");
         state.send_chain_key = Secret::from_slice(&kdf_send[32..64]).expect("KDF is always 64 bytes");
@@ -939,14 +939,14 @@ impl DoubleRatchet {
 
         // Expand message_key via HKDF to get (cipher_key, mac_key, iv)
         // Per Signal spec: HKDF(message_key, salt="", info="WhisperMessageKeys", L=80)
-        let expanded = crypto::hkdf_derive(&[], &message_key, b"WhisperMessageKeys", 80)
+        let expanded = crypto::hkdf_derive(Salt(&[]), Ikm(&message_key), b"WhisperMessageKeys", 80)
             .map_err(DoubleRatchetError::CryptoError)?;
-        let cipher_key = &expanded[..32]; // AES-256 key
+        let cipher_key = AesCbcKey::from_slice(&expanded[..32]).expect("HKDF output is 80 bytes");
         let mac_key = &expanded[32..64]; // HMAC-SHA256 key
-        let iv = &expanded[64..80]; // CBC IV (16 bytes)
+        let iv = CbcIv::from_slice(&expanded[64..80]).expect("HKDF output is 80 bytes");
 
         // Encrypt the OMEMO message key using AES-256-CBC with PKCS7 padding
-        let ciphertext = crypto::aes_256_cbc_encrypt(cipher_key, iv, key)
+        let ciphertext = crypto::aes_256_cbc_encrypt(&cipher_key, &iv, key)
             .map_err(DoubleRatchetError::CryptoError)?;
 
         // Build a SignalMessage in wire format
@@ -1059,11 +1059,11 @@ impl DoubleRatchet {
         };
 
         // Expand message_key via HKDF to get (cipher_key, mac_key, iv)
-        let expanded = crypto::hkdf_derive(&[], &message_key, b"WhisperMessageKeys", 80)
+        let expanded = crypto::hkdf_derive(Salt(&[]), Ikm(&message_key), b"WhisperMessageKeys", 80)
             .map_err(DoubleRatchetError::CryptoError)?;
-        let cipher_key = &expanded[..32]; // AES-256 key
+        let cipher_key = AesCbcKey::from_slice(&expanded[..32]).expect("HKDF output is 80 bytes");
         let mac_key = &expanded[32..64]; // HMAC-SHA256 key
-        let iv = &expanded[64..80]; // CBC IV (16 bytes)
+        let iv = CbcIv::from_slice(&expanded[64..80]).expect("HKDF output is 80 bytes");
 
         // Verify MAC before decryption.
         // MAC covers: sender_identity(33) || receiver_identity(33) || version || protobuf
@@ -1104,7 +1104,7 @@ impl DoubleRatchet {
         debug!("Double Ratchet decrypt_key: MAC verified successfully");
 
         // Decrypt using AES-256-CBC with PKCS7 padding
-        let key = crypto::aes_256_cbc_decrypt(cipher_key, iv, &signal_msg.ciphertext)
+        let key = crypto::aes_256_cbc_decrypt(&cipher_key, &iv, &signal_msg.ciphertext)
             .map_err(DoubleRatchetError::CryptoError)?;
 
         debug!(

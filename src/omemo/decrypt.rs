@@ -5,6 +5,7 @@ use hex;
 use log::{debug, error, info, warn};
 
 use crate::omemo::crypto;
+use crate::omemo::keys::{AesGcmKey, GcmNonce};
 use crate::omemo::protocol::{self, OmemoMessage};
 use crate::omemo::session::{self, OmemoSession, OmemoSessionState};
 use crate::omemo::{OmemoError, OmemoManager};
@@ -460,8 +461,19 @@ impl OmemoManager {
         let mut gcm_ciphertext = message.ciphertext.clone();
         gcm_ciphertext.extend_from_slice(auth_tag);
 
+        let aes_gcm_key = AesGcmKey::from_slice(aes_key).ok_or_else(|| {
+            OmemoError::CryptoError(crate::omemo::crypto::CryptoError::InvalidInputError(
+                format!("invalid AES-GCM key length: {}", aes_key.len()),
+            ))
+        })?;
+        let gcm_nonce = GcmNonce::from_slice(iv).ok_or_else(|| {
+            OmemoError::CryptoError(crate::omemo::crypto::CryptoError::InvalidIV(
+                format!("invalid GCM nonce length: {}", iv.len()),
+            ))
+        })?;
+
         // Decrypt using AES-GCM
-        let plaintext = crypto::aes_gcm_decrypt(&gcm_ciphertext, aes_key, iv)
+        let plaintext = crypto::aes_gcm_decrypt(&gcm_ciphertext, &aes_gcm_key, &gcm_nonce)
             .map_err(|e| OmemoError::CryptoError(e))?;
 
         debug!("Successfully decrypted payload");

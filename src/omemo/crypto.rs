@@ -5,7 +5,7 @@
 
 use aes_gcm::{
     aead::{Aead, KeyInit, Payload},
-    Aes128Gcm, Nonce,
+    Nonce,
 };
 use curve25519_dalek::{edwards::CompressedEdwardsY, montgomery::MontgomeryPoint, scalar::Scalar};
 use hex;
@@ -16,6 +16,8 @@ use rand::{rngs::OsRng, RngCore};
 use sha2::{Digest, Sha256, Sha512};
 use thiserror::Error;
 use x25519_dalek::{PublicKey, StaticSecret};
+
+use crate::omemo::keys::{AesCbcKey, AesGcmKey, CbcIv, GcmNonce, Ikm, Salt};
 
 /// Errors related to cryptographic operations
 #[derive(Debug, Error)]
@@ -92,7 +94,7 @@ pub fn generate_gcm_iv() -> Vec<u8> {
 
 /// Encrypt data using AES-128-GCM (Dino-compatible format)
 /// Returns ciphertext + auth_tag combined
-pub fn aes_gcm_encrypt(plaintext: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>, CryptoError> {
+pub fn aes_gcm_encrypt(plaintext: &[u8], key: &AesGcmKey, iv: &GcmNonce) -> Result<Vec<u8>, CryptoError> {
     aes_gcm_encrypt_with_ad(plaintext, key, iv, &[])
 }
 
@@ -100,38 +102,19 @@ pub fn aes_gcm_encrypt(plaintext: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8
 /// AD is authenticated but not encrypted — binds ciphertext to session context.
 pub fn aes_gcm_encrypt_with_ad(
     plaintext: &[u8],
-    key: &[u8],
-    iv: &[u8],
+    key: &AesGcmKey,
+    iv: &GcmNonce,
     ad: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
     use aes_gcm::Aes128Gcm;
 
-    if key.len() != AES_GCM_KEY_SIZE {
-        return Err(CryptoError::InvalidInputError(format!(
-            "Invalid key size for AES-GCM: {} (expected {} bytes)",
-            key.len(),
-            AES_GCM_KEY_SIZE
-        )));
-    }
-
-    if iv.len() != AES_GCM_IV_SIZE {
-        return Err(CryptoError::InvalidIV(format!(
-            "Invalid IV size for AES-GCM: {} (expected {} bytes)",
-            iv.len(),
-            AES_GCM_IV_SIZE
-        )));
-    }
-
-    let cipher = Aes128Gcm::new_from_slice(key).map_err(|e| {
+    let cipher = Aes128Gcm::new_from_slice(key.as_bytes()).map_err(|e| {
         CryptoError::AesGcmError(format!("Failed to create AES-128-GCM cipher: {}", e))
     })?;
 
-    let nonce = Nonce::from_slice(iv);
+    let nonce = Nonce::from_slice(iv.as_bytes());
 
-    let payload = Payload {
-        msg: plaintext,
-        aad: ad,
-    };
+    let payload = Payload { msg: plaintext, aad: ad };
     let ciphertext = cipher
         .encrypt(nonce, payload)
         .map_err(|e| CryptoError::AesGcmError(format!("AES-128-GCM encryption failed: {}", e)))?;
@@ -147,45 +130,26 @@ pub fn aes_gcm_encrypt_with_ad(
 
 /// Decrypt data using AES-128-GCM (Dino-compatible format)
 /// Expects ciphertext + auth_tag combined
-pub fn aes_gcm_decrypt(ciphertext: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>, CryptoError> {
+pub fn aes_gcm_decrypt(ciphertext: &[u8], key: &AesGcmKey, iv: &GcmNonce) -> Result<Vec<u8>, CryptoError> {
     aes_gcm_decrypt_with_ad(ciphertext, key, iv, &[])
 }
 
 /// Decrypt data using AES-128-GCM with Associated Data (AD)
 pub fn aes_gcm_decrypt_with_ad(
     ciphertext: &[u8],
-    key: &[u8],
-    iv: &[u8],
+    key: &AesGcmKey,
+    iv: &GcmNonce,
     ad: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
     use aes_gcm::Aes128Gcm;
 
-    if key.len() != AES_GCM_KEY_SIZE {
-        return Err(CryptoError::InvalidInputError(format!(
-            "Invalid key size for AES-GCM: {} (expected {} bytes)",
-            key.len(),
-            AES_GCM_KEY_SIZE
-        )));
-    }
-
-    if iv.len() != AES_GCM_IV_SIZE {
-        return Err(CryptoError::InvalidIV(format!(
-            "Invalid IV size for AES-GCM: {} (expected {} bytes)",
-            iv.len(),
-            AES_GCM_IV_SIZE
-        )));
-    }
-
-    let cipher = Aes128Gcm::new_from_slice(key).map_err(|e| {
+    let cipher = Aes128Gcm::new_from_slice(key.as_bytes()).map_err(|e| {
         CryptoError::AesGcmError(format!("Failed to create AES-128-GCM cipher: {}", e))
     })?;
 
-    let nonce = Nonce::from_slice(iv);
+    let nonce = Nonce::from_slice(iv.as_bytes());
 
-    let payload = Payload {
-        msg: ciphertext,
-        aad: ad,
-    };
+    let payload = Payload { msg: ciphertext, aad: ad };
     let plaintext = cipher
         .decrypt(nonce, payload)
         .map_err(|e| CryptoError::AesGcmError(format!("AES-128-GCM decryption failed: {}", e)))?;
@@ -201,30 +165,16 @@ pub fn aes_gcm_decrypt_with_ad(
 
 /// Encrypt using AES-256-CBC with PKCS7 padding (Signal protocol inner cipher)
 pub fn aes_256_cbc_encrypt(
-    key: &[u8],
-    iv: &[u8],
+    key: &AesCbcKey,
+    iv: &CbcIv,
     plaintext: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
     use cbc::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
     type Aes256CbcEnc = cbc::Encryptor<aes::Aes256>;
 
-    if key.len() != 32 {
-        return Err(CryptoError::InvalidInputError(format!(
-            "Invalid key size for AES-256-CBC: {} (expected 32)",
-            key.len()
-        )));
-    }
-    if iv.len() != 16 {
-        return Err(CryptoError::InvalidIV(format!(
-            "Invalid IV size for AES-256-CBC: {} (expected 16)",
-            iv.len()
-        )));
-    }
-
-    let cipher = Aes256CbcEnc::new_from_slices(key, iv)
+    let cipher = Aes256CbcEnc::new_from_slices(key.as_bytes(), iv.as_bytes())
         .map_err(|e| CryptoError::AesGcmError(format!("AES-256-CBC init failed: {}", e)))?;
 
-    // Allocate buffer with space for padding (up to one extra block of 16 bytes)
     let mut buf = vec![0u8; plaintext.len() + 16];
     buf[..plaintext.len()].copy_from_slice(plaintext);
     let ct = cipher
@@ -235,27 +185,14 @@ pub fn aes_256_cbc_encrypt(
 
 /// Decrypt using AES-256-CBC with PKCS7 padding (Signal protocol inner cipher)
 pub fn aes_256_cbc_decrypt(
-    key: &[u8],
-    iv: &[u8],
+    key: &AesCbcKey,
+    iv: &CbcIv,
     ciphertext: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
     use cbc::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
     type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
 
-    if key.len() != 32 {
-        return Err(CryptoError::InvalidInputError(format!(
-            "Invalid key size for AES-256-CBC: {} (expected 32)",
-            key.len()
-        )));
-    }
-    if iv.len() != 16 {
-        return Err(CryptoError::InvalidIV(format!(
-            "Invalid IV size for AES-256-CBC: {} (expected 16)",
-            iv.len()
-        )));
-    }
-
-    let cipher = Aes256CbcDec::new_from_slices(key, iv)
+    let cipher = Aes256CbcDec::new_from_slices(key.as_bytes(), iv.as_bytes())
         .map_err(|e| CryptoError::AesGcmError(format!("AES-256-CBC init failed: {}", e)))?;
 
     let mut buf = ciphertext.to_vec();
@@ -290,13 +227,28 @@ pub fn validate_iv(iv: &[u8]) -> Result<(), CryptoError> {
 }
 
 /// Decrypt a message using AES-128-GCM
+/// Boundary function: validates key/IV lengths before calling the typed inner function.
 pub fn decrypt(
     ciphertext: &[u8],
     key: &[u8],
     iv: &[u8],
     associated_data: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
-    aes_gcm_decrypt_with_ad(ciphertext, key, iv, associated_data)
+    let k = AesGcmKey::from_slice(key).ok_or_else(|| {
+        CryptoError::InvalidInputError(format!(
+            "Invalid key size for AES-GCM: {} (expected {})",
+            key.len(),
+            AES_GCM_KEY_SIZE
+        ))
+    })?;
+    let n = GcmNonce::from_slice(iv).ok_or_else(|| {
+        CryptoError::InvalidIV(format!(
+            "Invalid IV size for AES-GCM: {} (expected {})",
+            iv.len(),
+            AES_GCM_IV_SIZE
+        ))
+    })?;
+    aes_gcm_decrypt_with_ad(ciphertext, &k, &n, associated_data)
 }
 
 /// HMAC-SHA256 for message authentication
@@ -544,18 +496,19 @@ pub fn x25519_diffie_hellman(
     Ok(shared_bytes)
 }
 
-/// Derive a key using HKDF
+/// Derive a key using HKDF.
+/// `salt` and `ikm` are distinct types so callers cannot silently swap them.
 pub fn hkdf_derive(
-    salt: &[u8],
-    ikm: &[u8],
+    salt: Salt,
+    ikm: Ikm,
     info: &[u8],
     output_len: usize,
 ) -> Result<Vec<u8>, CryptoError> {
     //debug!("Deriving key with HKDF: output_len={}", output_len);
-    trace!("Salt: {}", hex::encode(salt));
+    trace!("Salt: {}", hex::encode(salt.0));
     trace!("Info: {}", hex::encode(info));
 
-    let hk = Hkdf::<Sha256>::new(Some(salt), ikm);
+    let hk = Hkdf::<Sha256>::new(Some(salt.0), ikm.0);
     let mut okm = vec![0u8; output_len];
 
     if let Err(e) = hk.expand(info, &mut okm) {
@@ -993,7 +946,7 @@ mod tests {
         let ikm = b"input key material";
         let info = b"info";
 
-        let key = hkdf_derive(salt, ikm, info, 32).unwrap();
+        let key = hkdf_derive(Salt(salt), Ikm(ikm), info, 32).unwrap();
         assert_eq!(key.len(), 32);
     }
 
@@ -1008,7 +961,10 @@ mod tests {
         let aad_a = b"correct context";
         let aad_b = b"wrong context";
 
-        let ciphertext = aes_gcm_encrypt_with_ad(plaintext, &key, &iv, aad_a).unwrap();
+        let aes_key = AesGcmKey::from_slice(&key).unwrap();
+        let gcm_iv = GcmNonce::from_slice(&iv).unwrap();
+
+        let ciphertext = aes_gcm_encrypt_with_ad(plaintext, &aes_key, &gcm_iv, aad_a).unwrap();
 
         // Correct AAD must decrypt successfully.
         assert!(decrypt(&ciphertext, &key, &iv, aad_a).is_ok());

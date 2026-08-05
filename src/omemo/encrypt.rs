@@ -8,6 +8,7 @@ use tokio::time::{timeout, Duration};
 
 use crate::omemo::crypto;
 use crate::omemo::device_id::DeviceId;
+use crate::omemo::keys::{AesGcmKey, GcmNonce};
 use crate::omemo::protocol::{self, DeviceIdentity, OmemoMessage};
 use crate::omemo::session::{self, OmemoSession, OmemoSessionState};
 use crate::omemo::{EncryptionVerificationError, OmemoError, OmemoManager, OMEMO_NAMESPACE};
@@ -624,12 +625,15 @@ impl OmemoManager {
         );
 
         // Generate a 16-byte AES key and 12-byte IV
-        let aes_key = crypto::generate_aes_key(); // 16 bytes
-        let iv = crypto::generate_gcm_iv(); // 12 bytes
+        let aes_key_bytes = crypto::generate_aes_key(); // 16 bytes
+        let iv_bytes = crypto::generate_gcm_iv(); // 12 bytes
         debug!("Generated 16-byte AES-GCM key and 12-byte IV (Dino-compatible format)");
 
+        let aes_key = AesGcmKey::from_slice(&aes_key_bytes).expect("generate_aes_key produces 16 bytes");
+        let gcm_iv = GcmNonce::from_slice(&iv_bytes).expect("generate_gcm_iv produces 12 bytes");
+
         // Encrypt the plaintext with AES-GCM
-        let gcm_result = crypto::aes_gcm_encrypt(plaintext.as_bytes(), &aes_key, &iv)
+        let gcm_result = crypto::aes_gcm_encrypt(plaintext.as_bytes(), &aes_key, &gcm_iv)
             .map_err(OmemoError::CryptoError)?;
 
         if gcm_result.len() < 16 {
@@ -648,8 +652,8 @@ impl OmemoManager {
             auth_tag.len()
         );
 
-        // For Dino compatibility, the message key is aes_key + auth_tag (32 bytes total)
-        let mut message_key = aes_key.clone();
+        // For Dino compatibility, the message key is aes_key_bytes + auth_tag (32 bytes total)
+        let mut message_key = aes_key_bytes.clone();
         message_key.extend_from_slice(&auth_tag);
         debug!(
             "Created message key: {} bytes (16-byte AES key + 16-byte auth tag)",
@@ -1006,7 +1010,7 @@ impl OmemoManager {
             counter: 0,
             ciphertext,
             mac: vec![],
-            iv: iv.to_vec(),
+            iv: iv_bytes.to_vec(),
             encrypted_keys,
             is_prekey: has_prekey_devices,
             ephemeral_key: ephemeral_key.clone(),
