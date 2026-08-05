@@ -1086,51 +1086,49 @@ impl DoubleRatchet {
             ));
         };
 
-        // First, check whether this is a delayed/out-of-order message whose key we
-        // already derived and stored earlier. This must happen before any DH ratchet
-        // decision, since such a message carries an older ratchet key and counter.
+        // Work on a candidate clone; commit to state only on full success so
+        // no mutation is visible to the caller on any error path.
+        let mut candidate = state.clone();
+
         let skip_index = (signal_msg.ratchet_key.clone(), signal_msg.counter);
-        let message_key = if let Some(stored_key) = state.skipped_message_keys.remove(&skip_index) {
+        let message_key = if let Some(stored_key) =
+            candidate.skipped_message_keys.remove(&skip_index)
+        {
             debug!(
                 "Double Ratchet decrypt_key: using stored skipped message key for counter {}",
                 signal_msg.counter
             );
             stored_key
         } else {
-            // Check if we need a DH ratchet step
             if !signal_msg.ratchet_key.is_empty()
-                && signal_msg.ratchet_key != state.remote_ratchet_key
+                && signal_msg.ratchet_key != candidate.remote_ratchet_key
             {
                 debug!("Double Ratchet decrypt_key: performing DH ratchet step (new ratchet key)");
-                Self::dh_ratchet(state, &signal_msg.ratchet_key)?;
+                Self::dh_ratchet(&mut candidate, &signal_msg.ratchet_key)?;
             }
 
-            // Reject messages from this chain that we've already advanced past and
-            // for which no skipped key is stored. Deriving here would silently advance
-            // (and desync) the receiving chain on a replayed or stale message.
-            if signal_msg.counter < state.receive_message_number {
+            if signal_msg.counter < candidate.receive_message_number {
                 return Err(DoubleRatchetError::InvalidMessageFormatError(format!(
                     "Message counter {} is too old (already processed, no stored key)",
                     signal_msg.counter
                 )));
             }
 
-            // Skip keys if needed (with MAX_SKIP protection)
-            if signal_msg.counter > state.receive_message_number {
-                if signal_msg.counter - state.receive_message_number > Self::MAX_SKIP {
+            if signal_msg.counter > candidate.receive_message_number {
+                if signal_msg.counter - candidate.receive_message_number > Self::MAX_SKIP {
                     return Err(DoubleRatchetError::InvalidMessageFormatError(
                         "Too many skipped messages in decrypt_key".to_string(),
                     ));
                 }
-                while state.receive_message_number < signal_msg.counter {
-                    let current_counter = state.receive_message_number;
-                    let skipped_key = Self::derive_next_receiving_key(state);
+                while candidate.receive_message_number < signal_msg.counter {
+                    let current_counter = candidate.receive_message_number;
+                    let skipped_key = Self::derive_next_receiving_key(&mut candidate);
                     let skip_index = (signal_msg.ratchet_key.clone(), current_counter);
-                    state.skipped_message_keys.insert(skip_index, skipped_key);
+                    candidate.skipped_message_keys.insert(skip_index, skipped_key);
                 }
             }
 
-            Self::derive_next_receiving_key(state)
+            Self::derive_next_receiving_key(&mut candidate)
         };
 
         // Expand message_key via HKDF to get (cipher_key, mac_key, iv)
@@ -1140,16 +1138,18 @@ impl DoubleRatchet {
         let mac_key = &expanded[32..64]; // HMAC-SHA256 key
         let iv = &expanded[64..80]; // CBC IV (16 bytes)
 
-        // Verify MAC before decryption
+        // Verify MAC before decryption.
         // MAC covers: sender_identity(33) || receiver_identity(33) || version || protobuf
         // The raw_msg_bytes contain version || proto || mac[8]
         if raw_msg_bytes.len() > 8 {
             let msg_without_mac = &raw_msg_bytes[..raw_msg_bytes.len() - 8];
             let received_mac = &raw_msg_bytes[raw_msg_bytes.len() - 8..];
 
-            let sender_prefixed = crypto::encode_public_key_with_prefix(&state.remote_identity_key);
-            let receiver_prefixed =
-                crypto::encode_public_key_with_prefix(&state.local_identity_key_pair.public_key);
+            let sender_prefixed =
+                crypto::encode_public_key_with_prefix(&candidate.remote_identity_key);
+            let receiver_prefixed = crypto::encode_public_key_with_prefix(
+                &candidate.local_identity_key_pair.public_key,
+            );
             let mut mac_input = Vec::with_capacity(
                 sender_prefixed.len() + receiver_prefixed.len() + msg_without_mac.len(),
             );
@@ -1173,6 +1173,9 @@ impl DoubleRatchet {
             "Double Ratchet decrypt_key: decrypted key length: {}",
             key.len()
         );
+
+        // All checks passed — commit candidate to state.
+        *state = candidate;
         Ok(key)
     }
 }
@@ -1762,6 +1765,73 @@ mod tests {
         let k1 = vec![0x21u8; 32];
         let m1 = DoubleRatchet::encrypt_key(&mut alice, &k1).unwrap();
         assert_eq!(DoubleRatchet::decrypt_key(&mut bob, &m1).unwrap(), k1);
+    }
+
+    #[test]
+    fn test_decrypt_key_corrupted_mac_leaves_state_unchanged() {
+        let (mut alice, mut bob) = paired_sessions();
+
+        let k0 = vec![0xABu8; 32];
+        let mut msg = DoubleRatchet::encrypt_key(&mut alice, &k0).unwrap();
+
+        // Corrupt the MAC (last 8 bytes) by flipping the final byte.
+        let last = msg.len() - 1;
+        msg[last] ^= 0xFF;
+
+        let bob_before = bob.clone();
+
+        assert!(
+            DoubleRatchet::decrypt_key(&mut bob, &msg).is_err(),
+            "corrupted MAC must be rejected"
+        );
+
+        assert_eq!(bob.receive_message_number, bob_before.receive_message_number);
+        assert_eq!(bob.remote_ratchet_key, bob_before.remote_ratchet_key);
+        assert_eq!(bob.receive_chain_key, bob_before.receive_chain_key);
+        assert_eq!(bob.root_key, bob_before.root_key);
+        assert_eq!(bob.skipped_message_keys, bob_before.skipped_message_keys);
+
+        // Session must still be usable after the rejected message.
+        let k1 = vec![0xCDu8; 32];
+        let msg1 = DoubleRatchet::encrypt_key(&mut alice, &k1).unwrap();
+        assert_eq!(DoubleRatchet::decrypt_key(&mut bob, &msg1).unwrap(), k1);
+    }
+
+    #[test]
+    fn test_decrypt_key_bogus_ratchet_key_leaves_state_unchanged() {
+        // A message whose ratchet_key triggers the DH-ratchet branch must not
+        // commit that ratchet step when the MAC then fails.
+        let (mut alice, mut bob) = paired_sessions();
+
+        // Consume one message so alice's state is non-trivial.
+        let _m0 = DoubleRatchet::encrypt_key(&mut alice, &vec![0x11u8; 32]).unwrap();
+
+        let bogus_ratchet = X3DHProtocol::generate_key_pair().unwrap();
+        let forged = crate::omemo::wire::SignalMessage {
+            ratchet_key: bogus_ratchet.public_key.clone(),
+            counter: 0,
+            previous_counter: 0,
+            ciphertext: vec![0u8; 32],
+            mac: Vec::new(),
+        }
+        .serialize_with_identity(
+            &vec![0u8; 32], // wrong mac_key → MAC will not verify
+            &bogus_ratchet.public_key,
+            &bogus_ratchet.public_key,
+        );
+
+        let bob_before = bob.clone();
+
+        assert!(
+            DoubleRatchet::decrypt_key(&mut bob, &forged).is_err(),
+            "forged ratchet key with bad MAC must be rejected"
+        );
+
+        assert_eq!(bob.remote_ratchet_key, bob_before.remote_ratchet_key);
+        assert_eq!(bob.root_key, bob_before.root_key);
+        assert_eq!(bob.receive_chain_key, bob_before.receive_chain_key);
+        assert_eq!(bob.send_chain_key, bob_before.send_chain_key);
+        assert_eq!(bob.receive_message_number, bob_before.receive_message_number);
     }
 
     #[test]
