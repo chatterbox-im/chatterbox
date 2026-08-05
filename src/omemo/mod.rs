@@ -27,6 +27,7 @@ pub mod device_id;
 mod encrypt;
 #[cfg(test)]
 mod encrypt_decrypt_test;
+pub mod keys;
 mod lifecycle;
 pub mod protocol;
 pub mod session;
