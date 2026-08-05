@@ -173,6 +173,150 @@ pub struct RatchetState {
 
     /// Remote JID
     pub remote_jid: String,
+
+    /// For sessions we accepted as the X3DH *recipient*: the initiator's base
+    /// (ephemeral) key from the PreKeySignalMessage that established this
+    /// session.
+    ///
+    /// libsignal initiators keep attaching the PreKey header to *every*
+    /// outbound message until they receive one back inside the session (the
+    /// "unacknowledged prekey" state).  Those retransmits carry the same base
+    /// key and the same one-time-prekey id that we already consumed.  Recording
+    /// the base key lets `decrypt_message` recognise a retransmit and decrypt
+    /// it with the existing session instead of trying — and failing — to re-run
+    /// X3DH against a one-time prekey that no longer exists.
+    ///
+    /// `None` for initiator sessions.
+    ///
+    /// NOTE: `#[serde(default)]` does **not** make older on-disk states
+    /// loadable.  Sessions are persisted with `bincode`, which is not
+    /// self-describing — see [`legacy_ratchet`] for how pre-existing
+    /// `state.bin` files are decoded and upgraded.
+    #[serde(default)]
+    pub establishing_base_key: Option<Vec<u8>>,
+}
+
+/// Historical on-disk shapes of [`RatchetState`].
+///
+/// `bincode` is **not** a self-describing format: it writes no field names and
+/// no tags, so a decoder walks the buffer positionally, using each field's type
+/// to decide how many bytes to consume.  `#[serde(default)]` only fires when the
+/// format reports a field as *absent*, which bincode can never do — it simply
+/// runs off the end of the buffer and fails with
+/// `io error: unexpected end of file`.
+///
+/// Consequently every `state.bin` written before `prev_send_message_number` and
+/// `establishing_base_key` were introduced is undecodable as the current
+/// `RatchetState`.  The mirrors below reproduce the exact historical field order
+/// so those files can still be read and then rewritten in the current format.
+///
+/// Note that `prev_send_message_number` was inserted in the *middle* of the
+/// struct, so its addition also shifted every field after it — a V1 blob cannot
+/// be recovered by reading a prefix of the current layout.
+pub(crate) mod legacy_ratchet {
+    use super::{KeyPair, RatchetState};
+    use crate::omemo::device_id::DeviceId;
+    use serde::Deserialize;
+
+    /// Layout before `prev_send_message_number` and `establishing_base_key`.
+    #[derive(Deserialize)]
+    pub struct RatchetStateV1 {
+        pub initialized: bool,
+        pub is_initiator: bool,
+        pub remote_identity_key: Vec<u8>,
+        pub local_identity_key_pair: KeyPair,
+        pub root_key: Vec<u8>,
+        pub send_chain_key: Vec<u8>,
+        pub receive_chain_key: Vec<u8>,
+        pub ratchet_key_pair: KeyPair,
+        pub remote_ratchet_key: Vec<u8>,
+        pub prev_remote_ratchet_key: Vec<u8>,
+        pub send_message_number: u32,
+        pub receive_message_number: u32,
+        pub prev_receive_message_number: u32,
+        pub skipped_message_keys: std::collections::HashMap<(Vec<u8>, u32), Vec<u8>>,
+        pub local_device_id: DeviceId,
+        pub remote_device_id: DeviceId,
+        pub remote_jid: String,
+    }
+
+    /// Layout after `prev_send_message_number` was added but before
+    /// `establishing_base_key`.
+    #[derive(Deserialize)]
+    pub struct RatchetStateV2 {
+        pub initialized: bool,
+        pub is_initiator: bool,
+        pub remote_identity_key: Vec<u8>,
+        pub local_identity_key_pair: KeyPair,
+        pub root_key: Vec<u8>,
+        pub send_chain_key: Vec<u8>,
+        pub receive_chain_key: Vec<u8>,
+        pub ratchet_key_pair: KeyPair,
+        pub remote_ratchet_key: Vec<u8>,
+        pub prev_remote_ratchet_key: Vec<u8>,
+        pub send_message_number: u32,
+        pub receive_message_number: u32,
+        pub prev_receive_message_number: u32,
+        pub prev_send_message_number: u32,
+        pub skipped_message_keys: std::collections::HashMap<(Vec<u8>, u32), Vec<u8>>,
+        pub local_device_id: DeviceId,
+        pub remote_device_id: DeviceId,
+        pub remote_jid: String,
+    }
+
+    impl From<RatchetStateV1> for RatchetState {
+        fn from(v: RatchetStateV1) -> Self {
+            RatchetState {
+                initialized: v.initialized,
+                is_initiator: v.is_initiator,
+                remote_identity_key: v.remote_identity_key,
+                local_identity_key_pair: v.local_identity_key_pair,
+                root_key: v.root_key,
+                send_chain_key: v.send_chain_key,
+                receive_chain_key: v.receive_chain_key,
+                ratchet_key_pair: v.ratchet_key_pair,
+                remote_ratchet_key: v.remote_ratchet_key,
+                prev_remote_ratchet_key: v.prev_remote_ratchet_key,
+                send_message_number: v.send_message_number,
+                receive_message_number: v.receive_message_number,
+                prev_receive_message_number: v.prev_receive_message_number,
+                // Not tracked in V1; 0 is what a fresh session starts with and
+                // only affects the `previous_counter` hint on the wire.
+                prev_send_message_number: 0,
+                skipped_message_keys: v.skipped_message_keys,
+                local_device_id: v.local_device_id,
+                remote_device_id: v.remote_device_id,
+                remote_jid: v.remote_jid,
+                establishing_base_key: None,
+            }
+        }
+    }
+
+    impl From<RatchetStateV2> for RatchetState {
+        fn from(v: RatchetStateV2) -> Self {
+            RatchetState {
+                initialized: v.initialized,
+                is_initiator: v.is_initiator,
+                remote_identity_key: v.remote_identity_key,
+                local_identity_key_pair: v.local_identity_key_pair,
+                root_key: v.root_key,
+                send_chain_key: v.send_chain_key,
+                receive_chain_key: v.receive_chain_key,
+                ratchet_key_pair: v.ratchet_key_pair,
+                remote_ratchet_key: v.remote_ratchet_key,
+                prev_remote_ratchet_key: v.prev_remote_ratchet_key,
+                send_message_number: v.send_message_number,
+                receive_message_number: v.receive_message_number,
+                prev_receive_message_number: v.prev_receive_message_number,
+                prev_send_message_number: v.prev_send_message_number,
+                skipped_message_keys: v.skipped_message_keys,
+                local_device_id: v.local_device_id,
+                remote_device_id: v.remote_device_id,
+                remote_jid: v.remote_jid,
+                establishing_base_key: None,
+            }
+        }
+    }
 }
 
 /// An OMEMO message for double ratchet encryption
@@ -538,6 +682,9 @@ impl DoubleRatchet {
                 local_device_id,
                 remote_device_id,
                 remote_jid: normalize_jid_to_bare(&remote_jid),
+                // Initiator side: we chose the base key, so there is nothing to
+                // recognise on the way back in.
+                establishing_base_key: None,
             };
 
             Ok(state)
@@ -565,7 +712,7 @@ impl DoubleRatchet {
                     public_key: vec![], // Will be set properly by new_session_recipient
                     private_key: vec![],
                 },
-                remote_ratchet_key: ephemeral_key, // Alice's ephemeral key (or her first ratchet key)
+                remote_ratchet_key: ephemeral_key.clone(), // Alice's ephemeral key (or her first ratchet key)
                 prev_remote_ratchet_key: vec![],
                 send_message_number: 0,
                 receive_message_number: 0,
@@ -575,6 +722,11 @@ impl DoubleRatchet {
                 local_device_id,
                 remote_device_id,
                 remote_jid: normalize_jid_to_bare(&remote_jid),
+                // Recipient side: `ephemeral_key` here IS the initiator's base
+                // key from the PreKeySignalMessage (decrypt.rs passes
+                // `prekey_msg.base_key` straight through).  Record it so
+                // retransmitted PreKey headers can be matched to this session.
+                establishing_base_key: Some(ephemeral_key),
             };
 
             Ok(state)

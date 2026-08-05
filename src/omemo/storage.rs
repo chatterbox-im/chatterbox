@@ -1,18 +1,34 @@
 // src/omemo/storage.rs
-//! Filesystem-based storage for OMEMO keys and sessions
+//! Storage for OMEMO keys and sessions.
 //!
-//! This module provides filesystem-based storage for OMEMO encryption,
-//! using binary serialization for complex structures and plain text for simple values.
+//! This is a thin facade over [`crate::omemo::store_sqlite::SqliteStore`]. The
+//! public API is unchanged from the previous filesystem implementation so that
+//! call sites across the OMEMO and XMPP layers did not need to move; the
+//! persistence mechanics underneath it did.
+//!
+//! Why the change: the old layout stored ratchet state as bare `bincode` blobs
+//! in a directory tree whose names were derived from a lossy JID encoding, with
+//! per-device flags kept as individual marker files. That combination produced
+//! three separate failure modes — unversioned blobs breaking on any struct
+//! change, JIDs containing digits failing to round-trip, and no way to update
+//! two objects atomically. See the module docs in `store_sqlite.rs`.
+//!
+//! On first run with an existing filesystem store, `OmemoStorage::new` imports
+//! it (see `store_migrate.rs`) and archives the old tree.
 
 use crate::omemo::device_id;
 use crate::omemo::device_id::DeviceId;
 use crate::omemo::protocol::{DeviceIdentity, RatchetState, X3DHKeyBundle};
+use crate::omemo::store_migrate;
+use crate::omemo::store_sqlite::SqliteStore;
 use anyhow::{anyhow, Result};
-use bincode;
-use log::{debug, error, warn};
+use log::{debug, warn};
 use once_cell::sync::OnceCell;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+
+/// Filename of the OMEMO database inside the data directory.
+const DB_FILENAME: &str = "omemo.sqlite3";
 
 /// Entry for a device list
 pub struct DeviceListEntry {
@@ -67,10 +83,14 @@ impl TrustLevel {
     }
 }
 
-/// Filesystem-based storage for OMEMO data
+/// SQLite-backed storage for OMEMO data
 pub struct OmemoStorage {
-    /// Root directory for OMEMO storage
+    /// Root directory for OMEMO data (holds the database and any archived
+    /// legacy tree). Retained because `identity_key_path` is part of the API.
     base_path: PathBuf,
+
+    /// The backing store.
+    store: SqliteStore,
 
     /// Our device ID
     device_id: DeviceId,
@@ -85,15 +105,13 @@ pub fn set_storage_path_override(path: PathBuf) {
 impl OmemoStorage {
     /// Create a new OMEMO storage
     pub fn new(path: Option<PathBuf>) -> Result<Self> {
-        // Determine the storage path
+        // Determine the storage path (unchanged resolution order).
         let base_path = match path {
             Some(p) => p,
             None => {
-                // If OMEMO_DIR_OVERRIDE is set, use it
                 if let Some(dir) = device_id::get_omemo_dir_override() {
                     dir.clone()
                 } else if let Some(jid) = device_id::get_omemo_jid() {
-                    // Use user-specific directory for OMEMO storage
                     let mut storage_path = match dirs::data_dir() {
                         Some(path) => path,
                         None => return Err(anyhow!("Could not determine XDG_DATA_HOME directory")),
@@ -105,7 +123,6 @@ impl OmemoStorage {
                 } else if let Some(override_path) = STORAGE_PATH_OVERRIDE.get() {
                     override_path.clone()
                 } else {
-                    // Use the default path in the user's home directory
                     let mut home = dirs::home_dir()
                         .ok_or_else(|| anyhow!("Could not determine home directory"))?;
                     home.push(".local");
@@ -117,23 +134,25 @@ impl OmemoStorage {
             }
         };
 
-        // Create the directory structure
         fs::create_dir_all(&base_path)?;
-        fs::create_dir_all(base_path.join("device_lists"))?;
-        fs::create_dir_all(base_path.join("identities"))?;
-        fs::create_dir_all(base_path.join("sessions"))?;
-        fs::create_dir_all(base_path.join("key_bundles"))?;
-        fs::create_dir_all(base_path.join("metadata"))?;
 
-        // Remove any orphaned .tmp files left by interrupted writes (e.g. app
-        // killed between write and rename).  Errors are non-fatal.
-        Self::cleanup_orphaned_tmp_files(&base_path);
+        let store = SqliteStore::open(&base_path.join(DB_FILENAME))?;
 
-        // Load or generate device ID
-        let device_id = Self::load_or_generate_device_id(&base_path)?;
+        // One-time import of the pre-SQLite filesystem tree.
+        if store_migrate::legacy_store_present(&base_path) {
+            if let Err(e) = store_migrate::import_legacy_store(&base_path, &store) {
+                // Do not fail startup: the legacy tree is left in place so the
+                // import can be retried, and the user can still send/receive
+                // (sessions will simply be re-established).
+                warn!("Legacy OMEMO import failed (continuing without it): {}", e);
+            }
+        }
+
+        let device_id = Self::load_or_generate_device_id(&store)?;
 
         Ok(Self {
             base_path,
+            store,
             device_id,
         })
     }
@@ -143,201 +162,71 @@ impl OmemoStorage {
         Self::new(None)
     }
 
-    fn cleanup_orphaned_tmp_files(path: &Path) {
-        if let Ok(entries) = fs::read_dir(path) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    Self::cleanup_orphaned_tmp_files(&path);
-                } else if path.extension().and_then(|ext| ext.to_str()) == Some("tmp") {
-                    let _ = fs::remove_file(path);
-                }
+    /// Create an in-memory store. Tests only.
+    #[cfg(test)]
+    pub fn new_in_memory() -> Result<Self> {
+        let store = SqliteStore::open_in_memory()?;
+        let device_id = Self::load_or_generate_device_id(&store)?;
+        Ok(Self {
+            base_path: PathBuf::from("."),
+            store,
+            device_id,
+        })
+    }
+
+    fn load_or_generate_device_id(store: &SqliteStore) -> Result<DeviceId> {
+        if let Some(v) = store.get_meta("device_id")? {
+            if let Ok(id) = v.trim().parse::<DeviceId>() {
+                return Ok(id);
             }
+            warn!("Stored OMEMO device_id '{}' is unparseable; regenerating", v);
         }
-    }
-
-    /// Load or generate device ID
-    fn load_or_generate_device_id(base_path: &Path) -> Result<DeviceId> {
-        let device_id_path = base_path.join("metadata").join("device_id");
-
-        if device_id_path.exists() {
-            let content = fs::read_to_string(&device_id_path)?;
-            content
-                .trim()
-                .parse::<DeviceId>()
-                .map_err(|e| anyhow!("Failed to parse device ID: {}", e))
-        } else {
-            // Generate new device ID and save it
-            let device_id = crate::omemo::device_id::generate_device_id();
-            Self::write_text_file(&device_id_path, &device_id.to_string())?;
-            Ok(device_id)
-        }
-    }
-
-    /// Write text content to a file atomically
-    fn write_text_file(path: &Path, content: &str) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        // Write to temporary file first, then rename for atomicity.
-        // Use a unique suffix for the same reason as write_binary_file: concurrent
-        // writers to the same path must not share the same temp filename.
-        let unique = uuid::Uuid::new_v4().simple().to_string();
-        let temp_name = format!(
-            "{}.{}.tmp",
-            path.file_name().unwrap_or_default().to_string_lossy(),
-            unique
-        );
-        let temp_path = path.with_file_name(temp_name);
-        fs::write(&temp_path, content)?;
-        fs::rename(&temp_path, path)?;
-        Ok(())
-    }
-
-    /// Write binary content to a file crash-safely.
-    ///
-    /// The sequence is:
-    ///   1. Serialise `data` to a `.tmp` sibling file.
-    ///   2. `fsync` the temp file — guarantees the data bytes reach persistent
-    ///      storage before the rename.
-    ///   3. `rename` the temp file over the target — atomic on POSIX; after any
-    ///      crash the target is either the old file or the fully-written new one.
-    ///   4. `fsync` the parent directory — makes the new directory entry itself
-    ///      durable (required on some Linux configurations to survive a power cut).
-    fn write_binary_file<T: serde::Serialize>(path: &Path, data: &T) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        let encoded = bincode::serialize(data)?;
-
-        // Use a unique suffix so that two concurrent writes to the same target
-        // (e.g. two OmemoManager instances racing during a reconnect) each get
-        // their own temp file and the rename of one doesn't remove the temp file
-        // the other is about to rename, which would produce ENOENT.
-        let unique = uuid::Uuid::new_v4().simple().to_string();
-        let temp_name = format!(
-            "{}.{}.tmp",
-            path.file_name().unwrap_or_default().to_string_lossy(),
-            unique
-        );
-        let temp_path = path.with_file_name(temp_name);
-
-        // Step 1+2: write and fsync the temp file
-        {
-            use std::io::Write as _;
-            let mut file = fs::File::create(&temp_path)?;
-            file.write_all(&encoded)?;
-            file.sync_all()?;
-        }
-
-        // Step 3: atomic rename
-        fs::rename(&temp_path, path)?;
-
-        // Step 4: fsync the parent directory so the new dir-entry is durable
-        if let Some(parent) = path.parent() {
-            if let Ok(dir) = fs::File::open(parent) {
-                let _ = dir.sync_all(); // best-effort; not fatal if unsupported (e.g. some VMs)
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Read binary content from a file
-    fn read_binary_file<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
-        let data = fs::read(path)?;
-        bincode::deserialize(&data).map_err(|e| anyhow!("Failed to deserialize: {}", e))
-    }
-
-    /// Get path for JID-based data
-    fn get_jid_path(&self, base_dir: &str, jid: &str) -> PathBuf {
-        // Convert JID to alphanumeric filename
-        let alphanumeric_jid = self.jid_to_alphanumeric(jid);
-        self.base_path.join(base_dir).join(alphanumeric_jid)
+        let device_id = crate::omemo::device_id::generate_device_id();
+        store.set_meta("device_id", &device_id.to_string())?;
+        Ok(device_id)
     }
 
     /// Store a device ID
     pub fn store_device_id(&mut self, device_id: DeviceId) -> Result<()> {
-        let device_id_path = self.base_path.join("metadata").join("device_id");
-        Self::write_text_file(&device_id_path, &device_id.to_string())?;
-
-        // Also update the instance variable for immediate use
+        self.store.set_meta("device_id", &device_id.to_string())?;
         self.device_id = device_id;
-
-        // Save to filesystem as well for persistence across installations
-        crate::omemo::device_id::save_device_id(device_id)?;
-
         Ok(())
     }
 
-    /// Get the stored device ID
+    /// Get the device ID
     pub fn get_device_id(&self) -> DeviceId {
         self.device_id
     }
 
-    /// Get the path to the identity key file within this storage's directory
+    /// Path historically used for the identity key file.
+    ///
+    /// Retained for API compatibility; identity material now lives in the
+    /// database, so this is only meaningful as a location hint.
     pub fn identity_key_path(&self) -> PathBuf {
         self.base_path.join("identity_key")
     }
 
-    /// Store a device list
+    // ---------------------------------------------------------- device lists --
+
+    /// Save a device list
     pub fn save_device_list(&self, entry: &DeviceListEntry) -> Result<()> {
-        let jid_dir = self.get_jid_path("device_lists", &entry.jid);
-        fs::create_dir_all(&jid_dir)?;
-
-        // Write device IDs as newline-separated plain text
-        let device_ids_content = entry
-            .device_ids
-            .iter()
-            .map(|id| id.to_string())
-            .collect::<Vec<_>>()
-            .join("\n");
-        Self::write_text_file(&jid_dir.join("device_ids"), &device_ids_content)?;
-
-        // Write last update timestamp
-        Self::write_text_file(&jid_dir.join("last_update"), &entry.last_update.to_string())?;
-
-        Ok(())
+        self.store
+            .save_device_list(&entry.jid, &entry.device_ids, entry.last_update)
     }
 
     /// Load a device list
     pub fn load_device_list(&self, jid: &str) -> Result<DeviceListEntry> {
-        let jid_dir = self.get_jid_path("device_lists", jid);
-
-        // Read device IDs
-        let device_ids_path = jid_dir.join("device_ids");
-        let device_ids = if device_ids_path.exists() {
-            let content = fs::read_to_string(&device_ids_path)?;
-            content
-                .lines()
-                .filter(|line| !line.is_empty())
-                .map(|line| line.parse::<DeviceId>())
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| anyhow!("Failed to parse device ID: {}", e))?
-        } else {
-            return Err(anyhow!("Device list not found for JID: {}", jid));
-        };
-
-        // Read last update timestamp
-        let last_update_path = jid_dir.join("last_update");
-        let last_update = if last_update_path.exists() {
-            let content = fs::read_to_string(&last_update_path)?;
-            content
-                .trim()
-                .parse::<i64>()
-                .map_err(|e| anyhow!("Failed to parse last_update: {}", e))?
-        } else {
-            0 // Default value if not found
-        };
-
-        Ok(DeviceListEntry {
-            jid: jid.to_string(),
-            device_ids,
-            last_update,
-        })
+        match self.store.load_device_list(jid)? {
+            Some((device_ids, last_update)) => Ok(DeviceListEntry {
+                jid: jid.to_string(),
+                device_ids,
+                last_update,
+            }),
+            None => Err(anyhow!("Device list not found for JID: {}", jid)),
+        }
     }
+
+    // ------------------------------------------------------------ identities --
 
     /// Store a device identity with BTBV trust model
     pub fn save_device_identity(
@@ -346,14 +235,6 @@ impl OmemoStorage {
         identity: &DeviceIdentity,
         trusted: bool,
     ) -> Result<()> {
-        let jid_dir = self.get_jid_path("identities", jid);
-        let device_dir = jid_dir.join(identity.id.to_string());
-        fs::create_dir_all(&device_dir)?;
-
-        // Store the identity using binary serialization
-        Self::write_binary_file(&device_dir.join("identity.bin"), &identity)?;
-
-        // BTBV: determine initial trust level
         let trust_level = if trusted {
             TrustLevel::Trusted
         } else if self.has_verified_device(jid).unwrap_or(false) {
@@ -364,14 +245,11 @@ impl OmemoStorage {
             TrustLevel::Undecided
         };
 
-        Self::write_text_file(&device_dir.join("trust_level"), trust_level.as_str())?;
-        // Legacy compatibility
-        Self::write_text_file(
-            &device_dir.join("trusted"),
-            &trust_level.is_trusted().to_string(),
-        )?;
-
-        Ok(())
+        self.store
+            .save_identity(jid, identity, trust_level.as_str())?;
+        // `save_identity` preserves an existing trust level on conflict, so set
+        // it explicitly for the first-insert case and for an intentional change.
+        self.store.set_trust(jid, identity.id, trust_level.as_str())
     }
 
     /// Persist a freshly-fetched device identity with **identity-key pinning**.
@@ -407,7 +285,7 @@ impl OmemoStorage {
             .map(|old| crate::omemo::crypto::identity_key_changed(old, &identity.identity_key))
             .unwrap_or(false);
 
-        // Persist the new identity (overwrites identity.bin).
+        // Persist the new identity.
         self.save_device_identity(jid, identity, false)?;
 
         if key_changed {
@@ -441,83 +319,41 @@ impl OmemoStorage {
         jid: &str,
         device_id: DeviceId,
     ) -> Result<DeviceIdentity> {
-        let jid_dir = self.get_jid_path("identities", jid);
-        let device_dir = jid_dir.join(device_id.to_string());
-        let identity_path = device_dir.join("identity.bin");
-
-        if !identity_path.exists() {
-            return Err(anyhow!(
+        self.store.load_identity(jid, device_id)?.ok_or_else(|| {
+            anyhow!(
                 "Device identity not found for JID: {}, device_id: {}",
                 jid,
                 device_id
-            ));
-        }
-
-        Self::read_binary_file(&identity_path)
+            )
+        })
     }
 
     /// Check if a device identity is trusted
     pub fn is_device_trusted(&self, jid: &str, device_id: DeviceId) -> Result<bool> {
-        let level = self.get_trust_level(jid, device_id)?;
         // BTBV: "trusted" and "verified" both count as trusted
         // "undecided" also counts as trusted (blind trust before verification)
         // Only "untrusted" is explicitly not trusted
-        Ok(level != TrustLevel::Untrusted)
+        Ok(self.get_trust_level(jid, device_id)? != TrustLevel::Untrusted)
     }
 
     /// Get the trust level for a device
     pub fn get_trust_level(&self, jid: &str, device_id: DeviceId) -> Result<TrustLevel> {
-        let jid_dir = self.get_jid_path("identities", jid);
-        let device_dir = jid_dir.join(device_id.to_string());
-        let trust_path = device_dir.join("trust_level");
-
-        if trust_path.exists() {
-            let content = fs::read_to_string(&trust_path)?;
-            Ok(TrustLevel::from_str(content.trim()))
-        } else {
-            // Legacy: check old "trusted" file
-            let trusted_path = device_dir.join("trusted");
-            if trusted_path.exists() {
-                let content = fs::read_to_string(&trusted_path)?;
-                if content.trim() == "true" {
-                    Ok(TrustLevel::Trusted)
-                } else {
-                    Ok(TrustLevel::Undecided)
-                }
-            } else {
-                Ok(TrustLevel::Undecided)
-            }
-        }
+        Ok(self
+            .store
+            .get_trust(jid, device_id)?
+            .map(|s| TrustLevel::from_str(&s))
+            .unwrap_or(TrustLevel::Undecided))
     }
 
     /// Set the trust level for a device
     pub fn set_trust_level(&self, jid: &str, device_id: DeviceId, level: TrustLevel) -> Result<()> {
-        let jid_dir = self.get_jid_path("identities", jid);
-        let device_dir = jid_dir.join(device_id.to_string());
-        fs::create_dir_all(&device_dir)?;
-        Self::write_text_file(&device_dir.join("trust_level"), level.as_str())?;
-        Ok(())
+        self.store.set_trust(jid, device_id, level.as_str())
     }
 
     /// Check if any device for a contact has been manually verified
     pub fn has_verified_device(&self, jid: &str) -> Result<bool> {
-        let jid_dir = self.get_jid_path("identities", jid);
-        if !jid_dir.exists() {
-            return Ok(false);
-        }
-        for entry in fs::read_dir(&jid_dir)? {
-            let entry = entry?;
-            if entry.file_type()?.is_dir() {
-                let trust_path = entry.path().join("trust_level");
-                if trust_path.exists() {
-                    let content = fs::read_to_string(&trust_path)?;
-                    if TrustLevel::from_str(content.trim()) == TrustLevel::Verified {
-                        return Ok(true);
-                    }
-                }
-            }
-        }
-        Ok(false)
+        self.store
+            .has_trust_level(jid, TrustLevel::Verified.as_str())
     }
 
     /// Set the trust status of a device identity
@@ -530,107 +366,58 @@ impl OmemoStorage {
         self.set_trust_level(jid, device_id, level)
     }
 
+    /// Dump every stored device identity.
+    pub fn dump_all_device_identities(&self) -> Result<Vec<(String, DeviceId, DeviceIdentity)>> {
+        // The filesystem version reconstructed the JID with
+        // `jid_name.replace('_', "@")`, which never matched the hex encoding
+        // actually used and so returned mangled JIDs. JIDs are now stored
+        // verbatim.
+        self.store.all_identities()
+    }
+
+    // --------------------------------------------------------------- bundles --
+
     /// Store a key bundle
     pub fn store_key_bundle(&self, bundle: &X3DHKeyBundle) -> Result<()> {
-        let bundle_dir = self
-            .base_path
-            .join("key_bundles")
-            .join(bundle.device_id.to_string());
-        fs::create_dir_all(&bundle_dir)?;
-
-        // Store the bundle using binary serialization
-        Self::write_binary_file(&bundle_dir.join("bundle.bin"), bundle)?;
-
-        // Store creation timestamp
-        let timestamp = chrono::Utc::now().timestamp();
-        Self::write_text_file(&bundle_dir.join("created_at"), &timestamp.to_string())?;
-
-        Ok(())
+        self.store.store_key_bundle(bundle)
     }
 
     /// Load a key bundle
     pub fn load_key_bundle_with_id(&self, device_id: DeviceId) -> Result<Option<X3DHKeyBundle>> {
-        let bundle_path = self
-            .base_path
-            .join("key_bundles")
-            .join(device_id.to_string())
-            .join("bundle.bin");
-
-        if bundle_path.exists() {
-            let bundle: X3DHKeyBundle = Self::read_binary_file(&bundle_path)?;
-            Ok(Some(bundle))
-        } else {
-            Ok(None)
-        }
+        self.store.load_key_bundle(device_id)
     }
+
+    // -------------------------------------------------------------- sessions --
 
     /// Store a session
     pub fn save_session(&self, jid: &str, device_id: DeviceId, state: &RatchetState) -> Result<()> {
-        let jid_dir = self.get_jid_path("sessions", jid);
-        let session_dir = jid_dir.join(device_id.to_string());
-        fs::create_dir_all(&session_dir)?;
-
-        // Store the session state using binary serialization
-        Self::write_binary_file(&session_dir.join("state.bin"), state)?;
-
-        // Store last updated timestamp
-        let timestamp = chrono::Utc::now().timestamp();
-        Self::write_text_file(&session_dir.join("last_updated"), &timestamp.to_string())?;
-
-        Ok(())
+        self.store.save_session(jid, device_id, state)
     }
 
-    /// Load all sessions
+    /// Atomically persist a session together with the key bundle whose one-time
+    /// prekey it consumed.
+    ///
+    /// Use this instead of `save_session` + `store_key_bundle` on the X3DH
+    /// receive path: as two writes, a crash in between leaves either a burned
+    /// OPK with no session or a session referencing an OPK we still advertise,
+    /// both of which surface later as an unrecoverable session.
+    pub fn commit_prekey_consumption(
+        &self,
+        jid: &str,
+        device_id: DeviceId,
+        state: &RatchetState,
+        bundle: &X3DHKeyBundle,
+    ) -> Result<()> {
+        self.store
+            .commit_prekey_consumption(jid, device_id, state, bundle)
+    }
+
+    /// Load all sessions, keyed as `"<jid>:<device_id>"`.
     pub fn load_all_sessions(&self) -> Result<std::collections::HashMap<String, RatchetState>> {
         let mut sessions = std::collections::HashMap::new();
-        let sessions_dir = self.base_path.join("sessions");
-
-        if !sessions_dir.exists() {
-            return Ok(sessions);
+        for (jid, device_id, state) in self.store.load_all_sessions()? {
+            sessions.insert(format!("{}:{}", jid, device_id), state);
         }
-
-        // Iterate through JID directories
-        for jid_entry in fs::read_dir(&sessions_dir)? {
-            let jid_entry = jid_entry?;
-            if !jid_entry.file_type()?.is_dir() {
-                continue;
-            }
-
-            let jid_name = jid_entry.file_name().to_string_lossy().to_string();
-            // Convert back from alphanumeric filename to JID
-            let jid = self.alphanumeric_to_jid(&jid_name);
-
-            // Iterate through device directories
-            for device_entry in fs::read_dir(jid_entry.path())? {
-                let device_entry = device_entry?;
-                if !device_entry.file_type()?.is_dir() {
-                    continue;
-                }
-
-                if let Ok(device_id) = device_entry
-                    .file_name()
-                    .to_string_lossy()
-                    .parse::<DeviceId>()
-                {
-                    let state_path = device_entry.path().join("state.bin");
-                    if state_path.exists() {
-                        match Self::read_binary_file::<RatchetState>(&state_path) {
-                            Ok(state) => {
-                                let key = format!("{}:{}", jid, device_id);
-                                sessions.insert(key, state);
-                            }
-                            Err(e) => {
-                                error!(
-                                    "Failed to deserialize session for {}:{}: {}",
-                                    jid, device_id, e
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
         Ok(sessions)
     }
 
@@ -640,114 +427,63 @@ impl OmemoStorage {
         jid: &str,
         device_id: DeviceId,
     ) -> Result<Option<RatchetState>> {
-        let jid_dir = self.get_jid_path("sessions", jid);
-        let session_path = jid_dir.join(device_id.to_string()).join("state.bin");
-
-        if session_path.exists() {
-            let state: RatchetState = Self::read_binary_file(&session_path)?;
-            Ok(Some(state))
-        } else {
-            Ok(None)
-        }
+        self.store.load_session(jid, device_id)
     }
 
-    /// Delete a session
+    /// Delete a session identified by `"<jid>:<device_id>"`.
     pub fn delete_session(&self, session_key: &str) -> Result<()> {
-        // Parse session key (format: "jid:device_id")
-        let parts: Vec<&str> = session_key.split(':').collect();
-        if parts.len() != 2 {
-            return Err(anyhow::anyhow!(
-                "Invalid session key format: {}",
-                session_key
-            ));
-        }
-
-        let jid = parts[0];
-        let device_id = parts[1]
+        // Split from the right: a full JID may itself contain ':' in the resource.
+        let (jid, device_str) = session_key
+            .rsplit_once(':')
+            .ok_or_else(|| anyhow!("Invalid session key format: {}", session_key))?;
+        let device_id = device_str
             .parse::<DeviceId>()
-            .map_err(|_| anyhow::anyhow!("Invalid device ID in session key: {}", parts[1]))?;
+            .map_err(|_| anyhow!("Invalid device ID in session key: {}", device_str))?;
 
-        let jid_dir = self.get_jid_path("sessions", jid);
-        let session_dir = jid_dir.join(device_id.to_string());
-
-        if session_dir.exists() {
-            fs::remove_dir_all(&session_dir)?;
-            debug!("Deleted session directory: {:?}", session_dir);
-        }
-
+        self.store.delete_session(jid, device_id)?;
+        debug!("Deleted session {}:{}", jid, device_id);
         Ok(())
     }
+
+    // -------------------------------------------------------------- metadata --
 
     /// Store the timestamp of the last PreKey rotation
     pub fn store_prekey_rotation_time(&self, timestamp: i64) -> Result<()> {
-        let metadata_path = self.base_path.join("metadata").join("prekey_rotation_time");
-        Self::write_text_file(&metadata_path, &timestamp.to_string())?;
-        Ok(())
+        self.store
+            .set_meta("prekey_rotation_time", &timestamp.to_string())
     }
 
     /// Load the timestamp of the last PreKey rotation
     pub fn load_prekey_rotation_time(&self) -> Result<i64> {
-        let metadata_path = self.base_path.join("metadata").join("prekey_rotation_time");
-
-        if metadata_path.exists() {
-            let content = fs::read_to_string(&metadata_path)?;
-            content
-                .trim()
-                .parse::<i64>()
-                .map_err(|e| anyhow!("Failed to parse prekey rotation time: {}", e))
-        } else {
-            Err(anyhow!("PreKey rotation time not found"))
-        }
+        self.store
+            .get_meta("prekey_rotation_time")?
+            .and_then(|v| v.trim().parse::<i64>().ok())
+            .ok_or_else(|| anyhow!("PreKey rotation time not found"))
     }
 
     /// Check if device list has been published
     pub async fn has_published_device_list(&self, jid: &str) -> Result<bool> {
-        let metadata_path = self
-            .base_path
-            .join("metadata")
-            .join(format!("published_device_list_{}", self.sanitize_jid(jid)));
-
-        if metadata_path.exists() {
-            let content = fs::read_to_string(&metadata_path)?;
-            Ok(content.trim() == "true")
-        } else {
-            Ok(false)
-        }
+        self.store.is_device_list_published(jid)
     }
 
     /// Mark device list as published (can be called from both sync and async contexts)
     pub fn mark_device_list_published(&self, jid: &str) -> Result<()> {
-        let metadata_path = self
-            .base_path
-            .join("metadata")
-            .join(format!("published_device_list_{}", self.sanitize_jid(jid)));
-        Self::write_text_file(&metadata_path, "true")?;
-        Ok(())
+        self.store.mark_device_list_published(jid)
     }
 
     /// Check if bundle has been published
     pub async fn has_published_bundle(&self, device_id: u32) -> Result<bool> {
-        let metadata_path = self
-            .base_path
-            .join("metadata")
-            .join(format!("published_bundle_{}", device_id));
-
-        if metadata_path.exists() {
-            let content = fs::read_to_string(&metadata_path)?;
-            Ok(content.trim() == "true")
-        } else {
-            Ok(false)
-        }
+        self.store.is_bundle_published(device_id)
     }
 
     /// Mark bundle as published
     pub async fn mark_bundle_published(&self, device_id: u32) -> Result<()> {
-        let metadata_path = self
-            .base_path
-            .join("metadata")
-            .join(format!("published_bundle_{}", device_id));
-        Self::write_text_file(&metadata_path, "true")?;
-        Ok(())
+        self.store.mark_bundle_published(device_id)
+    }
+
+    /// Check if a bundle has been published for a given device ID
+    pub fn is_bundle_published(&self, device_id: DeviceId) -> Result<bool> {
+        self.store.is_bundle_published(device_id)
     }
 
     /// Store information about a pending device verification
@@ -757,178 +493,21 @@ impl OmemoStorage {
         device_id: DeviceId,
         fingerprint: &str,
     ) -> Result<()> {
-        let metadata_path = self.base_path.join("metadata").join(format!(
-            "pending_verification_{}_{}",
-            self.sanitize_jid(jid),
-            device_id
-        ));
-        Self::write_text_file(&metadata_path, fingerprint)?;
-        Ok(())
+        self.store
+            .set_pending_verification(jid, device_id, fingerprint)
     }
 
     /// Check if there's a pending verification for a device
     pub fn get_pending_device_verification(&self, jid: &str) -> Result<Option<(DeviceId, String)>> {
-        let metadata_dir = self.base_path.join("metadata");
-        if !metadata_dir.exists() {
-            return Ok(None);
-        }
-
-        let prefix = format!("pending_verification_{}_", self.sanitize_jid(jid));
-
-        for entry in fs::read_dir(&metadata_dir)? {
-            let entry = entry?;
-            let filename = entry.file_name().to_string_lossy().to_string();
-
-            if filename.starts_with(&prefix) {
-                // Extract device ID from filename
-                if let Some(device_id_str) = filename.strip_prefix(&prefix) {
-                    if let Ok(device_id) = device_id_str.parse::<DeviceId>() {
-                        let fingerprint = fs::read_to_string(entry.path())?;
-                        return Ok(Some((device_id, fingerprint.trim().to_string())));
-                    }
-                }
-            }
-        }
-
-        Ok(None)
+        self.store.get_pending_verification(jid)
     }
 
     /// Remove a pending verification
     pub fn remove_pending_device_verification(&self, jid: &str, device_id: DeviceId) -> Result<()> {
-        let metadata_path = self.base_path.join("metadata").join(format!(
-            "pending_verification_{}_{}",
-            self.sanitize_jid(jid),
-            device_id
-        ));
-
-        if metadata_path.exists() {
-            fs::remove_file(&metadata_path)?;
-        }
-
-        Ok(())
+        self.store.remove_pending_verification(jid, device_id)
     }
 
-    /// Check if a bundle has been published for a given device ID
-    pub fn is_bundle_published(&self, device_id: DeviceId) -> Result<bool> {
-        let metadata_path = self
-            .base_path
-            .join("metadata")
-            .join(format!("published_bundle_{}", device_id));
-
-        if metadata_path.exists() {
-            let content = fs::read_to_string(&metadata_path)?;
-            Ok(content.trim() == "true")
-        } else {
-            Ok(false)
-        }
-    }
-
-    /// Sanitize JID for use in filenames
-    /// Convert JID to alphanumeric filename
-    fn jid_to_alphanumeric(&self, jid: &str) -> String {
-        jid.chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() {
-                    c.to_string()
-                } else {
-                    format!("{:02x}", c as u8)
-                }
-            })
-            .collect()
-    }
-
-    /// Convert alphanumeric encoded JID back to original format
-    fn alphanumeric_to_jid(&self, encoded: &str) -> String {
-        let mut result = String::new();
-        let mut chars = encoded.chars().peekable();
-
-        while let Some(c) = chars.next() {
-            if c.is_ascii_alphanumeric() && !c.is_ascii_digit() {
-                // Regular letter, add as-is
-                result.push(c);
-            } else if c.is_ascii_digit() {
-                // Check if this starts a hex sequence
-                if let Some(&next_char) = chars.peek() {
-                    if next_char.is_ascii_hexdigit() {
-                        // This is likely a hex-encoded character
-                        let hex_str = format!("{}{}", c, chars.next().unwrap());
-                        if let Ok(byte_val) = u8::from_str_radix(&hex_str, 16) {
-                            result.push(byte_val as char);
-                        } else {
-                            // If hex parsing fails, treat as regular chars
-                            result.push(c);
-                            result.push(chars.next().unwrap());
-                        }
-                    } else {
-                        // Single digit, add as-is
-                        result.push(c);
-                    }
-                } else {
-                    // Last character, add as-is
-                    result.push(c);
-                }
-            } else {
-                // Other character, add as-is
-                result.push(c);
-            }
-        }
-
-        result
-    }
-
-    /// Legacy method for backward compatibility - now uses alphanumeric encoding
-    fn sanitize_jid(&self, jid: &str) -> String {
-        self.jid_to_alphanumeric(jid)
-    }
-    /// Dump all device identities for debugging
-    pub fn dump_all_device_identities(&self) -> Result<Vec<(String, DeviceId, DeviceIdentity)>> {
-        let mut identities = Vec::new();
-        let identities_dir = self.base_path.join("identities");
-
-        if !identities_dir.exists() {
-            return Ok(identities);
-        }
-
-        // Iterate through JID directories
-        for jid_entry in fs::read_dir(&identities_dir)? {
-            let jid_entry = jid_entry?;
-            if !jid_entry.file_type()?.is_dir() {
-                continue;
-            }
-
-            let jid_name = jid_entry.file_name().to_string_lossy().to_string();
-            // Convert back from safe filename to JID (reverse sanitization)
-            let jid = jid_name.replace('_', "@"); // Simple conversion - may need more sophisticated handling
-
-            // Iterate through device directories
-            for device_entry in fs::read_dir(jid_entry.path())? {
-                let device_entry = device_entry?;
-                if !device_entry.file_type()?.is_dir() {
-                    continue;
-                }
-
-                if let Ok(device_id) = device_entry
-                    .file_name()
-                    .to_string_lossy()
-                    .parse::<DeviceId>()
-                {
-                    let identity_path = device_entry.path().join("identity.bin");
-                    if identity_path.exists() {
-                        match Self::read_binary_file::<DeviceIdentity>(&identity_path) {
-                            Ok(identity) => {
-                                identities.push((jid.clone(), device_id, identity));
-                            }
-                            Err(e) => {
-                                error!("Failed to load identity for {}:{}: {}", jid, device_id, e);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(identities)
-    }
+    // ------------------------------------------------------ per-device state --
 
     /// Update the last undecryptable message timestamp for a device
     pub fn update_last_undecryptable_message(
@@ -937,17 +516,9 @@ impl OmemoStorage {
         device_id: DeviceId,
         timestamp: i64,
     ) -> Result<()> {
-        let device_dir = self.get_device_metadata_dir(jid, device_id)?;
-        fs::create_dir_all(&device_dir)?;
-
-        let undecryptable_file = device_dir.join("last_undecryptable");
-        fs::write(&undecryptable_file, timestamp.to_string())?;
-
-        // Also increment failure count
-        let failure_count = self.get_device_failure_count(jid, device_id).unwrap_or(0) + 1;
-        let failure_file = device_dir.join("failure_count");
-        fs::write(&failure_file, failure_count.to_string())?;
-
+        // Timestamp and failure-count increment are now a single statement;
+        // previously two file writes, so a crash between them lost the bump.
+        self.store.record_undecryptable(jid, device_id, timestamp)?;
         debug!(
             "Updated undecryptable message timestamp for {}:{} to {}",
             jid, device_id, timestamp
@@ -962,15 +533,10 @@ impl OmemoStorage {
         device_id: DeviceId,
         ignore_until: std::time::SystemTime,
     ) -> Result<()> {
-        let device_dir = self.get_device_metadata_dir(jid, device_id)?;
-        fs::create_dir_all(&device_dir)?;
-
         let timestamp = ignore_until
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs() as i64;
-        let ignore_file = device_dir.join("ignore_until");
-        fs::write(&ignore_file, timestamp.to_string())?;
-
+        self.store.set_ignore_until(jid, device_id, timestamp)?;
         debug!(
             "Set device ignore until timestamp for {}:{} to {}",
             jid, device_id, timestamp
@@ -984,70 +550,28 @@ impl OmemoStorage {
         jid: &str,
         device_id: DeviceId,
     ) -> Result<Option<std::time::SystemTime>> {
-        let device_dir = self.get_device_metadata_dir(jid, device_id)?;
-        let ignore_file = device_dir.join("ignore_until");
-
-        if !ignore_file.exists() {
-            return Ok(None);
-        }
-
-        let timestamp_str = fs::read_to_string(&ignore_file)?;
-        let timestamp: i64 = timestamp_str.trim().parse()?;
-        let system_time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(timestamp as u64);
-
-        Ok(Some(system_time))
+        Ok(self.store.get_ignore_until(jid, device_id)?.map(|ts| {
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(ts.max(0) as u64)
+        }))
     }
 
-    /// Clear the ignore status for a device (remove ignore_until file)
+    /// Clear the ignore status for a device
     pub fn clear_device_ignore_status(&self, jid: &str, device_id: DeviceId) -> Result<()> {
-        let device_dir = self.get_device_metadata_dir(jid, device_id)?;
-        let ignore_file = device_dir.join("ignore_until");
-
-        if ignore_file.exists() {
-            fs::remove_file(&ignore_file)?;
-            debug!("Cleared ignore status for {}:{}", jid, device_id);
-        }
-
+        self.store.clear_ignore_until(jid, device_id)?;
+        debug!("Cleared ignore status for {}:{}", jid, device_id);
         Ok(())
     }
 
     /// Get the failure count for a device
     pub fn get_device_failure_count(&self, jid: &str, device_id: DeviceId) -> Result<u32> {
-        let device_dir = self.get_device_metadata_dir(jid, device_id)?;
-        let failure_file = device_dir.join("failure_count");
-
-        if !failure_file.exists() {
-            return Ok(0);
-        }
-
-        let count_str = fs::read_to_string(&failure_file)?;
-        let count: u32 = count_str.trim().parse().unwrap_or(0);
-
-        Ok(count)
+        self.store.get_failure_count(jid, device_id)
     }
 
     /// Reset the failure count for a device
     pub fn reset_device_failure_count(&self, jid: &str, device_id: DeviceId) -> Result<()> {
-        let device_dir = self.get_device_metadata_dir(jid, device_id)?;
-        let failure_file = device_dir.join("failure_count");
-
-        if failure_file.exists() {
-            fs::remove_file(&failure_file)?;
-        }
-
+        self.store.reset_failure_count(jid, device_id)?;
         debug!("Reset failure count for {}:{}", jid, device_id);
         Ok(())
-    }
-
-    /// Get the device metadata directory
-    fn get_device_metadata_dir(&self, jid: &str, device_id: DeviceId) -> Result<PathBuf> {
-        let jid_encoded = self.jid_to_alphanumeric(jid);
-        let device_dir = self
-            .base_path
-            .join("metadata")
-            .join(jid_encoded)
-            .join(device_id.to_string());
-        Ok(device_dir)
     }
 
     // --- Session rebuild / prekey-pending persistence -----------------------
@@ -1055,113 +579,53 @@ impl OmemoStorage {
     /// Mark that the session with `(jid, device_id)` needs to be rebuilt the
     /// next time we encrypt for that device.  Survives process restarts.
     pub fn set_session_rebuild_needed(&self, jid: &str, device_id: DeviceId) -> Result<()> {
-        let dir = self.get_device_metadata_dir(jid, device_id)?;
-        fs::create_dir_all(&dir)?;
-        fs::write(dir.join("rebuild_needed"), "1")?;
-        Ok(())
+        self.store.set_rebuild_needed(jid, device_id, true)
     }
 
     /// Clear the rebuild-needed flag once the rebuild has been performed.
     pub fn clear_session_rebuild_needed(&self, jid: &str, device_id: DeviceId) -> Result<()> {
-        let dir = self.get_device_metadata_dir(jid, device_id)?;
-        let f = dir.join("rebuild_needed");
-        if f.exists() {
-            fs::remove_file(&f)?;
-        }
-        Ok(())
+        self.store.set_rebuild_needed(jid, device_id, false)
     }
 
     /// Mark that a PreKey message is pending for `(jid, device_id)`.
     pub fn set_prekey_pending(&self, jid: &str, device_id: DeviceId) -> Result<()> {
-        let dir = self.get_device_metadata_dir(jid, device_id)?;
-        fs::create_dir_all(&dir)?;
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs();
-        fs::write(dir.join("prekey_pending_since"), ts.to_string())?;
-        Ok(())
+            .as_secs() as i64;
+        self.store.set_prekey_pending(jid, device_id, Some(ts))
     }
 
     /// Clear the prekey-pending flag once the PreKey message has been sent.
     pub fn clear_prekey_pending(&self, jid: &str, device_id: DeviceId) -> Result<()> {
-        let dir = self.get_device_metadata_dir(jid, device_id)?;
-        let f = dir.join("prekey_pending_since");
-        if f.exists() {
-            fs::remove_file(&f)?;
-        }
-        Ok(())
+        self.store.set_prekey_pending(jid, device_id, None)
     }
 
     /// Return the unix timestamp (seconds) at which the prekey-pending flag was
     /// set, or `None` if the flag is not set.
     pub fn get_prekey_pending_since(&self, jid: &str, device_id: DeviceId) -> Option<u64> {
-        let dir = self.get_device_metadata_dir(jid, device_id).ok()?;
-        let f = dir.join("prekey_pending_since");
-        if !f.exists() {
-            return None;
-        }
-        let s = fs::read_to_string(&f).ok()?;
-        s.trim().parse().ok()
+        self.store
+            .get_prekey_pending_since(jid, device_id)
+            .ok()
+            .flatten()
+            .map(|ts| ts.max(0) as u64)
     }
 
     /// Return all (jid, device_id) pairs that have the rebuild-needed flag set,
     /// so they can be loaded back into `pending_session_rebuilds` on startup.
     pub fn load_all_rebuild_pending(&self) -> Vec<(String, DeviceId)> {
-        let metadata_dir = self.base_path.join("metadata");
-        if !metadata_dir.exists() {
-            return vec![];
-        }
-        let mut result = Vec::new();
-        let jid_entries = match fs::read_dir(&metadata_dir) {
-            Ok(e) => e,
-            Err(_) => return vec![],
-        };
-        for jid_entry in jid_entries.flatten() {
-            let encoded = jid_entry.file_name().to_string_lossy().to_string();
-            let jid = self.alphanumeric_to_jid(&encoded);
-            let device_entries = match fs::read_dir(jid_entry.path()) {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            for device_entry in device_entries.flatten() {
-                if device_entry.path().join("rebuild_needed").exists() {
-                    if let Ok(id) = device_entry.file_name().to_string_lossy().parse::<u32>() {
-                        result.push((jid.clone(), id));
-                    }
-                }
-            }
-        }
-        result
+        self.store.all_rebuild_pending().unwrap_or_else(|e| {
+            warn!("Failed to load rebuild-pending set: {}", e);
+            vec![]
+        })
     }
 
     /// Return all (jid, device_id) pairs that have the prekey-pending flag set.
     pub fn load_all_prekey_pending(&self) -> Vec<(String, DeviceId)> {
-        let metadata_dir = self.base_path.join("metadata");
-        if !metadata_dir.exists() {
-            return vec![];
-        }
-        let mut result = Vec::new();
-        let jid_entries = match fs::read_dir(&metadata_dir) {
-            Ok(e) => e,
-            Err(_) => return vec![],
-        };
-        for jid_entry in jid_entries.flatten() {
-            let encoded = jid_entry.file_name().to_string_lossy().to_string();
-            let jid = self.alphanumeric_to_jid(&encoded);
-            let device_entries = match fs::read_dir(jid_entry.path()) {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            for device_entry in device_entries.flatten() {
-                if device_entry.path().join("prekey_pending_since").exists() {
-                    if let Ok(id) = device_entry.file_name().to_string_lossy().parse::<u32>() {
-                        result.push((jid.clone(), id));
-                    }
-                }
-            }
-        }
-        result
+        self.store.all_prekey_pending().unwrap_or_else(|e| {
+            warn!("Failed to load prekey-pending set: {}", e);
+            vec![]
+        })
     }
 
     // --- Failed-message-ID persistence (TTL: 24 h) --------------------------
@@ -1173,59 +637,19 @@ impl OmemoStorage {
         if msg_id.is_empty() || msg_id == "unknown" {
             return Ok(());
         }
-        let dir = self.base_path.join("failed_messages");
-        fs::create_dir_all(&dir)?;
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        // Sanitise the msg_id so it is safe as a filename.
-        let safe_name: String = msg_id
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                    c.to_string()
-                } else {
-                    format!("{:02x}", c as u8)
-                }
-            })
-            .collect();
-        fs::write(dir.join(&safe_name), ts.to_string())?;
-        Ok(())
+        self.store.persist_failed_message_id(msg_id)
     }
 
     /// Load message IDs whose failure was recorded within `ttl_secs`.
-    /// Entries older than the TTL are pruned from disk during this call.
+    /// Entries older than the TTL are pruned during this call.
     pub fn load_recent_failed_message_ids(&self, ttl_secs: u64) -> Vec<String> {
-        let dir = self.base_path.join("failed_messages");
-        if !dir.exists() {
-            return vec![];
-        }
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let mut ids = Vec::new();
-        if let Ok(entries) = fs::read_dir(&dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if let Ok(ts_str) = fs::read_to_string(&path) {
-                    if let Ok(ts) = ts_str.trim().parse::<u64>() {
-                        if now.saturating_sub(ts) < ttl_secs {
-                            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                                ids.push(name.to_string());
-                            }
-                        } else {
-                            let _ = fs::remove_file(&path);
-                        }
-                    }
-                }
-            }
-        }
-        ids
+        self.store
+            .recent_failed_message_ids(ttl_secs)
+            .unwrap_or_else(|e| {
+                warn!("Failed to load recent failed message ids: {}", e);
+                vec![]
+            })
     }
-
-    // ...existing code...
 }
 
 #[cfg(test)]
@@ -1251,8 +675,7 @@ mod tests {
 
     #[test]
     fn test_identity_key_pinning_resets_trust_on_change() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let mut storage = OmemoStorage::new(Some(tmp.path().to_path_buf())).unwrap();
+        let mut storage = OmemoStorage::new_in_memory().unwrap();
 
         let jid = "alice@example.org";
         let dev: DeviceId = 1234;
@@ -1302,33 +725,33 @@ mod tests {
         );
     }
 
+    /// The previous implementation keyed storage on a lossy filename encoding,
+    /// so a JID containing a digit was written under one name and read back
+    /// under another. There is no encoding step any more; this pins that.
     #[test]
-    fn test_alphanumeric_jid_conversion() {
-        let storage = OmemoStorage::new_default().unwrap();
+    fn jids_with_digits_survive_a_save_load_cycle() {
+        let storage = OmemoStorage::new_in_memory().unwrap();
+        for jid in ["user1@example.com", "b0b@example.com", "user@10.0.0.5"] {
+            storage
+                .save_device_list(&DeviceListEntry {
+                    jid: jid.to_string(),
+                    device_ids: vec![1, 2, 3],
+                    last_update: 42,
+                })
+                .unwrap();
+            let back = storage.load_device_list(jid).unwrap();
+            assert_eq!(back.jid, jid);
+            assert_eq!(back.device_ids, vec![1, 2, 3]);
+        }
+    }
 
-        // Test basic JID encoding/decoding
-        let original_jid = "user@domain.com";
-        let encoded = storage.jid_to_alphanumeric(original_jid);
-        let decoded = storage.alphanumeric_to_jid(&encoded);
-
-        assert_eq!(original_jid, decoded);
-
-        // Test special characters
-        let jid_with_special = "user@domain.com/resource";
-        let encoded_special = storage.jid_to_alphanumeric(jid_with_special);
-        let decoded_special = storage.alphanumeric_to_jid(&encoded_special);
-
-        assert_eq!(jid_with_special, decoded_special);
-
-        // Test that encoding produces valid filename characters
-        let complex_jid = "test+user@sub.domain-name.org/resource#1";
-        let encoded_complex = storage.jid_to_alphanumeric(complex_jid);
-
-        // Should only contain alphanumeric characters
-        assert!(encoded_complex.chars().all(|c| c.is_ascii_alphanumeric()));
-
-        // Should be reversible
-        let decoded_complex = storage.alphanumeric_to_jid(&encoded_complex);
-        assert_eq!(complex_jid, decoded_complex);
+    #[test]
+    fn delete_session_parses_key_from_the_right() {
+        let storage = OmemoStorage::new_in_memory().unwrap();
+        // Should not error even though the JID itself contains no colon.
+        storage
+            .delete_session("user1@example.com:440198320")
+            .unwrap();
+        assert!(storage.delete_session("malformed-key").is_err());
     }
 }

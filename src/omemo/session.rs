@@ -187,6 +187,7 @@ impl OmemoSession {
                 local_device_id,
                 remote_device_id,
                 remote_jid: remote_jid,
+                establishing_base_key: None,
             },
         }
     }
@@ -531,6 +532,7 @@ mod tests {
             local_device_id,
             remote_device_id,
             remote_jid: "user@domain.com".to_string(), // Different case
+            establishing_base_key: None,
         };
 
         // Should succeed despite case difference

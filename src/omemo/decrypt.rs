@@ -42,9 +42,81 @@ impl OmemoManager {
         };
 
         // Check if this is a PreKey message by trying to parse the encrypted key as PreKeySignalMessage
-        if let Some(prekey_msg) =
-            crate::omemo::wire::PreKeySignalMessage::deserialize(&encrypted_key)
-        {
+        let incoming_prekey = crate::omemo::wire::PreKeySignalMessage::deserialize(&encrypted_key);
+
+        // Does an initialised session for this device already exist?  Computed
+        // up front so the borrow ends before we start mutating `self.sessions`.
+        let existing_session_usable = self
+            .sessions
+            .get(&(bare_jid.clone(), device_id))
+            .map(|s| s.is_initialized())
+            .unwrap_or(false);
+
+        // Decide whether this PreKey header should actually trigger a fresh
+        // X3DH exchange.
+        //
+        // A libsignal initiator attaches the PreKey header to every message it
+        // sends until it receives a message back *inside* that session (the
+        // "unacknowledged prekey" state).  Conversations and Dino both do this.
+        // Every one of those retransmits carries the same base key and the same
+        // one-time-prekey id that we consumed on the first message.  Treating
+        // each of them as a new session — and hard-failing when the OPK is gone
+        // — is what breaks the conversation: we tear down a perfectly good
+        // session, the peer builds another one, and neither side converges.
+        //
+        // Repeated PreKey headers must therefore be idempotent.
+        let needs_x3dh = match incoming_prekey.as_ref() {
+            None => false,
+            // No usable session at all — this is a genuine session setup.
+            Some(_) if !existing_session_usable => true,
+            Some(pk) => {
+                let established_by_this_base_key = self
+                    .sessions
+                    .get(&(bare_jid.clone(), device_id))
+                    .and_then(|s| s.as_session())
+                    .and_then(|s| s.ratchet_state.establishing_base_key.as_deref())
+                    .map(|bk| bk == pk.base_key.as_slice())
+                    .unwrap_or(false);
+
+                // Do we still hold the OPK this header references?
+                let opk_available = match pk.pre_key_id {
+                    None => true,
+                    Some(opk_id) => self
+                        .key_bundle
+                        .as_ref()
+                        .map(|b| b.one_time_pre_key_pairs.contains_key(&opk_id))
+                        .unwrap_or(false),
+                };
+
+                if established_by_this_base_key {
+                    info!(
+                        "PreKeyMessage from {}:{} repeats the base key that established the \
+                         current session (pre_key_id={:?}) — reusing it instead of re-running X3DH",
+                        bare_jid, device_id, pk.pre_key_id
+                    );
+                    false
+                } else if !opk_available {
+                    // Almost certainly a retransmit whose base key we can't
+                    // match (e.g. a session persisted before establishing_base_key
+                    // was recorded), or a replay.  Either way we have a working
+                    // session — use it.  Never destroy session state because a
+                    // consumed OPK was referenced; that turns any replayed
+                    // stanza into a remote session-wipe.
+                    warn!(
+                        "PreKeyMessage from {}:{} references consumed OPK {:?} but an \
+                         initialised session exists — decrypting in-session",
+                        bare_jid, device_id, pk.pre_key_id
+                    );
+                    false
+                } else {
+                    // New base key and the referenced OPK is still available:
+                    // the peer really is establishing a new session.
+                    true
+                }
+            }
+        };
+
+        if let Some(prekey_msg) = incoming_prekey.filter(|_| needs_x3dh) {
             info!(
                 "Received PreKeySignalMessage from {}:{} (pre_key_id={:?}, spk_id={})",
                 sender, device_id, prekey_msg.pre_key_id, prekey_msg.signed_pre_key_id
@@ -94,30 +166,36 @@ impl OmemoManager {
                             bundle.signed_pre_key_id,
                             bundle.signed_pre_key_history.keys().collect::<Vec<_>>()
                         );
-                        let spk_session_key = (bare_jid.clone(), device_id);
-                        // Replace any existing session entry with PeerResetPending so
-                        // the next outbound to this sender creates a fresh PreKey.
-                        self.sessions
-                            .insert(spk_session_key, OmemoSessionState::PeerResetPending);
-                        // Persist the marker and republish our bundle so the sender
-                        // can fetch the fresh bundle on their next connection.
-                        {
-                            let storage_guard = self.storage.lock().await;
-                            let sk = format!("{}:{}", bare_jid, device_id);
-                            if let Err(e) = storage_guard.delete_session(&sk) {
-                                warn!("Failed to delete on-disk session after unknown SPK: {}", e);
-                            }
-                            if let Err(e) =
-                                storage_guard.set_session_rebuild_needed(&bare_jid, device_id)
+                        // Only tear the session down when there is nothing to
+                        // fall back on.  If an initialised session exists, an
+                        // unresolvable SPK id means "this header is stale", not
+                        // "our state is bad" — destroying it here would let a
+                        // replayed stanza wipe a working session remotely.
+                        if !existing_session_usable {
+                            let spk_session_key = (bare_jid.clone(), device_id);
+                            // Replace any existing session entry with PeerResetPending so
+                            // the next outbound to this sender creates a fresh PreKey.
+                            self.sessions
+                                .insert(spk_session_key, OmemoSessionState::PeerResetPending);
+                            // Persist the marker so it survives a restart.
                             {
-                                warn!(
-                                    "Failed to persist rebuild flag for {}:{}: {}",
-                                    bare_jid, device_id, e
-                                );
+                                let storage_guard = self.storage.lock().await;
+                                let sk = format!("{}:{}", bare_jid, device_id);
+                                if let Err(e) = storage_guard.delete_session(&sk) {
+                                    warn!(
+                                        "Failed to delete on-disk session after unknown SPK: {}",
+                                        e
+                                    );
+                                }
+                                if let Err(e) =
+                                    storage_guard.set_session_rebuild_needed(&bare_jid, device_id)
+                                {
+                                    warn!(
+                                        "Failed to persist rebuild flag for {}:{}: {}",
+                                        bare_jid, device_id, e
+                                    );
+                                }
                             }
-                        }
-                        if let Err(e) = self.publish_bundle_to_server().await {
-                            warn!("Failed to republish bundle after unknown SPK: {}", e);
                         }
                         return Err(OmemoError::SessionError(
                             session::SessionError::InvalidStateError(format!(
@@ -150,8 +228,12 @@ impl OmemoManager {
                 None
             };
 
+            // Reaching here with a missing OPK means `needs_x3dh` was true, i.e.
+            // there is no initialised session to fall back on — a genuine
+            // "cannot establish" case.  (The retransmit/replay cases were
+            // filtered out above and never enter this block.)
             if prekey_msg.pre_key_id.is_some() && one_time_prekey_pair.is_none() {
-                warn!("PreKeyMessage references OPK id {:?} but we don't have it — cannot establish session (sender needs our fresh bundle)", prekey_msg.pre_key_id);
+                warn!("PreKeyMessage references OPK id {:?} but we don't have it and no session exists — cannot establish session (sender needs our fresh bundle)", prekey_msg.pre_key_id);
 
                 // Replace any existing session entry for this sender with
                 // PeerResetPending so that our next outbound message creates a
@@ -170,10 +252,11 @@ impl OmemoManager {
                     }
                 }
 
-                // Republish our bundle so the sender can fetch fresh OPKs
-                if let Err(e) = self.publish_bundle_to_server().await {
-                    warn!("Failed to republish bundle after missing OPK: {}", e);
-                }
+                // NOTE: deliberately no publish_bundle_to_server() here.  Peers
+                // do not re-fetch our bundle because we republished it; they
+                // fetch when they build a new session.  Republishing on every
+                // stale PreKey is pure churn (and rotates OPKs out from under
+                // in-flight messages).
 
                 // Persist the rebuild marker so it survives a restart.
                 {
@@ -242,11 +325,12 @@ impl OmemoManager {
             );
         }
 
-        // Track OPK to consume AFTER successful decryption (not before)
-        let pending_opk_consumption = if let Some(prekey_msg) =
+        // Track OPK to consume AFTER successful decryption (not before).
+        // Only an actual X3DH exchange consumes a one-time prekey — retransmitted
+        // PreKey headers must not touch the OPK pool.
+        let pending_opk_consumption = if needs_x3dh {
             crate::omemo::wire::PreKeySignalMessage::deserialize(&encrypted_key)
-        {
-            prekey_msg.pre_key_id
+                .and_then(|pk| pk.pre_key_id)
         } else {
             None
         };
@@ -438,10 +522,37 @@ impl OmemoManager {
                         );
                     }
 
-                    // Persist updated bundle and republish
+                    // Persist the updated bundle *together with* the session it
+                    // established, in a single transaction.
+                    //
+                    // These were previously two independent writes. A crash in
+                    // between left either a consumed OPK with no session (the
+                    // peer's next message re-runs X3DH against a key we no
+                    // longer hold → PeerResetPending) or a session whose OPK is
+                    // still advertised (a replay re-derives a different session
+                    // and every later decrypt fails its MAC →
+                    // RecoveryPreKeySent). Both end at a "session broken"
+                    // prompt, so the pair must commit atomically.
                     let bundle_clone = bundle.clone();
+                    let session_state = self
+                        .sessions
+                        .get(&key)
+                        .and_then(|s| s.as_session())
+                        .map(|s| s.get_state().clone());
+
                     let storage_guard = self.storage.lock().await;
-                    if let Err(e) = storage_guard.store_key_bundle(&bundle_clone) {
+                    let persisted = match session_state {
+                        Some(state) => storage_guard.commit_prekey_consumption(
+                            &bare_jid,
+                            device_id,
+                            &state,
+                            &bundle_clone,
+                        ),
+                        // No live session to pair it with (shouldn't happen on
+                        // this path); fall back to writing the bundle alone.
+                        None => storage_guard.store_key_bundle(&bundle_clone),
+                    };
+                    if let Err(e) = persisted {
                         warn!("Failed to persist bundle after OPK consumption: {}", e);
                     }
                     drop(storage_guard);

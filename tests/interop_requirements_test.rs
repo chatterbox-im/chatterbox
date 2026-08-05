@@ -462,6 +462,9 @@ mod req6_key_element_format {
     use base64::Engine;
     use chatterbox::omemo::protocol::{utils, OmemoMessage};
     use std::collections::{HashMap, HashSet};
+    // Same Element type the production parser uses; `tokio_xmpp::Element` and
+    // `xmpp_parsers::Element` are no longer re-exported at those crate roots.
+    use xmpp_parsers::minidom::Element;
 
     fn make_test_message(prekey_devices: HashSet<u32>) -> OmemoMessage {
         let mut encrypted_keys = HashMap::new();
@@ -488,8 +491,8 @@ mod req6_key_element_format {
         let msg = make_test_message(HashSet::new());
         let xml = utils::omemo_message_to_xml(&msg);
 
-        // Parse with tokio_xmpp::Element (same parser as production)
-        let element: tokio_xmpp::Element = xml.parse().unwrap();
+        // Parse with the same Element type production uses.
+        let element: Element = xml.parse().unwrap();
         let header = element
             .get_child("header", "eu.siacs.conversations.axolotl")
             .unwrap();
@@ -515,7 +518,7 @@ mod req6_key_element_format {
         let msg = make_test_message(prekey_set);
         let xml = utils::omemo_message_to_xml(&msg);
 
-        let element: tokio_xmpp::Element = xml.parse().unwrap();
+        let element: Element = xml.parse().unwrap();
         let header = element
             .get_child("header", "eu.siacs.conversations.axolotl")
             .unwrap();
@@ -541,7 +544,7 @@ mod req6_key_element_format {
         let msg = make_test_message(HashSet::new());
         let xml = utils::omemo_message_to_xml(&msg);
 
-        let element: tokio_xmpp::Element = xml.parse().unwrap();
+        let element: Element = xml.parse().unwrap();
         let header = element
             .get_child("header", "eu.siacs.conversations.axolotl")
             .unwrap();
@@ -560,7 +563,7 @@ mod req6_key_element_format {
         let msg = make_test_message(HashSet::new());
         let xml = utils::omemo_message_to_xml(&msg);
 
-        let element: tokio_xmpp::Element = xml.parse().unwrap();
+        let element: Element = xml.parse().unwrap();
         let header = element
             .get_child("header", "eu.siacs.conversations.axolotl")
             .unwrap();

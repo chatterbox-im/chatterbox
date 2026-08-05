@@ -33,6 +33,8 @@ pub mod session;
 #[cfg(test)]
 mod session_proptest;
 pub mod storage;
+mod store_migrate;
+pub mod store_sqlite;
 pub mod wire;
 
 /// The OMEMO namespace used in XMPP stanzas

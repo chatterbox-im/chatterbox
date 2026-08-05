@@ -99,8 +99,24 @@ pub fn handle_presence_stanza(stanza: &Element) -> Result<()> {
         }
         "error" => {
             let reason = stanza
-                .get_child("error", "")
-                .map(|e| e.text())
+                .get_child("error", NS_JABBER_CLIENT)
+                .map(|e| {
+                    // Prefer <text> child, fall back to first condition element name
+                    let text = e
+                        .get_child("text", "urn:ietf:params:xml:ns:xmpp-stanzas")
+                        .map(|t| t.text())
+                        .filter(|s| !s.is_empty());
+                    let condition = e
+                        .children()
+                        .find(|c| c.name() != "text")
+                        .map(|c| c.name().to_string());
+                    match (text, condition) {
+                        (Some(t), Some(c)) => format!("{}: {}", c, t),
+                        (Some(t), None) => t,
+                        (None, Some(c)) => c,
+                        (None, None) => e.attr("type").unwrap_or("error").to_string(),
+                    }
+                })
                 .unwrap_or_else(|| "unknown error".to_string());
             warn!("Presence error from {}: {}", bare_jid, reason);
             PresenceEvent::Error {

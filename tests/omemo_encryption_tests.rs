@@ -17,10 +17,23 @@ use chatterbox::models::DeliveryStatus;
 use base64::Engine;
 use chatterbox::omemo::protocol::OmemoMessage;
 use chatterbox::xmpp::introspection::verify_omemo_stanza;
-use xmpp_parsers::Element;
+// `Element` is re-exported from minidom, not from the xmpp-parsers root.
+// Every module in `src/` already uses this path.
+use xmpp_parsers::minidom::Element;
 
 // Instead, define the OMEMO namespace constant locally:
 const OMEMO: &str = "eu.siacs.conversations.axolotl";
+
+/// minidom 0.19 changed `set_attr` to take an explicit namespace and a checked
+/// `NcName`.  `src/xmpp/send.rs` spells the new call out in full at every site;
+/// this helper keeps the tests readable while using the identical API.
+fn set_plain_attr(elem: &mut Element, name: &str, value: &str) {
+    elem.set_attr(
+        xmpp_parsers::minidom::rxml::Namespace::NONE,
+        name.try_into().expect("attribute name must be a valid NcName"),
+        value,
+    );
+}
 
 /// Test OMEMO encryption functionality
 #[tokio::test]
@@ -1012,18 +1025,18 @@ async fn test_omemo_stanza_positive_compliance() -> anyhow::Result<()> {
 
     // Manually construct the OMEMO stanza as Element
     let mut message_element = Element::builder("message", "jabber:client").build();
-    message_element.set_attr("to", &credentials.username);
-    message_element.set_attr("type", "chat");
+    set_plain_attr(&mut message_element, "to", &credentials.username);
+    set_plain_attr(&mut message_element, "type", "chat");
 
     let mut encrypted_element = Element::builder("encrypted", OMEMO).build();
     let mut header_element = Element::builder("header", OMEMO).build();
-    header_element.set_attr("sid", &sender_device_id.to_string());
+    set_plain_attr(&mut header_element, "sid", &sender_device_id.to_string());
     let mut iv_element = Element::builder("iv", OMEMO).build();
     iv_element.append_text_node(&base64::engine::general_purpose::STANDARD.encode(&iv));
     header_element.append_child(iv_element);
     for (device_id, key) in &encrypted_keys {
         let mut key_element = Element::builder("key", OMEMO).build();
-        key_element.set_attr("rid", &device_id.to_string());
+        set_plain_attr(&mut key_element, "rid", &device_id.to_string());
         key_element.append_text_node(&base64::engine::general_purpose::STANDARD.encode(key));
         header_element.append_child(key_element);
     }
@@ -1053,8 +1066,8 @@ async fn test_omemo_stanza_positive_compliance() -> anyhow::Result<()> {
 async fn test_omemo_stanza_negative_compliance() -> anyhow::Result<()> {
     // Construct a malformed OMEMO stanza (missing header, plaintext in payload)
     let mut message_element = Element::builder("message", "jabber:client").build();
-    message_element.set_attr("to", "alice@example.com");
-    message_element.set_attr("type", "chat");
+    set_plain_attr(&mut message_element, "to", "alice@example.com");
+    set_plain_attr(&mut message_element, "type", "chat");
 
     let mut encrypted_element = Element::builder("encrypted", OMEMO).build();
     // Intentionally omit the 'header' element

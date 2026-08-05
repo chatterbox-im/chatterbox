@@ -63,7 +63,12 @@ pub struct FfiMessage {
     pub from_jid: String,
     pub to_jid: String,
     pub body: String,
-    /// Unix timestamp (seconds since epoch)
+    /// Unix timestamp in **seconds** since the epoch.
+    ///
+    /// `Message::timestamp` is milliseconds internally (see the SQLite
+    /// migration in `storage.rs`); the conversion happens in
+    /// `to_ffi_message` so Swift can feed this straight into
+    /// `Date(timeIntervalSince1970:)`.
     pub timestamp: i64,
     pub is_encrypted: bool,
     /// "sent" | "delivered" | "read" | "failed"
@@ -493,10 +498,14 @@ impl ChatterboxClient {
 
             let msg_id = Uuid::new_v4().to_string();
             eprintln!("FFI_DEBUG: send_message msg_id={}", msg_id);
+            // Milliseconds, matching every other producer of `Message` and the
+            // `timestamp * 1000` migration in `storage.rs`.  Writing seconds
+            // here put mixed units in one table: freshly sent messages rendered
+            // correctly while everything else rendered in the year 58536.
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
-                .as_secs();
+                .as_millis() as u64;
 
             eprintln!("FFI_DEBUG: send_message calling send_message_with_id (no lock held)");
             xmpp.send_message_with_id(&to_jid, &body, &msg_id)
@@ -665,8 +674,9 @@ impl ChatterboxClient {
     }
 
     /// Fetch server-side message archive (MAM, XEP-0313) for `jid` and store
-    /// any messages newer than `since_unix_secs`.  Returns the new messages
-    /// oldest-first so the caller can append them to local history.
+    /// any messages newer than `since_unix_secs` (**seconds** since the epoch).
+    /// Returns only messages that were not already present locally, oldest-first,
+    /// so the caller can append them to local history and count them as unread.
     pub async fn fetch_mam(&self, jid: String, since_unix_secs: i64) -> Result<Vec<FfiMessage>, FfiError> {
         let inner = Arc::clone(&self.inner);
         RUNTIME.spawn(async move {
@@ -676,7 +686,13 @@ impl ChatterboxClient {
                 (Arc::clone(&state.xmpp), state.store.clone())
             };
 
-            let start = chrono::DateTime::from_timestamp(since_unix_secs, 0)
+            // Tolerate callers that pass milliseconds: an unconverted ms value
+            // fed to `from_timestamp` lands in the year 58536, which the server
+            // answers with an empty archive.  That is why foreground catch-up
+            // silently returned nothing while background refresh (using a real
+            // seconds window) kept reporting new messages.
+            let start_millis = secs_to_millis(since_unix_secs);
+            let start = chrono::DateTime::from_timestamp_millis(start_millis)
                 .unwrap_or_else(chrono::Utc::now);
             let opts = crate::xmpp::message_archive::MAMQueryOptions {
                 with: Some(jid.clone()),
@@ -690,18 +706,27 @@ impl ChatterboxClient {
                 .await
                 .map_err(|e| FfiError::Roster { reason: e.to_string() })?;
 
-            // Store new messages; dedup is handled by INSERT OR IGNORE in SQLite
+            // Return only messages that were not already in the local store.
+            // MAM re-sends everything in the requested window, so echoing all of
+            // it back made the caller treat already-read messages as new.
             let mut new_msgs = Vec::new();
             if let Some(ref s) = store {
                 if let Ok(guard) = s.lock() {
                     for m in &msgs {
-                        let _ = guard.store_message(m);
-                        new_msgs.push(to_ffi_message(m.clone()));
+                        match guard.store_message(m) {
+                            Ok(true) => new_msgs.push(to_ffi_message(m.clone())),
+                            Ok(false) => {} // already stored — not new
+                            Err(e) => {
+                                log::warn!("Failed to store MAM message {}: {}", m.id, e);
+                            }
+                        }
                     }
                 }
             } else {
+                // No local store: we cannot tell new from old, so return everything.
                 new_msgs = msgs.into_iter().map(to_ffi_message).collect();
             }
+            new_msgs.sort_by_key(|m| m.timestamp);
             Ok(new_msgs)
         })
         .await
@@ -864,13 +889,38 @@ pub enum FfiError {
 // Private helpers
 // ---------------------------------------------------------------------------
 
+/// Anything above this is not a plausible seconds-since-epoch value
+/// (1e11 seconds is the year 5138), so it must be milliseconds.
+const MAX_PLAUSIBLE_UNIX_SECS: i64 = 100_000_000_000;
+
+/// Convert an internal millisecond timestamp to the seconds value the FFI
+/// contract promises.  Tolerates rows written by older builds that stored
+/// seconds directly.
+fn millis_to_secs(raw: u64) -> i64 {
+    let value = raw as i64;
+    if value > MAX_PLAUSIBLE_UNIX_SECS {
+        value / 1000
+    } else {
+        value
+    }
+}
+
+/// Inverse of `millis_to_secs`, used for values arriving from Swift.
+fn secs_to_millis(raw: i64) -> i64 {
+    if raw > MAX_PLAUSIBLE_UNIX_SECS {
+        raw // already milliseconds (older app builds passed these through)
+    } else {
+        raw.saturating_mul(1000)
+    }
+}
+
 fn to_ffi_message(m: Message) -> FfiMessage {
     FfiMessage {
         id: m.id,
         from_jid: m.sender_id,
         to_jid: m.recipient_id,
         body: m.content,
-        timestamp: m.timestamp as i64,
+        timestamp: millis_to_secs(m.timestamp),
         is_encrypted: m.encrypted,
         status: format!("{:?}", m.delivery_status).to_lowercase(),
     }
@@ -886,4 +936,149 @@ fn format_fingerprint(raw: &str) -> String {
             s.push(c.to_ascii_uppercase());
             s
         })
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod timestamp_tests {
+    use super::*;
+    use crate::models::{DeliveryStatus, Message};
+    use chrono::Datelike;
+
+    /// A real millisecond timestamp: 2026-07-26T07:22:04Z.
+    const SAMPLE_MS: u64 = 1_785_050_524_800;
+    /// The same instant in seconds.
+    const SAMPLE_SECS: i64 = 1_785_050_524;
+
+    fn msg_with_timestamp(ts: u64) -> Message {
+        Message {
+            id: "test-id".to_string(),
+            sender_id: "me".to_string(),
+            recipient_id: "alice@example.com".to_string(),
+            content: "hello".to_string(),
+            timestamp: ts,
+            delivery_status: DeliveryStatus::Sent,
+            encrypted: true,
+        }
+    }
+
+    #[test]
+    fn millis_to_secs_converts_milliseconds() {
+        assert_eq!(millis_to_secs(SAMPLE_MS), SAMPLE_SECS);
+    }
+
+    #[test]
+    fn millis_to_secs_passes_through_legacy_seconds() {
+        // Rows written by builds that stored seconds must still render correctly
+        // until the SQLite migration has run.
+        assert_eq!(millis_to_secs(SAMPLE_SECS as u64), SAMPLE_SECS);
+    }
+
+    #[test]
+    fn millis_to_secs_handles_the_threshold() {
+        // Exactly at the threshold is treated as seconds, one above as millis.
+        assert_eq!(
+            millis_to_secs(MAX_PLAUSIBLE_UNIX_SECS as u64),
+            MAX_PLAUSIBLE_UNIX_SECS
+        );
+        assert_eq!(
+            millis_to_secs(MAX_PLAUSIBLE_UNIX_SECS as u64 + 1000),
+            (MAX_PLAUSIBLE_UNIX_SECS + 1000) / 1000
+        );
+    }
+
+    #[test]
+    fn secs_to_millis_converts_seconds() {
+        assert_eq!(secs_to_millis(SAMPLE_SECS), SAMPLE_MS as i64 - 800);
+    }
+
+    #[test]
+    fn secs_to_millis_passes_through_milliseconds() {
+        // Older app builds forwarded the raw stored value; do not multiply twice.
+        assert_eq!(secs_to_millis(SAMPLE_MS as i64), SAMPLE_MS as i64);
+    }
+
+    #[test]
+    fn secs_to_millis_never_overflows() {
+        // i64::MAX is above the threshold so it is treated as already-millis
+        // and returned unchanged; the saturating_mul guards the other branch.
+        assert_eq!(secs_to_millis(i64::MAX), i64::MAX);
+        assert_eq!(secs_to_millis(MAX_PLAUSIBLE_UNIX_SECS), MAX_PLAUSIBLE_UNIX_SECS * 1000);
+    }
+
+    /// The conversion is a heuristic on magnitude, so it only round-trips for
+    /// timestamps large enough to be unambiguous: `secs * 1000` must exceed the
+    /// threshold, i.e. any instant after 1973-03-03.  Real message timestamps
+    /// are always in that range.
+    #[test]
+    fn seconds_round_trip_through_millis() {
+        for secs in [
+            100_000_001_i64, // just past the ambiguity threshold
+            1_000_000_000,   // 2001
+            SAMPLE_SECS,     // 2026
+            4_102_444_800,   // 2100
+        ] {
+            let millis = secs_to_millis(secs);
+            assert_eq!(
+                millis_to_secs(millis as u64),
+                secs,
+                "round trip failed for {secs}"
+            );
+        }
+    }
+
+    /// Documents the limit of the heuristic: values below the threshold cannot
+    /// be distinguished from millisecond values and are passed through as-is.
+    /// This is safe because no real message predates 1973.
+    #[test]
+    fn small_values_are_ambiguous_and_left_alone() {
+        assert_eq!(millis_to_secs(0), 0);
+        assert_eq!(millis_to_secs(1_000), 1_000);
+    }
+
+    #[test]
+    fn to_ffi_message_emits_seconds_not_millis() {
+        let ffi = to_ffi_message(msg_with_timestamp(SAMPLE_MS));
+        assert_eq!(ffi.timestamp, SAMPLE_SECS);
+    }
+
+    /// The regression that produced "year 58536" in the iOS UI: a millisecond
+    /// value reaching Swift unconverted and being fed to
+    /// `Date(timeIntervalSince1970:)`.
+    #[test]
+    fn to_ffi_message_timestamp_renders_in_a_sane_year() {
+        let ffi = to_ffi_message(msg_with_timestamp(SAMPLE_MS));
+        let year = chrono::DateTime::from_timestamp(ffi.timestamp, 0)
+            .expect("timestamp must be representable")
+            .year();
+        assert!(
+            (2000..=2100).contains(&year),
+            "timestamp rendered as year {year}, expected a present-day year"
+        );
+    }
+
+    /// `fetch_mam` builds its MAM window from a Swift-supplied seconds value.
+    /// Passing that value to `from_timestamp` unconverted produced a start date
+    /// in the year 58536, so the server returned an empty archive.
+    #[test]
+    fn mam_window_start_is_a_present_day_date() {
+        let start = chrono::DateTime::from_timestamp_millis(secs_to_millis(SAMPLE_SECS))
+            .expect("MAM start must be representable");
+        assert_eq!(start.format("%Y-%m-%d").to_string(), "2026-07-26");
+    }
+
+    /// Guards the specific arithmetic that caused the bug report.
+    #[test]
+    fn unconverted_millis_would_land_in_the_far_future() {
+        let wrong = chrono::DateTime::from_timestamp(SAMPLE_MS as i64, 0)
+            .expect("chrono accepts this value, which is why the bug was silent");
+        assert_eq!(
+            wrong.year(),
+            58536,
+            "this is the year the iOS UI was displaying"
+        );
+    }
 }
