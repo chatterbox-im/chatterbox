@@ -288,14 +288,26 @@ impl OmemoManager {
                     "Sender's signed prekey verified for {}:{}",
                     bare_jid, device_id
                 ),
-                Ok(false) => warn!(
-                    "Sender's signed prekey signature INVALID for {}:{}",
-                    bare_jid, device_id
-                ),
-                Err(e) => warn!(
-                    "Could not verify sender's signed prekey for {}:{}: {}",
-                    bare_jid, device_id, e
-                ),
+                Ok(false) => {
+                    error!(
+                        "Sender's signed prekey signature INVALID for {}:{} — rejecting session",
+                        bare_jid, device_id
+                    );
+                    return Err(OmemoError::ProtocolError(format!(
+                        "Signed prekey signature invalid for {}:{} — possible MITM",
+                        bare_jid, device_id
+                    )));
+                }
+                Err(e) => {
+                    error!(
+                        "Could not verify sender's signed prekey for {}:{}: {} — rejecting session",
+                        bare_jid, device_id, e
+                    );
+                    return Err(OmemoError::ProtocolError(format!(
+                        "Signed prekey signature verification error for {}:{}: {}",
+                        bare_jid, device_id, e
+                    )));
+                }
             }
 
             // Create recipient session

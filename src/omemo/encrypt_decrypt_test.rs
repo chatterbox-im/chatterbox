@@ -147,6 +147,50 @@ mod tests {
         }
     }
 
+    impl MockPubSub {
+        /// Publish a bundle with the SPK signature zeroed out (simulates a MITM
+        /// that replaces the bundle but can't forge a valid XEdDSA signature).
+        async fn add_bundle_with_bad_sig(&self, jid: &str, device_id: u32, bundle: &X3DHKeyBundle) {
+            let b64 = base64::engine::general_purpose::STANDARD;
+
+            let identity_key_b64 = b64.encode(&bundle.identity_key_pair.public_key);
+            let spk_b64 = b64.encode(&bundle.signed_pre_key_pair.public_key);
+            // Corrupt the signature: all zeros won't be a valid XEdDSA sig.
+            let bad_sig = vec![0u8; 64];
+            let bad_sig_b64 = b64.encode(&bad_sig);
+
+            let mut prekeys_xml = String::new();
+            for (id, kp) in &bundle.one_time_pre_key_pairs {
+                let pk_b64 = b64.encode(&kp.public_key);
+                prekeys_xml.push_str(&format!(
+                    "<preKeyPublic preKeyId=\"{}\">{}</preKeyPublic>",
+                    id, pk_b64
+                ));
+            }
+
+            let xml = format!(
+                "<items node=\"{ns}.bundles:{did}\"><item id=\"current\">\
+                 <bundle xmlns=\"{ns}\">\
+                 <identityKey>{ik}</identityKey>\
+                 <signedPreKeyPublic signedPreKeyId=\"{spk_id}\">{spk}</signedPreKeyPublic>\
+                 <signedPreKeySignature>{sig}</signedPreKeySignature>\
+                 <prekeys>{pks}</prekeys>\
+                 </bundle></item></items>",
+                ns = crate::omemo::OMEMO_NAMESPACE,
+                did = device_id,
+                ik = identity_key_b64,
+                spk_id = bundle.signed_pre_key_id,
+                spk = spk_b64,
+                sig = bad_sig_b64,
+                pks = prekeys_xml,
+            );
+
+            let node = format!("{}.bundles:{}", crate::omemo::OMEMO_NAMESPACE, device_id);
+            let key = format!("{}|{}", jid, node);
+            self.responses.lock().await.insert(key, xml);
+        }
+    }
+
     /// Create an OmemoManager with a temp directory for storage.
     /// Returns (manager, temp_dir) — keep temp_dir alive for the test duration.
     async fn create_manager(
@@ -772,6 +816,69 @@ mod tests {
             bob.sessions
                 .get(&(alice_jid.to_string(), alice_device_id))
                 .map(|s| std::mem::discriminant(s))
+        );
+    }
+
+    /// Signed-prekey signature failure on the receive path must be enforced (C4).
+    /// If the sender's bundle has an invalid SPK signature, the decryption must
+    /// fail rather than silently establishing a session.
+    #[tokio::test]
+    async fn test_invalid_spk_signature_blocks_session_establishment() {
+        let _ = env_logger::builder().is_test(true).try_init();
+
+        let alice_jid = "alice@example.com";
+        let bob_jid = "bob@example.com";
+        let alice_device_id: u32 = 30001;
+        let bob_device_id: u32 = 30002;
+
+        let pubsub = Arc::new(MockPubSub::new());
+        let (mut alice, _alice_dir) =
+            create_manager(alice_jid, alice_device_id, pubsub.clone()).await;
+        let (mut bob, _bob_dir) = create_manager(bob_jid, bob_device_id, pubsub.clone()).await;
+
+        pubsub.add_device_list(bob_jid, &[bob_device_id]).await;
+        pubsub.add_device_list(alice_jid, &[alice_device_id]).await;
+        pubsub
+            .add_bundle(bob_jid, bob_device_id, bob.key_bundle.as_ref().unwrap())
+            .await;
+        // Alice's bundle is published with a corrupted SPK signature.
+        pubsub
+            .add_bundle_with_bad_sig(
+                alice_jid,
+                alice_device_id,
+                alice.key_bundle.as_ref().unwrap(),
+            )
+            .await;
+
+        // Alice encrypts to Bob using Bob's real bundle — the message is valid.
+        let msg = alice
+            .encrypt_message(bob_jid, "hello")
+            .await
+            .expect("Alice can encrypt with a valid bundle");
+
+        // Bob receives the PreKeySignalMessage.  When Bob verifies Alice's bundle
+        // SPK signature, it must be rejected — no session should be established.
+        let err = bob
+            .decrypt_message(alice_jid, alice_device_id, &msg)
+            .await
+            .expect_err("invalid SPK signature must cause decryption to fail");
+
+        let err_str = err.to_string();
+        assert!(
+            err_str.to_lowercase().contains("prekey")
+                || err_str.to_lowercase().contains("signature")
+                || err_str.to_lowercase().contains("protocol"),
+            "error must mention signature/prekey/protocol, got: {}",
+            err_str
+        );
+
+        // No Active session must have been persisted for Alice.
+        assert!(
+            !matches!(
+                bob.sessions.get(&(alice_jid.to_string(), alice_device_id)),
+                Some(OmemoSessionState::Active(_))
+            ),
+            "no Active session must exist after SPK signature rejection"
         );
     }
 
