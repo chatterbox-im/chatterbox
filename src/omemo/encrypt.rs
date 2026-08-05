@@ -292,7 +292,7 @@ impl OmemoManager {
             } else {
                 Some(remote_identity.pre_keys[0].public_key.clone())
             },
-            ephemeral_key_pair.private_key,
+            ephemeral_key_pair.private_key.expose_secret().to_vec(),
             self.device_id,
         )?;
 

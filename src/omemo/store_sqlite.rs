@@ -831,12 +831,13 @@ fn now_secs() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::omemo::keys::Secret;
     use crate::omemo::protocol::KeyPair;
 
     fn kp() -> KeyPair {
         KeyPair {
             public_key: vec![1u8; 32],
-            private_key: vec![2u8; 32],
+            private_key: Secret::new([2u8; 32]),
         }
     }
 
@@ -846,9 +847,9 @@ mod tests {
             is_initiator: false,
             remote_identity_key: vec![3u8; 32],
             local_identity_key_pair: kp(),
-            root_key: vec![4u8; 32],
-            send_chain_key: vec![5u8; 32],
-            receive_chain_key: vec![6u8; 32],
+            root_key: Secret::new([4u8; 32]),
+            send_chain_key: Secret::new([5u8; 32]),
+            receive_chain_key: Secret::new([6u8; 32]),
             ratchet_key_pair: kp(),
             remote_ratchet_key: vec![7u8; 32],
             prev_remote_ratchet_key: vec![8u8; 32],

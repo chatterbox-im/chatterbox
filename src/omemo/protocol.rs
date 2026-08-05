@@ -11,6 +11,7 @@ use thiserror::Error;
 
 use crate::omemo::crypto;
 use crate::omemo::device_id::DeviceId;
+use crate::omemo::keys::Secret;
 
 /// Errors that can occur in double ratchet operations
 #[derive(Debug, Error)]
@@ -42,8 +43,8 @@ pub struct KeyPair {
     /// The public key
     pub public_key: Vec<u8>,
 
-    /// The private key
-    pub private_key: Vec<u8>,
+    /// The private key — zeroized on drop, access via .expose_secret()
+    pub private_key: Secret<32>,
 }
 
 /// Implements X3DH protocol for OMEMO
@@ -131,14 +132,14 @@ pub struct RatchetState {
     /// Local identity key pair
     pub local_identity_key_pair: KeyPair,
 
-    /// Root key
-    pub root_key: Vec<u8>,
+    /// Root key — zeroized on drop
+    pub root_key: Secret<32>,
 
-    /// Send chain key
-    pub send_chain_key: Vec<u8>,
+    /// Send chain key — zeroized on drop
+    pub send_chain_key: Secret<32>,
 
-    /// Receive chain key
-    pub receive_chain_key: Vec<u8>,
+    /// Receive chain key — zeroized on drop
+    pub receive_chain_key: Secret<32>,
 
     /// Ratchet key pair
     pub ratchet_key_pair: KeyPair,
@@ -216,6 +217,7 @@ pub struct RatchetState {
 pub(crate) mod legacy_ratchet {
     use super::{KeyPair, RatchetState};
     use crate::omemo::device_id::DeviceId;
+    use crate::omemo::keys::Secret;
     use serde::Deserialize;
 
     /// Layout before `prev_send_message_number` and `establishing_base_key`.
@@ -271,17 +273,19 @@ pub(crate) mod legacy_ratchet {
                 is_initiator: v.is_initiator,
                 remote_identity_key: v.remote_identity_key,
                 local_identity_key_pair: v.local_identity_key_pair,
-                root_key: v.root_key,
-                send_chain_key: v.send_chain_key,
-                receive_chain_key: v.receive_chain_key,
+                root_key: Secret::from_slice(&v.root_key)
+                    .expect("migration: root key is 32 bytes"),
+                send_chain_key: Secret::from_slice(&v.send_chain_key)
+                    .expect("migration: send chain key is 32 bytes"),
+                receive_chain_key: Secret::from_slice(&v.receive_chain_key)
+                    .expect("migration: receive chain key is 32 bytes"),
                 ratchet_key_pair: v.ratchet_key_pair,
                 remote_ratchet_key: v.remote_ratchet_key,
                 prev_remote_ratchet_key: v.prev_remote_ratchet_key,
                 send_message_number: v.send_message_number,
                 receive_message_number: v.receive_message_number,
                 prev_receive_message_number: v.prev_receive_message_number,
-                // Not tracked in V1; 0 is what a fresh session starts with and
-                // only affects the `previous_counter` hint on the wire.
+                // Not tracked in V1; 0 is what a fresh session starts with.
                 prev_send_message_number: 0,
                 skipped_message_keys: v.skipped_message_keys,
                 local_device_id: v.local_device_id,
@@ -299,9 +303,12 @@ pub(crate) mod legacy_ratchet {
                 is_initiator: v.is_initiator,
                 remote_identity_key: v.remote_identity_key,
                 local_identity_key_pair: v.local_identity_key_pair,
-                root_key: v.root_key,
-                send_chain_key: v.send_chain_key,
-                receive_chain_key: v.receive_chain_key,
+                root_key: Secret::from_slice(&v.root_key)
+                    .expect("migration: root key is 32 bytes"),
+                send_chain_key: Secret::from_slice(&v.send_chain_key)
+                    .expect("migration: send chain key is 32 bytes"),
+                receive_chain_key: Secret::from_slice(&v.receive_chain_key)
+                    .expect("migration: receive chain key is 32 bytes"),
                 ratchet_key_pair: v.ratchet_key_pair,
                 remote_ratchet_key: v.remote_ratchet_key,
                 prev_remote_ratchet_key: v.prev_remote_ratchet_key,
@@ -363,12 +370,13 @@ impl X3DHProtocol {
     /// Generate a key pair for OMEMO operations
     pub fn generate_key_pair() -> Result<KeyPair, DoubleRatchetError> {
         // generate_x25519_keypair returns (private_key, public_key)
-        let (private_key, public_key) =
+        let (private_key_bytes, public_key) =
             crypto::generate_x25519_keypair().map_err(DoubleRatchetError::CryptoError)?;
 
         Ok(KeyPair {
             public_key,
-            private_key,
+            private_key: Secret::from_slice(&private_key_bytes)
+                .expect("x25519 key is always 32 bytes"),
         })
     }
 
@@ -385,7 +393,7 @@ impl X3DHProtocol {
 
         // Sign the pre-key with the identity key
         let signed_pre_key_signature = Self::sign_pre_key(
-            &identity_key_pair.private_key,
+            identity_key_pair.private_key.expose_secret(),
             &signed_pre_key_pair.public_key,
         )?;
 
@@ -471,7 +479,7 @@ impl X3DHProtocol {
 
         // DH1 = DH(IKa, SPKb)
         let dh1 =
-            crypto::x25519_diffie_hellman(&identity_key_pair.private_key, their_signed_pre_key)
+            crypto::x25519_diffie_hellman(identity_key_pair.private_key.expose_secret(), their_signed_pre_key)
                 .map_err(DoubleRatchetError::CryptoError)?;
 
         // DH2 = DH(EKa, IKb)
@@ -528,7 +536,7 @@ impl X3DHProtocol {
             their_identity_key,
             their_signed_pre_key,
             their_one_time_pre_key,
-            &ephemeral_key_pair.private_key,
+            ephemeral_key_pair.private_key.expose_secret(),
         )
     }
 
@@ -544,24 +552,24 @@ impl X3DHProtocol {
 
         // DH1 = DH(SPKb, IKa)
         let dh1 =
-            crypto::x25519_diffie_hellman(&signed_pre_key_pair.private_key, their_identity_key)
+            crypto::x25519_diffie_hellman(signed_pre_key_pair.private_key.expose_secret(), their_identity_key)
                 .map_err(DoubleRatchetError::CryptoError)?;
 
         // DH2 = DH(IKb, EKa)
         let dh2 =
-            crypto::x25519_diffie_hellman(&identity_key_pair.private_key, their_ephemeral_key)
+            crypto::x25519_diffie_hellman(identity_key_pair.private_key.expose_secret(), their_ephemeral_key)
                 .map_err(DoubleRatchetError::CryptoError)?;
 
         // DH3 = DH(SPKb, EKa)
         let dh3 =
-            crypto::x25519_diffie_hellman(&signed_pre_key_pair.private_key, their_ephemeral_key)
+            crypto::x25519_diffie_hellman(signed_pre_key_pair.private_key.expose_secret(), their_ephemeral_key)
                 .map_err(DoubleRatchetError::CryptoError)?;
 
         // DH4 = DH(OPKb, EKa) (if OPKb exists)
         let dh4 = if let Some(one_time_pre_key_pair) = one_time_pre_key_pair {
             Some(
                 crypto::x25519_diffie_hellman(
-                    &one_time_pre_key_pair.private_key,
+                    one_time_pre_key_pair.private_key.expose_secret(),
                     their_ephemeral_key,
                 )
                 .map_err(DoubleRatchetError::CryptoError)?,
@@ -654,14 +662,16 @@ impl DoubleRatchet {
 
             // DH between our new ratchet key and their signed prekey
             let dh_output =
-                crypto::x25519_diffie_hellman(&ratchet_key_pair.private_key, &remote_signed_prekey)
+                crypto::x25519_diffie_hellman(ratchet_key_pair.private_key.expose_secret(), &remote_signed_prekey)
                     .map_err(DoubleRatchetError::CryptoError)?;
 
             // KDF_RK(SK, DH) -> (root_key, send_chain_key)
             let kdf_output = crypto::hkdf_derive(&shared_secret, &dh_output, b"WhisperRatchet", 64)
                 .map_err(DoubleRatchetError::CryptoError)?;
-            let root_key = kdf_output[..32].to_vec();
-            let send_chain_key = kdf_output[32..64].to_vec();
+            let root_key = Secret::from_slice(&kdf_output[..32])
+                .expect("KDF output is always 32 bytes");
+            let send_chain_key = Secret::from_slice(&kdf_output[32..64])
+                .expect("KDF output is always 32 bytes");
 
             let state = RatchetState {
                 initialized: true,
@@ -670,7 +680,7 @@ impl DoubleRatchet {
                 local_identity_key_pair,
                 root_key,
                 send_chain_key,
-                receive_chain_key: vec![0u8; 32], // Not yet established; set on first DH ratchet from Bob
+                receive_chain_key: Secret::new([0u8; 32]), // Not yet established; set on first DH ratchet from Bob
                 ratchet_key_pair,
                 remote_ratchet_key: remote_signed_prekey,
                 prev_remote_ratchet_key: vec![],
@@ -705,12 +715,13 @@ impl DoubleRatchet {
                 is_initiator: false,
                 remote_identity_key,
                 local_identity_key_pair,
-                root_key: shared_secret,
-                send_chain_key: vec![0u8; 32],    // Not yet established
-                receive_chain_key: vec![0u8; 32], // Not yet established
+                root_key: Secret::from_slice(&shared_secret)
+                    .expect("X3DH shared secret is 32 bytes"),
+                send_chain_key: Secret::new([0u8; 32]),    // Not yet established
+                receive_chain_key: Secret::new([0u8; 32]), // Not yet established
                 ratchet_key_pair: KeyPair {
                     public_key: vec![], // Will be set properly by new_session_recipient
-                    private_key: vec![],
+                    private_key: Secret::new([0u8; 32]),
                 },
                 remote_ratchet_key: ephemeral_key.clone(), // Alice's ephemeral key (or her first ratchet key)
                 prev_remote_ratchet_key: vec![],
@@ -752,7 +763,7 @@ impl DoubleRatchet {
             remote_identity_key,
             remote_signed_prekey,
             remote_one_time_prekey,
-            ephemeral_key_pair.private_key,
+            ephemeral_key_pair.private_key.expose_secret().to_vec(),
             local_device_id,
             remote_device_id,
             remote_jid,
@@ -845,18 +856,24 @@ impl DoubleRatchet {
     /// next_chain_key = HMAC-SHA256(chain_key, 0x02)
     fn derive_next_sending_key(state: &mut RatchetState) -> Vec<u8> {
         let message_key =
-            crypto::hmac_sha256(&state.send_chain_key, &[0x01]).expect("HMAC-SHA256 cannot fail");
-        state.send_chain_key =
-            crypto::hmac_sha256(&state.send_chain_key, &[0x02]).expect("HMAC-SHA256 cannot fail");
+            crypto::hmac_sha256(state.send_chain_key.expose_secret(), &[0x01]).expect("HMAC-SHA256 cannot fail");
+        state.send_chain_key = Secret::from_slice(
+            &crypto::hmac_sha256(state.send_chain_key.expose_secret(), &[0x02])
+                .expect("HMAC-SHA256 cannot fail"),
+        )
+        .expect("HMAC-SHA256 output is always 32 bytes");
         message_key
     }
 
     /// Derive the next receiving key using HMAC-based chain ratchet (Signal spec)
     fn derive_next_receiving_key(state: &mut RatchetState) -> Vec<u8> {
-        let message_key = crypto::hmac_sha256(&state.receive_chain_key, &[0x01])
+        let message_key = crypto::hmac_sha256(state.receive_chain_key.expose_secret(), &[0x01])
             .expect("HMAC-SHA256 cannot fail");
-        state.receive_chain_key = crypto::hmac_sha256(&state.receive_chain_key, &[0x02])
-            .expect("HMAC-SHA256 cannot fail");
+        state.receive_chain_key = Secret::from_slice(
+            &crypto::hmac_sha256(state.receive_chain_key.expose_secret(), &[0x02])
+                .expect("HMAC-SHA256 cannot fail"),
+        )
+        .expect("HMAC-SHA256 output is always 32 bytes");
         state.receive_message_number += 1;
         message_key
     }
@@ -880,14 +897,15 @@ impl DoubleRatchet {
 
         // DH for receiving chain: DH(our_ratchet_private, their_new_ratchet_public)
         let dh_recv =
-            crypto::x25519_diffie_hellman(&state.ratchet_key_pair.private_key, their_ratchet_key)
-                .map_err(DoubleRatchetError::CryptoError)?;
+            crypto::x25519_diffie_hellman(state.ratchet_key_pair.private_key.expose_secret(), their_ratchet_key)
+                .map_err(DoubleRatchetError::CryptoError)?
+;
 
         // KDF_RK(root_key, dh_recv) -> (new_root_key, receive_chain_key)
-        let kdf_recv = crypto::hkdf_derive(&state.root_key, &dh_recv, b"WhisperRatchet", 64)
+        let kdf_recv = crypto::hkdf_derive(state.root_key.expose_secret(), &dh_recv, b"WhisperRatchet", 64)
             .map_err(DoubleRatchetError::CryptoError)?;
-        state.root_key = kdf_recv[..32].to_vec();
-        state.receive_chain_key = kdf_recv[32..64].to_vec();
+        state.root_key = Secret::from_slice(&kdf_recv[..32]).expect("KDF is always 64 bytes");
+        state.receive_chain_key = Secret::from_slice(&kdf_recv[32..64]).expect("KDF is always 64 bytes");
 
         // Generate a new ratchet key pair for sending
         state.ratchet_key_pair = X3DHProtocol::generate_key_pair()?;
@@ -896,14 +914,14 @@ impl DoubleRatchet {
 
         // DH for sending chain: DH(new_ratchet_private, their_ratchet_public)
         let dh_send =
-            crypto::x25519_diffie_hellman(&state.ratchet_key_pair.private_key, their_ratchet_key)
+            crypto::x25519_diffie_hellman(state.ratchet_key_pair.private_key.expose_secret(), their_ratchet_key)
                 .map_err(DoubleRatchetError::CryptoError)?;
 
         // KDF_RK(root_key, dh_send) -> (new_root_key, send_chain_key)
-        let kdf_send = crypto::hkdf_derive(&state.root_key, &dh_send, b"WhisperRatchet", 64)
+        let kdf_send = crypto::hkdf_derive(state.root_key.expose_secret(), &dh_send, b"WhisperRatchet", 64)
             .map_err(DoubleRatchetError::CryptoError)?;
-        state.root_key = kdf_send[..32].to_vec();
-        state.send_chain_key = kdf_send[32..64].to_vec();
+        state.root_key = Secret::from_slice(&kdf_send[..32]).expect("KDF is always 64 bytes");
+        state.send_chain_key = Secret::from_slice(&kdf_send[32..64]).expect("KDF is always 64 bytes");
 
         Ok(())
     }
@@ -1617,7 +1635,7 @@ mod tests {
             bob_identity.public_key.clone(),
             bob_spk.public_key.clone(),
             Some(bob_opk.public_key.clone()),
-            ephemeral.private_key.clone(),
+            ephemeral.private_key.expose_secret().to_vec(),
             1, // local device id
             2, // remote device id
             "bob@example.com".to_string(),
@@ -1844,7 +1862,7 @@ mod tests {
 
             // Sign: uses raw 32-byte private key and raw 32-byte SPK public
             let signature =
-                X3DHProtocol::sign_pre_key(&identity_kp.private_key, &spk_kp.public_key).unwrap();
+                X3DHProtocol::sign_pre_key(identity_kp.private_key.expose_secret(), &spk_kp.public_key).unwrap();
             assert_eq!(signature.len(), 64, "Signature should be 64 bytes");
 
             // Simulate bundle encoding: identity public and SPK public get 0x05 prefix

@@ -74,7 +74,7 @@ impl OmemoManager {
         })?;
 
         let signed_pre_key_signature = protocol::X3DHProtocol::sign_pre_key(
-            &identity_key_pair.private_key,
+            identity_key_pair.private_key.expose_secret(),
             &signed_pre_key_pair.public_key,
         )
         .map_err(|e| OmemoError::ProtocolError(format!("Failed to sign prekey: {}", e)))?;
@@ -504,7 +504,7 @@ impl OmemoManager {
         let signed_pre_key_id = current_bundle.signed_pre_key_id + 1;
 
         let signed_pre_key_signature = X3DHProtocol::sign_pre_key(
-            &current_bundle.identity_key_pair.private_key,
+            current_bundle.identity_key_pair.private_key.expose_secret(),
             &signed_pre_key_pair.public_key,
         )
         .map_err(|e| OmemoError::ProtocolError(format!("Failed to sign PreKey: {}", e)))?;

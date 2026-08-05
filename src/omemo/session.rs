@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use thiserror::Error;
 
 use crate::omemo::device_id::DeviceId;
+use crate::omemo::keys::Secret;
 use crate::omemo::protocol::{DoubleRatchet, DoubleRatchetError, KeyPair, RatchetState};
 
 /// Session manager errors
@@ -168,14 +169,14 @@ impl OmemoSession {
                 remote_identity_key: vec![],
                 local_identity_key_pair: KeyPair {
                     public_key: vec![],
-                    private_key: vec![],
+                    private_key: Secret::new([0u8; 32]),
                 },
-                root_key: vec![],
-                send_chain_key: vec![],
-                receive_chain_key: vec![],
+                root_key: Secret::new([0u8; 32]),
+                send_chain_key: Secret::new([0u8; 32]),
+                receive_chain_key: Secret::new([0u8; 32]),
                 ratchet_key_pair: KeyPair {
                     public_key: vec![],
-                    private_key: vec![],
+                    private_key: Secret::new([0u8; 32]),
                 },
                 remote_ratchet_key: vec![],
                 prev_remote_ratchet_key: vec![],
@@ -477,14 +478,14 @@ mod tests {
             is_initiator: false,
             remote_identity_key: vec![],
             local_identity_key_pair: crate::omemo::protocol::KeyPair {
-                private_key: vec![],
+                private_key: Secret::new([0u8; 32]),
                 public_key: vec![],
             },
-            root_key: vec![],
-            send_chain_key: vec![],
-            receive_chain_key: vec![],
+            root_key: Secret::new([0u8; 32]),
+            send_chain_key: Secret::new([0u8; 32]),
+            receive_chain_key: Secret::new([0u8; 32]),
             ratchet_key_pair: crate::omemo::protocol::KeyPair {
-                private_key: vec![],
+                private_key: Secret::new([0u8; 32]),
                 public_key: vec![],
             },
             remote_ratchet_key: vec![],

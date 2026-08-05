@@ -22,6 +22,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use crate::omemo::crypto;
+use crate::omemo::keys::Secret;
 use crate::omemo::protocol::KeyPair;
 
 // TESTING: Optional path override for tests
@@ -284,11 +285,12 @@ fn get_identity_key_file_path() -> Result<PathBuf> {
 /// and initial key agreement.
 pub fn generate_identity_key() -> Result<KeyPair> {
     // generate_x25519_keypair returns (private_key, public_key)
-    let (private_key, public_key) = crypto::generate_x25519_keypair()?;
+    let (private_key_bytes, public_key) = crypto::generate_x25519_keypair()?;
 
     Ok(KeyPair {
         public_key,
-        private_key,
+        private_key: Secret::from_slice(&private_key_bytes)
+            .expect("x25519 key is always 32 bytes"),
     })
 }
 
@@ -298,7 +300,7 @@ pub fn generate_identity_key() -> Result<KeyPair> {
 /// The format is: "public_key:private_key" where both keys are Base64 encoded.
 fn serialize_key_pair(key_pair: &KeyPair) -> String {
     let public_b64 = BASE64.encode(&key_pair.public_key);
-    let private_b64 = BASE64.encode(&key_pair.private_key);
+    let private_b64 = BASE64.encode(key_pair.private_key.expose_secret());
     format!("{}:{}", public_b64, private_b64)
 }
 
@@ -324,7 +326,8 @@ fn deserialize_key_pair(serialized: &str) -> Result<KeyPair> {
 
     Ok(KeyPair {
         public_key,
-        private_key,
+        private_key: Secret::from_slice(&private_key)
+            .ok_or_else(|| anyhow!("private key must be 32 bytes, got {}", private_key.len()))?,
     })
 }
 
@@ -845,7 +848,7 @@ mod tests {
             "Public key should not be empty"
         );
         assert!(
-            !key_pair.private_key.is_empty(),
+            !key_pair.private_key.expose_secret().is_empty(),
             "Private key should not be empty"
         );
 
