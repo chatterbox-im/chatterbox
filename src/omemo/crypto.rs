@@ -321,22 +321,6 @@ pub fn hmac_sha256(key: &[u8], data: &[u8]) -> Result<Vec<u8>, CryptoError> {
     Ok(result)
 }
 
-/// Derive a key using HKDF with SHA-256
-pub fn kdf(ikm: &[u8], salt: &[u8], info: &[u8]) -> Vec<u8> {
-    //debug!("Deriving key using HKDF-SHA256");
-    trace!("Salt: {}", hex::encode(salt));
-    trace!("Info: {}", String::from_utf8_lossy(info));
-
-    let hkdf = Hkdf::<Sha256>::new(Some(salt), ikm);
-    let mut output = vec![0u8; 32]; // 256 bits output
-
-    // Extract and expand the key
-    hkdf.expand(info, &mut output)
-        .expect("HKDF expansion failed");
-
-    output
-}
-
 /// Calculate a SHA-256 hash
 pub fn sha256_hash(data: &[u8]) -> Vec<u8> {
     use sha2::Digest;
