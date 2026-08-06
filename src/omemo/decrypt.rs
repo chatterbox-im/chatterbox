@@ -721,7 +721,7 @@ impl OmemoManager {
     }
 
     /// Handle AEAD decryption failures by aggressively resetting sessions
-    async fn handle_aead_decryption_failure(
+    pub(crate) async fn handle_aead_decryption_failure(
         &mut self,
         sender_jid: &str,
         device_id: u32,

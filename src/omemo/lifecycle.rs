@@ -469,12 +469,9 @@ impl OmemoManager {
     pub async fn check_and_rotate_prekeys(&mut self) -> Result<bool, OmemoError> {
         debug!("Checking if PreKeys need rotation");
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|e| OmemoError::ProtocolError(format!("Time error: {}", e)))?
-            .as_secs();
+        let now = self.now_secs();
 
-        if (now - self.prekey_rotation_config.last_rotation)
+        if now.saturating_sub(self.prekey_rotation_config.last_rotation)
             < self.prekey_rotation_config.check_interval
         {
             debug!("Not time to rotate PreKeys yet");
@@ -909,7 +906,8 @@ impl OmemoManager {
         let storage_guard = self.storage.lock().await;
         match storage_guard.get_device_ignore_until(remote_jid, DeviceId::from(remote_device_id)) {
             Ok(Some(ignore_until)) => {
-                let now = std::time::SystemTime::now();
+                let now = std::time::UNIX_EPOCH
+                    + std::time::Duration::from_secs(self.now_secs());
                 Ok(now < ignore_until)
             }
             Ok(None) => Ok(false),

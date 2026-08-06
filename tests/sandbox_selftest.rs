@@ -39,12 +39,19 @@ fn sandbox_blocks_reads_outside_allowlist() {
 
     // If the sandbox couldn't be installed here (e.g. a Linux kernel without
     // Landlock), the binary fails open — the test is inconclusive, not failed.
+    // On macOS the sandbox (Seatbelt) is always available; treat unavailability
+    // as a hard failure so CI on the primary platform never silently skips.
     if stderr.contains("could not enable sandbox") || stderr.contains("not supported") {
-        eprintln!(
-            "SKIP: sandbox unavailable in this environment: {}",
-            stderr.trim()
-        );
-        return;
+        #[cfg(target_os = "macos")]
+        panic!("sandbox must be available on macOS: {}", stderr.trim());
+        #[cfg(not(target_os = "macos"))]
+        {
+            eprintln!(
+                "SKIP: sandbox unavailable in this environment: {}",
+                stderr.trim()
+            );
+            return;
+        }
     }
 
     assert!(

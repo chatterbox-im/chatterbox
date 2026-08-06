@@ -5,145 +5,21 @@
 /// sequence of sends, crashes, and restarts, each side can decrypt the
 /// other's messages within a bounded number of additional exchanges.
 ///
-/// The tests use the full `OmemoManager` stack (with `MockPubSub` and
+/// The tests use the full `OmemoManager` stack (with `RecordingPubSub` and
 /// filesystem-backed `OmemoStorage` in temp directories).  `proptest` is
 /// synchronous, so each test case runs inside a `tokio` runtime created
 /// inline.
 #[cfg(test)]
 mod proptest_session {
     use anyhow::Result;
-    use async_trait::async_trait;
     use proptest::prelude::*;
-    use std::collections::HashMap;
     use std::sync::Arc;
     use tempfile::TempDir;
-    use tokio::sync::Mutex;
 
     use crate::omemo::device_id::DeviceId;
-    use crate::omemo::protocol::X3DHKeyBundle;
     use crate::omemo::storage::OmemoStorage;
-    use crate::omemo::{OmemoManager, OmemoPubSub, OMEMO_NAMESPACE};
-
-    // ── Shared MockPubSub ─────────────────────────────────────────────────────
-
-    struct MockPubSub {
-        responses: Mutex<HashMap<String, String>>,
-    }
-
-    impl MockPubSub {
-        fn new() -> Self {
-            Self {
-                responses: Mutex::new(HashMap::new()),
-            }
-        }
-
-        async fn add_device_list(&self, jid: &str, device_ids: &[u32]) {
-            let devices_xml: String = device_ids
-                .iter()
-                .map(|id| format!("<device id=\"{}\"/>", id))
-                .collect::<Vec<_>>()
-                .join("");
-            let xml = format!(
-                "<items node=\"{ns}.devicelist\"><item><list xmlns=\"{ns}\">{devs}</list></item></items>",
-                ns = OMEMO_NAMESPACE,
-                devs = devices_xml,
-            );
-            let mut r = self.responses.lock().await;
-            for node in crate::omemo::devicelist_node_variants() {
-                r.insert(format!("{}|{}", jid, node), xml.clone());
-            }
-        }
-
-        async fn add_bundle(&self, jid: &str, device_id: u32, bundle: &X3DHKeyBundle) {
-            use base64::Engine as _;
-            let b64 = base64::engine::general_purpose::STANDARD;
-            let mut pks = String::new();
-            for (id, kp) in &bundle.one_time_pre_key_pairs {
-                pks.push_str(&format!(
-                    "<preKeyPublic preKeyId=\"{}\">{}</preKeyPublic>",
-                    id,
-                    b64.encode(&kp.public_key)
-                ));
-            }
-            let xml = format!(
-                "<items node=\"{ns}.bundles:{did}\"><item id=\"current\">\
-                 <bundle xmlns=\"{ns}\">\
-                 <identityKey>{ik}</identityKey>\
-                 <signedPreKeyPublic signedPreKeyId=\"{spk_id}\">{spk}</signedPreKeyPublic>\
-                 <signedPreKeySignature>{sig}</signedPreKeySignature>\
-                 <prekeys>{pks}</prekeys>\
-                 </bundle></item></items>",
-                ns = OMEMO_NAMESPACE,
-                did = device_id,
-                ik = b64.encode(&bundle.identity_key_pair.public_key),
-                spk_id = bundle.signed_pre_key_id,
-                spk = b64.encode(&bundle.signed_pre_key_pair.public_key),
-                sig = b64.encode(&bundle.signed_pre_key_signature),
-                pks = pks,
-            );
-            for node in crate::omemo::bundle_node_variants(
-                crate::omemo::device_id::DeviceId::from(device_id)
-            ) {
-                self.responses.lock().await.insert(format!("{}|{}", jid, node), xml.clone());
-            }
-        }
-    }
-
-    #[async_trait]
-    impl OmemoPubSub for MockPubSub {
-        async fn request_items(&self, from: &str, node: &str) -> Result<String> {
-            let key = format!("{}|{}", from, node);
-            Ok(self
-                .responses
-                .lock()
-                .await
-                .get(&key)
-                .cloned()
-                .unwrap_or_else(|| {
-                    "<iq type=\"error\"><error type=\"cancel\">\
-                     <item-not-found xmlns=\"urn:ietf:params:xml:ns:xmpp-stanzas\"/>\
-                     </error></iq>"
-                        .to_string()
-                }))
-        }
-        // publish_item updates stored state so post-restart bundle replacements
-        // are visible to the other party.  Without this, OPK exhaustion and
-        // SPK rotation are structurally unreachable in the property.
-        async fn publish_item(
-            &self,
-            _to: Option<&str>,
-            node: &str,
-            _id: &str,
-            payload: &str,
-        ) -> Result<()> {
-            let items_xml = format!("<items node=\"{}\">{}</items>", node, payload);
-            let mut r = self.responses.lock().await;
-            // Update every existing key whose node part matches.
-            let matching: Vec<String> = r.keys()
-                .filter(|k| k.splitn(2, '|').nth(1) == Some(node))
-                .cloned()
-                .collect();
-            for key in matching {
-                r.insert(key, items_xml.clone());
-            }
-            Ok(())
-        }
-        async fn publish_item_alternative(
-            &self,
-            _to: Option<&str>,
-            _node: &str,
-            _id: &str,
-            _payload: &str,
-        ) -> Result<()> {
-            Ok(())
-        }
-        async fn publish_device_list(&self, _device_ids: &[DeviceId]) -> Result<()> {
-            Ok(())
-        }
-        async fn delete_bundle(&self, _device_id: DeviceId) -> Result<()> {
-            Ok(())
-        }
-    }
+    use crate::omemo::{OmemoManager, OmemoPubSub};
+    use crate::omemo::test_support::RecordingPubSub;
 
     // ── Test harness ──────────────────────────────────────────────────────────
 
@@ -224,7 +100,7 @@ mod proptest_session {
                 let alice_did = DeviceId::from(40001u32);
                 let bob_did   = DeviceId::from(40002u32);
 
-                let pubsub = Arc::new(MockPubSub::new());
+                let pubsub = RecordingPubSub::new();
                 let alice_dir = TempDir::new().unwrap();
                 let bob_dir   = TempDir::new().unwrap();
 

@@ -9,207 +9,22 @@
 #[cfg(test)]
 mod tests {
     use anyhow::Result;
-    use async_trait::async_trait;
-    use base64::Engine;
-    use std::collections::HashMap;
     use std::sync::Arc;
     use tempfile::TempDir;
-    use tokio::sync::Mutex;
 
     use crate::jid::BareJid;
     use crate::omemo::device_id::DeviceId;
 
     fn bjid(s: &str) -> BareJid { BareJid::parse(s).unwrap() }
-    use crate::omemo::protocol::X3DHKeyBundle;
     use crate::omemo::session::OmemoSessionState;
     use crate::omemo::storage::{DeviceListEntry, OmemoStorage};
     use crate::omemo::wire::PreKeySignalMessage;
-    use crate::omemo::{OmemoManager, OmemoPubSub, OMEMO_NAMESPACE};
+    use crate::omemo::{OmemoManager, OmemoPubSub};
+    use crate::omemo::test_support::{RecordingPubSub, make_manager};
 
-    /// Mock PubSub that serves pre-configured device lists and bundles.
-    struct MockPubSub {
-        /// node → XML response
-        responses: Mutex<HashMap<String, String>>,
-    }
-
-    impl MockPubSub {
-        fn new() -> Self {
-            Self {
-                responses: Mutex::new(HashMap::new()),
-            }
-        }
-
-        async fn add_device_list(&self, jid: &str, device_ids: &[u32]) {
-            // Build device list XML that parse_device_list_response_static can parse
-            let devices_xml: String = device_ids
-                .iter()
-                .map(|id| format!("<device id=\"{}\"/>", id))
-                .collect::<Vec<_>>()
-                .join("");
-
-            let xml = format!(
-                "<items node=\"{ns}.devicelist\"><item><list xmlns=\"{ns}\">{devices}</list></item></items>",
-                ns = OMEMO_NAMESPACE,
-                devices = devices_xml,
-            );
-
-            // Add for all node format variants that device_discovery tries
-            let mut responses = self.responses.lock().await;
-            for node in crate::omemo::devicelist_node_variants() {
-                let key = format!("{}|{}", jid, node);
-                responses.insert(key, xml.clone());
-            }
-        }
-
-        async fn add_bundle(&self, jid: &str, device_id: u32, bundle: &X3DHKeyBundle) {
-            let b64 = base64::engine::general_purpose::STANDARD;
-
-            let identity_key_b64 = b64.encode(&bundle.identity_key_pair.public_key);
-            let spk_b64 = b64.encode(&bundle.signed_pre_key_pair.public_key);
-            let sig_b64 = b64.encode(&bundle.signed_pre_key_signature);
-
-            let mut prekeys_xml = String::new();
-            for (id, kp) in &bundle.one_time_pre_key_pairs {
-                let pk_b64 = b64.encode(&kp.public_key);
-                prekeys_xml.push_str(&format!(
-                    "<preKeyPublic preKeyId=\"{}\">{}</preKeyPublic>",
-                    id, pk_b64
-                ));
-            }
-
-            let xml = format!(
-                "<items node=\"{ns}.bundles:{did}\"><item id=\"current\">\
-                 <bundle xmlns=\"{ns}\">\
-                 <identityKey>{ik}</identityKey>\
-                 <signedPreKeyPublic signedPreKeyId=\"{spk_id}\">{spk}</signedPreKeyPublic>\
-                 <signedPreKeySignature>{sig}</signedPreKeySignature>\
-                 <prekeys>{pks}</prekeys>\
-                 </bundle></item></items>",
-                ns = OMEMO_NAMESPACE,
-                did = device_id,
-                ik = identity_key_b64,
-                spk_id = bundle.signed_pre_key_id,
-                spk = spk_b64,
-                sig = sig_b64,
-                pks = prekeys_xml,
-            );
-
-            for node in crate::omemo::bundle_node_variants(
-                crate::omemo::device_id::DeviceId::from(device_id)
-            ) {
-                let key = format!("{}|{}", jid, node);
-                self.responses.lock().await.insert(key, xml.clone());
-            }
-        }
-    }
-
-    #[async_trait]
-    impl OmemoPubSub for MockPubSub {
-        async fn request_items(&self, from: &str, node: &str) -> Result<String> {
-            let key = format!("{}|{}", from, node);
-            let responses = self.responses.lock().await;
-            match responses.get(&key) {
-                Some(xml) => Ok(xml.clone()),
-                None => {
-                    // Return an error response for unknown nodes
-                    Ok(format!(
-                        "<iq type=\"error\"><error type=\"cancel\">\
-                         <item-not-found xmlns=\"urn:ietf:params:xml:ns:xmpp-stanzas\"/>\
-                         </error></iq>"
-                    ))
-                }
-            }
-        }
-
-        async fn publish_item(
-            &self,
-            _to: Option<&str>,
-            _node: &str,
-            _id: &str,
-            _payload: &str,
-        ) -> Result<()> {
-            Ok(())
-        }
-
-        async fn publish_item_alternative(
-            &self,
-            _to: Option<&str>,
-            _node: &str,
-            _id: &str,
-            _payload: &str,
-        ) -> Result<()> {
-            Ok(())
-        }
-
-        async fn publish_device_list(&self, _device_ids: &[DeviceId]) -> Result<()> {
-            Ok(())
-        }
-        async fn delete_bundle(&self, _device_id: DeviceId) -> Result<()> {
-            Ok(())
-        }
-    }
-
-    impl MockPubSub {
-        /// Publish a bundle with the SPK signature zeroed out (simulates a MITM
-        /// that replaces the bundle but can't forge a valid XEdDSA signature).
-        async fn add_bundle_with_bad_sig(&self, jid: &str, device_id: u32, bundle: &X3DHKeyBundle) {
-            let b64 = base64::engine::general_purpose::STANDARD;
-
-            let identity_key_b64 = b64.encode(&bundle.identity_key_pair.public_key);
-            let spk_b64 = b64.encode(&bundle.signed_pre_key_pair.public_key);
-            // Corrupt the signature: all zeros won't be a valid XEdDSA sig.
-            let bad_sig = vec![0u8; 64];
-            let bad_sig_b64 = b64.encode(&bad_sig);
-
-            let mut prekeys_xml = String::new();
-            for (id, kp) in &bundle.one_time_pre_key_pairs {
-                let pk_b64 = b64.encode(&kp.public_key);
-                prekeys_xml.push_str(&format!(
-                    "<preKeyPublic preKeyId=\"{}\">{}</preKeyPublic>",
-                    id, pk_b64
-                ));
-            }
-
-            let xml = format!(
-                "<items node=\"{ns}.bundles:{did}\"><item id=\"current\">\
-                 <bundle xmlns=\"{ns}\">\
-                 <identityKey>{ik}</identityKey>\
-                 <signedPreKeyPublic signedPreKeyId=\"{spk_id}\">{spk}</signedPreKeyPublic>\
-                 <signedPreKeySignature>{sig}</signedPreKeySignature>\
-                 <prekeys>{pks}</prekeys>\
-                 </bundle></item></items>",
-                ns = crate::omemo::OMEMO_NAMESPACE,
-                did = device_id,
-                ik = identity_key_b64,
-                spk_id = bundle.signed_pre_key_id,
-                spk = spk_b64,
-                sig = bad_sig_b64,
-                pks = prekeys_xml,
-            );
-
-            let node = format!("{}.bundles:{}", crate::omemo::OMEMO_NAMESPACE, device_id);
-            let key = format!("{}|{}", jid, node);
-            self.responses.lock().await.insert(key, xml);
-        }
-    }
-
-    /// Create an OmemoManager with a temp directory for storage.
-    /// Returns (manager, temp_dir) — keep temp_dir alive for the test duration.
-    async fn create_manager(
-        jid: &str,
-        device_id: u32,
-        pubsub: Arc<dyn OmemoPubSub>,
-    ) -> (OmemoManager, TempDir) {
-        let temp_dir = TempDir::new().unwrap();
-        let metadata_dir = temp_dir.path().join("metadata");
-        std::fs::create_dir_all(&metadata_dir).unwrap();
-        std::fs::write(metadata_dir.join("device_id"), device_id.to_string()).unwrap();
-
-        let storage = OmemoStorage::new(Some(temp_dir.path().to_path_buf())).unwrap();
-        let manager = OmemoManager::new(storage, jid.to_string(), None, pubsub)
-            .await
-            .expect("Failed to create OmemoManager");
-        (manager, temp_dir)
+    /// Alias to ease test readability — test_support::make_manager creates a fresh dir.
+    async fn create_manager(jid: &str, device_id: u32, pubsub: Arc<dyn OmemoPubSub>) -> (OmemoManager, TempDir) {
+        make_manager(jid, device_id, pubsub).await
     }
 
     /// Test that the first message to a new device uses PreKey format
@@ -224,7 +39,7 @@ mod tests {
         let bob_device_id: u32 = 2001;
 
         // Create shared mock pubsub
-        let pubsub = Arc::new(MockPubSub::new());
+        let pubsub = RecordingPubSub::new();
 
         // Create Alice's manager
         let (mut alice, _alice_dir) =
@@ -320,7 +135,7 @@ mod tests {
         let alice_second_device_id: u32 = 1002;
         let bob_device_id: u32 = 2001;
 
-        let pubsub = Arc::new(MockPubSub::new());
+        let pubsub = RecordingPubSub::new();
 
         let (mut alice, _alice_dir) =
             create_manager(alice_jid, alice_device_id, pubsub.clone()).await;
@@ -382,7 +197,7 @@ mod tests {
         let alice_device_id: u32 = 3001;
         let bob_device_id: u32 = 4001;
 
-        let pubsub = Arc::new(MockPubSub::new());
+        let pubsub = RecordingPubSub::new();
 
         // Create both managers
         let (mut alice, _alice_dir) =
@@ -431,7 +246,7 @@ mod tests {
         let alice_device_id: u32 = 5001;
         let bob_device_id: u32 = 6001;
 
-        let pubsub = Arc::new(MockPubSub::new());
+        let pubsub = RecordingPubSub::new();
 
         let (mut alice, _alice_dir) =
             create_manager(alice_jid, alice_device_id, pubsub.clone()).await;
@@ -497,13 +312,13 @@ mod tests {
         let alice_device_id: u32 = 20001;
         let bob_device_id: u32 = 20002;
 
-        let pubsub = Arc::new(MockPubSub::new());
+        let pubsub = RecordingPubSub::new();
 
         let (mut alice, _alice_dir) =
             create_manager(alice_jid, alice_device_id, pubsub.clone()).await;
         let (mut bob, _bob_dir) = create_manager(bob_jid, bob_device_id, pubsub.clone()).await;
 
-        // Serve both bundles; MockPubSub holds the snapshot and won't remove
+        // Serve both bundles; RecordingPubSub holds the snapshot and won't remove
         // OPKs when Bob consumes them.
         pubsub.add_device_list(bob_jid, &[bob_device_id]).await;
         pubsub.add_device_list(alice_jid, &[alice_device_id]).await;
@@ -607,7 +422,7 @@ mod tests {
         let alice_device_id: u32 = 21001;
         let bob_device_id: u32 = 21002;
 
-        let pubsub = Arc::new(MockPubSub::new());
+        let pubsub = RecordingPubSub::new();
 
         let (mut alice, _alice_dir) =
             create_manager(alice_jid, alice_device_id, pubsub.clone()).await;
@@ -690,7 +505,7 @@ mod tests {
         let alice_device_id: u32 = 22001;
         let bob_device_id: u32 = 22002;
 
-        let pubsub = Arc::new(MockPubSub::new());
+        let pubsub = RecordingPubSub::new();
 
         let (mut alice, _alice_dir) =
             create_manager(alice_jid, alice_device_id, pubsub.clone()).await;
@@ -768,7 +583,7 @@ mod tests {
         let alice_device_id: u32 = 23001;
         let bob_device_id: u32 = 23002;
 
-        let pubsub = Arc::new(MockPubSub::new());
+        let pubsub = RecordingPubSub::new();
         let (mut alice, _alice_dir) =
             create_manager(alice_jid, alice_device_id, pubsub.clone()).await;
         let (mut bob, _bob_dir) = create_manager(bob_jid, bob_device_id, pubsub.clone()).await;
@@ -833,7 +648,7 @@ mod tests {
         let alice_device_id: u32 = 30001;
         let bob_device_id: u32 = 30002;
 
-        let pubsub = Arc::new(MockPubSub::new());
+        let pubsub = RecordingPubSub::new();
         let (mut alice, _alice_dir) =
             create_manager(alice_jid, alice_device_id, pubsub.clone()).await;
         let (mut bob, _bob_dir) = create_manager(bob_jid, bob_device_id, pubsub.clone()).await;
@@ -895,7 +710,7 @@ mod tests {
         let alice_device_id: u32 = 24001;
         let bob_device_id: u32 = 24002;
 
-        let pubsub = Arc::new(MockPubSub::new());
+        let pubsub = RecordingPubSub::new();
         let (mut alice, _alice_dir) =
             create_manager(alice_jid, alice_device_id, pubsub.clone()).await;
         let (mut bob, _bob_dir) = create_manager(bob_jid, bob_device_id, pubsub.clone()).await;
@@ -970,7 +785,7 @@ mod tests {
         let alice_device_id: u32 = 25001;
         let bob_device_id: u32 = 25002;
 
-        let pubsub = Arc::new(MockPubSub::new());
+        let pubsub = RecordingPubSub::new();
         let (mut alice, _alice_dir) =
             create_manager(alice_jid, alice_device_id, pubsub.clone()).await;
         let (mut bob, _bob_dir) = create_manager(bob_jid, bob_device_id, pubsub.clone()).await;
@@ -1072,7 +887,7 @@ mod tests {
         let alice_device_id: u32 = 30001;
         let bob_device_id: u32 = 30002;
 
-        let pubsub = Arc::new(MockPubSub::new());
+        let pubsub = RecordingPubSub::new();
         let (mut alice, _alice_dir) =
             create_manager(alice_jid, alice_device_id, pubsub.clone()).await;
         let (bob, _bob_dir) = create_manager(bob_jid, bob_device_id, pubsub.clone()).await;
@@ -1144,7 +959,7 @@ mod tests {
         let alice_device_id: u32 = 31001;
         let bob_device_id: u32 = 31002;
 
-        let pubsub = Arc::new(MockPubSub::new());
+        let pubsub = RecordingPubSub::new();
         let (mut alice, _alice_dir) =
             create_manager(alice_jid, alice_device_id, pubsub.clone()).await;
         let (mut bob, _bob_dir) = create_manager(bob_jid, bob_device_id, pubsub.clone()).await;
@@ -1208,7 +1023,7 @@ mod tests {
         let alice_device_id: u32 = 32001;
         let bob_device_id: u32 = 32002;
 
-        let pubsub = Arc::new(MockPubSub::new());
+        let pubsub = RecordingPubSub::new();
         let (mut alice, _alice_dir) =
             create_manager(alice_jid, alice_device_id, pubsub.clone()).await;
         let (bob, _bob_dir) = create_manager(bob_jid, bob_device_id, pubsub.clone()).await;
@@ -1278,7 +1093,7 @@ mod tests {
         let alice_device_id: u32 = 7001;
         let bob_device_id: u32 = 8001;
 
-        let pubsub = Arc::new(MockPubSub::new());
+        let pubsub = RecordingPubSub::new();
 
         let (mut alice, _alice_dir) =
             create_manager(alice_jid, alice_device_id, pubsub.clone()).await;
@@ -1367,7 +1182,7 @@ mod tests {
         let alice_device_id: u32 = 9001;
         let bob_device_id: u32 = 9002;
 
-        let pubsub = Arc::new(MockPubSub::new());
+        let pubsub = RecordingPubSub::new();
 
         let (mut alice, _alice_dir) =
             create_manager(alice_jid, alice_device_id, pubsub.clone()).await;
@@ -1441,7 +1256,7 @@ mod tests {
         let bob_jid = "bob@example.com";
         let alice_device_id: u32 = 10001;
 
-        let pubsub = Arc::new(MockPubSub::new());
+        let pubsub = RecordingPubSub::new();
 
         // Alice's manager; Bob has no published devices at all
         let (mut alice, _alice_dir) =
@@ -1476,7 +1291,7 @@ mod tests {
         let alice_device_id: u32 = 11001;
         let bob_device_id: u32 = 12001;
 
-        let pubsub = Arc::new(MockPubSub::new());
+        let pubsub = RecordingPubSub::new();
 
         // Keep alice_dir alive for the whole test so the storage survives
         let alice_dir = TempDir::new().unwrap();

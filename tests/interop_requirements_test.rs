@@ -235,6 +235,70 @@ mod req2_wire_format {
         }
         None
     }
+
+    /// Parse a hand-constructed PreKeySignalMessage byte array that was NOT
+    /// produced by our serializer.  Fields are in ascending field-number order
+    /// (our serializer outputs REGISTRATION_ID first), so this exercises the
+    /// parser's field-order independence and the 0x05-prefix stripping.
+    ///
+    /// TODO: replace with bytes captured from a live Conversations session to
+    /// prove cross-implementation compatibility.
+    #[test]
+    fn parser_accepts_hand_crafted_prekey_message() {
+        // Hand-built wire bytes.  Annotated layout:
+        //   version=0x33
+        //   F1 pre_key_id=42        08 2a
+        //   F2 base_key=[0x05,bb×32] 12 21 05 bb×32
+        //   F3 identity_key=[0x05,cc×32] 1a 21 05 cc×32
+        //   F4 inner SignalMessage (52 bytes):
+        //        version=0x33
+        //        F1 ratchet_key=[0x05,ee×32] 0a 21 05 ee×32
+        //        F2 counter=7                10 07
+        //        F4 ciphertext=[dd;4]        22 04 dd×4
+        //        MAC=[ff;8]
+        //   F5 registration_id=5678  28 ae 2c
+        //   F6 signed_pre_key_id=9   30 09
+        #[rustfmt::skip]
+        let bytes: &[u8] = &[
+            0x33,                                           // version
+            0x08, 0x2a,                                     // F1: pre_key_id=42
+            0x12, 0x21, 0x05,                               // F2: base_key tag+len+prefix
+            0xbb,0xbb,0xbb,0xbb,0xbb,0xbb,0xbb,0xbb,
+            0xbb,0xbb,0xbb,0xbb,0xbb,0xbb,0xbb,0xbb,
+            0xbb,0xbb,0xbb,0xbb,0xbb,0xbb,0xbb,0xbb,
+            0xbb,0xbb,0xbb,0xbb,0xbb,0xbb,0xbb,0xbb,
+            0x1a, 0x21, 0x05,                               // F3: identity_key tag+len+prefix
+            0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,
+            0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,
+            0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,
+            0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,
+            0x22, 0x34,                                     // F4: inner msg tag+len(52)
+              0x33,                                         //   inner version
+              0x0a, 0x21, 0x05,                             //   inner F1: ratchet_key
+              0xee,0xee,0xee,0xee,0xee,0xee,0xee,0xee,
+              0xee,0xee,0xee,0xee,0xee,0xee,0xee,0xee,
+              0xee,0xee,0xee,0xee,0xee,0xee,0xee,0xee,
+              0xee,0xee,0xee,0xee,0xee,0xee,0xee,0xee,
+              0x10, 0x07,                                   //   inner F2: counter=7
+              0x22, 0x04, 0xdd, 0xdd, 0xdd, 0xdd,          //   inner F4: ciphertext
+              0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,      //   inner MAC (not verified at parse)
+            0x28, 0xae, 0x2c,                               // F5: registration_id=5678
+            0x30, 0x09,                                     // F6: signed_pre_key_id=9
+        ];
+        assert_eq!(bytes.len(), 132, "fixture length sanity check");
+
+        let msg = PreKeySignalMessage::deserialize(bytes)
+            .expect("hand-crafted bytes must parse successfully");
+
+        assert_eq!(msg.pre_key_id,        Some(42),        "pre_key_id");
+        assert_eq!(msg.registration_id,   5678,            "registration_id");
+        assert_eq!(msg.signed_pre_key_id, 9,               "signed_pre_key_id");
+        assert_eq!(msg.base_key,          vec![0xbb; 32],  "base_key (0x05 prefix stripped)");
+        assert_eq!(msg.identity_key,      vec![0xcc; 32],  "identity_key (0x05 prefix stripped)");
+        assert_eq!(msg.message.ratchet_key, vec![0xee; 32],"inner ratchet_key");
+        assert_eq!(msg.message.counter,   7,               "inner counter");
+        assert_eq!(msg.message.ciphertext, vec![0xdd; 4],  "inner ciphertext");
+    }
 }
 
 /// Requirement 3: XEdDSA signature verification (X25519 → Ed25519)

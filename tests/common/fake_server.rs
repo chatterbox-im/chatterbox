@@ -32,14 +32,15 @@ pub struct FakeServer {
     state: Arc<Mutex<State>>,
     // Command channel into the background processor task.
     cmd_tx: mpsc::UnboundedSender<Cmd>,
+    // Shared inbound channel: each registered client forwards stanzas here.
+    inbound_tx: mpsc::UnboundedSender<(String, Element)>,
 }
 
 enum Cmd {
-    /// A new client registered with this JID.
+    /// A new client registered; the server needs to know its event_tx.
     Register {
         jid: String,
         event_tx: mpsc::UnboundedSender<XMPPEvent>,
-        stanza_rx: mpsc::UnboundedReceiver<Element>,
     },
 }
 
@@ -48,11 +49,12 @@ impl FakeServer {
     pub fn new() -> Self {
         let state = Arc::new(Mutex::new(State::default()));
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (inbound_tx, inbound_rx) = mpsc::unbounded_channel();
 
         let state_bg = state.clone();
-        tokio::spawn(run_server(state_bg, cmd_rx));
+        tokio::spawn(run_server(state_bg, cmd_rx, inbound_rx));
 
-        FakeServer { state, cmd_tx }
+        FakeServer { state, cmd_tx, inbound_tx }
     }
 
     /// Register a client JID with the server.
@@ -80,7 +82,19 @@ impl FakeServer {
         let _ = self.cmd_tx.send(Cmd::Register {
             jid: jid.to_string(),
             event_tx,
-            stanza_rx,
+        });
+
+        // Spawn a forwarding task so the server's inbound channel is the single
+        // await point — no busy-polling of individual receivers.
+        let inbound_tx = self.inbound_tx.clone();
+        let bare = bare_jid(jid);
+        tokio::spawn(async move {
+            let mut rx = stanza_rx;
+            while let Some(element) = rx.recv().await {
+                if inbound_tx.send((bare.clone(), element)).is_err() {
+                    break;
+                }
+            }
         });
 
         TransportHandle { stanza_tx, event_rx }
@@ -123,44 +137,28 @@ struct Account {
 async fn run_server(
     state: Arc<Mutex<State>>,
     mut cmd_rx: mpsc::UnboundedReceiver<Cmd>,
+    mut inbound_rx: mpsc::UnboundedReceiver<(String, Element)>,
 ) {
     let mut accounts: HashMap<String, Account> = HashMap::new();
-    // Per-client inbound channels — polled with tokio::select!
-    // We accumulate them here so we can add dynamically.
-    let mut client_rxs: Vec<(String, mpsc::UnboundedReceiver<Element>)> = Vec::new();
 
     loop {
-        // Build a dynamic select over all client receivers + the command channel.
-        // Since tokio::select! is compile-time and we have a dynamic set, we use
-        // a poll approach: check each receiver with try_recv, then yield.
-        let mut any = false;
-
-        // Process pending commands first.
-        while let Ok(cmd) = cmd_rx.try_recv() {
-            match cmd {
-                Cmd::Register { jid, event_tx, stanza_rx } => {
-                    let bare = bare_jid(&jid);
-                    accounts.insert(bare.clone(), Account { jid: bare.clone(), event_tx });
-                    client_rxs.push((bare, stanza_rx));
-                    any = true;
+        tokio::select! {
+            Some(cmd) = cmd_rx.recv() => {
+                match cmd {
+                    Cmd::Register { jid, event_tx } => {
+                        let bare = bare_jid(&jid);
+                        accounts.insert(bare.clone(), Account { jid: bare, event_tx });
+                    }
                 }
             }
-        }
-
-        // Process pending stanzas from each client.
-        for (jid, rx) in &mut client_rxs {
-            while let Ok(element) = rx.try_recv() {
+            Some((jid, element)) = inbound_rx.recv() => {
                 {
                     let mut st = state.lock().unwrap();
                     st.transcript.push((jid.clone(), element.clone()));
                 }
-                handle_stanza(&state, &accounts, jid, &element);
-                any = true;
+                handle_stanza(&state, &accounts, &jid, &element);
             }
-        }
-
-        if !any {
-            tokio::task::yield_now().await;
+            else => break,
         }
     }
 }

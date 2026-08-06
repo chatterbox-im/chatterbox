@@ -23,13 +23,19 @@ pub use crate::omemo::storage::TrustLevel;
 pub mod bundle;
 pub mod crypto;
 mod decrypt;
+#[cfg(test)]
+mod decrypt_tests;
 pub mod device_discovery;
 pub mod device_id;
 mod encrypt;
 #[cfg(test)]
 mod encrypt_decrypt_test;
+#[cfg(test)]
+mod encrypt_tests;
 pub mod keys;
 mod lifecycle;
+#[cfg(test)]
+mod lifecycle_tests;
 pub mod protocol;
 pub mod session;
 #[cfg(test)]
@@ -39,6 +45,8 @@ mod store_migrate;
 pub mod store_sqlite;
 #[cfg(test)]
 mod security_tests;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod wire;
 
 /// The OMEMO namespace used in XMPP stanzas
@@ -255,9 +263,26 @@ pub struct OmemoManager {
 
     /// PubSub operations — injected dependency instead of global access
     pub(crate) pubsub: Arc<dyn OmemoPubSub>,
+
+    /// Override for SystemTime::now() in tests; None → use real wall clock.
+    #[cfg(test)]
+    pub(crate) now_override: Option<u64>,
 }
 
 impl OmemoManager {
+    /// Current time as seconds since UNIX_EPOCH.
+    /// Overridable in tests via `now_override`.
+    pub(crate) fn now_secs(&self) -> u64 {
+        #[cfg(test)]
+        if let Some(t) = self.now_override {
+            return t;
+        }
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    }
+
     /// Create a new OMEMO manager
     pub async fn new(
         storage: OmemoStorage,
@@ -331,6 +356,8 @@ impl OmemoManager {
             recently_decrypted_ids: std::collections::VecDeque::new(),
             recently_failed_ids: std::collections::VecDeque::new(),
             pubsub,
+            #[cfg(test)]
+            now_override: None,
         };
 
         // Load the last PreKey rotation time from storage

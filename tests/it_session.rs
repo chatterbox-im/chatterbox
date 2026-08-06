@@ -25,7 +25,7 @@ async fn client_connects_via_fake_server() {
     assert_eq!(alice.get_jid(), "alice@example.com");
 }
 
-/// Two clients can connect independently.
+/// Two clients can connect independently; each ends up with the correct JID.
 #[tokio::test]
 async fn two_clients_connect_via_fake_server() {
     let server = FakeServer::new();
@@ -43,6 +43,9 @@ async fn two_clients_connect_via_fake_server() {
         .connect_with_transport(bob_handle, "bob@example.com".to_string(), "example.com")
         .await
         .expect("bob should connect");
+
+    assert_eq!(alice.get_jid(), "alice@example.com");
+    assert_eq!(bob.get_jid(), "bob@example.com");
 }
 
 // ── OMEMO initialisation ──────────────────────────────────────────────────────

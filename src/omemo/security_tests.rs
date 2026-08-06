@@ -7,18 +7,15 @@
 #[cfg(test)]
 mod tests {
     use anyhow::Result;
-    use async_trait::async_trait;
-    use base64::Engine;
-    use std::collections::HashMap;
     use std::sync::Arc;
     use tempfile::TempDir;
-    use tokio::sync::Mutex;
 
     use crate::jid::BareJid;
     use crate::omemo::device_id::DeviceId;
     use crate::omemo::protocol::{DeviceIdentity, PreKeyBundle, SignedPreKeyBundle};
     use crate::omemo::storage::{DeviceListEntry, OmemoStorage, TrustLevel};
-    use crate::omemo::{OmemoManager, OmemoPubSub, OMEMO_NAMESPACE};
+    use crate::omemo::{OmemoManager, OmemoPubSub};
+    use crate::omemo::test_support::{RecordingPubSub, make_manager};
 
     fn bjid(s: &str) -> BareJid { BareJid::parse(s).unwrap() }
 
@@ -35,81 +32,6 @@ mod tests {
             },
             pre_keys: vec![PreKeyBundle { id: 1, public_key: vec![0xCC; 32] }],
         }
-    }
-
-    // ── MockPubSub ────────────────────────────────────────────────────────────
-
-    struct MockPubSub {
-        responses: Mutex<HashMap<String, String>>,
-    }
-    impl MockPubSub {
-        fn empty() -> Arc<dyn OmemoPubSub> {
-            Arc::new(Self { responses: Mutex::new(HashMap::new()) })
-        }
-        fn with(m: HashMap<String, String>) -> Arc<dyn OmemoPubSub> {
-            Arc::new(Self { responses: Mutex::new(m) })
-        }
-        async fn add_device_list(&self, jid: &str, ids: &[u32]) {
-            let devs: String = ids.iter().map(|id| format!("<device id=\"{}\"/>", id)).collect();
-            let xml = format!(
-                "<items node=\"{ns}.devicelist\"><item>\
-                    <list xmlns=\"{ns}\">{devs}</list>\
-                </item></items>",
-                ns = OMEMO_NAMESPACE, devs = devs
-            );
-            let mut r = self.responses.lock().await;
-            for node in crate::omemo::devicelist_node_variants() {
-                r.insert(format!("{}|{}", jid, node), xml.clone());
-            }
-        }
-        async fn add_bundle(&self, jid: &str, did: u32, bundle: &crate::omemo::protocol::X3DHKeyBundle) {
-            let b64 = base64::engine::general_purpose::STANDARD;
-            let ik = b64.encode(&bundle.identity_key_pair.public_key);
-            let spk = b64.encode(&bundle.signed_pre_key_pair.public_key);
-            let sig = b64.encode(&bundle.signed_pre_key_signature);
-            let pks: String = bundle.one_time_pre_key_pairs.iter().map(|(id, kp)| {
-                format!("<preKeyPublic preKeyId=\"{}\">{}</preKeyPublic>", id, b64.encode(&kp.public_key))
-            }).collect();
-            let xml = format!(
-                "<items node=\"{ns}.bundles:{did}\"><item id=\"current\">\
-                    <bundle xmlns=\"{ns}\">\
-                        <identityKey>{ik}</identityKey>\
-                        <signedPreKeyPublic signedPreKeyId=\"{spkid}\">{spk}</signedPreKeyPublic>\
-                        <signedPreKeySignature>{sig}</signedPreKeySignature>\
-                        <prekeys>{pks}</prekeys>\
-                    </bundle>\
-                </item></items>",
-                ns = OMEMO_NAMESPACE, did = did,
-                ik = ik, spkid = bundle.signed_pre_key_id, spk = spk, sig = sig, pks = pks
-            );
-            for node in crate::omemo::bundle_node_variants(crate::omemo::device_id::DeviceId::from(did)) {
-                let key = format!("{}|{}", jid, node);
-                self.responses.lock().await.insert(key, xml.clone());
-            }
-        }
-    }
-    #[async_trait]
-    impl OmemoPubSub for MockPubSub {
-        async fn request_items(&self, jid: &str, node: &str) -> Result<String> {
-            let key = format!("{}|{}", jid, node);
-            Ok(self.responses.lock().await.get(&key).cloned()
-                .unwrap_or_else(|| "<iq type='error'><error><item-not-found/></error></iq>".to_string()))
-        }
-        async fn publish_item(&self, _: Option<&str>, _: &str, _: &str, _: &str) -> Result<()> { Ok(()) }
-        async fn publish_item_alternative(&self, _: Option<&str>, _: &str, _: &str, _: &str) -> Result<()> { Ok(()) }
-        async fn publish_device_list(&self, _: &[DeviceId]) -> Result<()> { Ok(()) }
-        async fn delete_bundle(&self, _: DeviceId) -> Result<()> { Ok(()) }
-    }
-
-    // ── Manager helper (mirrors encrypt_decrypt_test.rs) ─────────────────────
-
-    async fn make_manager(jid: &str, did: u32, ps: Arc<dyn OmemoPubSub>) -> (OmemoManager, TempDir) {
-        let dir = TempDir::new().unwrap();
-        let storage = OmemoStorage::new(Some(dir.path().to_path_buf())).unwrap();
-        let mgr = OmemoManager::new(storage, jid.to_string(), Some(did), ps)
-            .await
-            .expect("OmemoManager::new");
-        (mgr, dir)
     }
 
     // ── §2.1 Trust enforcement at storage boundary ────────────────────────────
@@ -179,7 +101,7 @@ mod tests {
         let carol_did_a = 3001u32; // default Undecided = trusted per BTBV
         let carol_did_b = 3002u32; // explicitly Untrusted
 
-        let ps = Arc::new(MockPubSub { responses: Mutex::new(HashMap::new()) });
+        let ps = RecordingPubSub::new();
         let (mut alice, _adir)  = make_manager(alice_jid, alice_did,  ps.clone()).await;
         let (carol_a, _cadir)   = make_manager(carol_jid, carol_did_a, ps.clone()).await;
         let (carol_b, _cbdir)   = make_manager(carol_jid, carol_did_b, ps.clone()).await;
@@ -220,7 +142,7 @@ mod tests {
         let carol_did_a = 3003u32; // default Undecided = trusted
         let carol_did_b = 3004u32; // trust row will be corrupted
 
-        let ps = Arc::new(MockPubSub { responses: Mutex::new(HashMap::new()) });
+        let ps = RecordingPubSub::new();
         let (mut alice, adir)  = make_manager(alice_jid, alice_did,   ps.clone()).await;
         let (carol_a, _cadir)  = make_manager(carol_jid, carol_did_a, ps.clone()).await;
         let (carol_b, _cbdir)  = make_manager(carol_jid, carol_did_b, ps.clone()).await;
@@ -395,7 +317,7 @@ mod tests {
         let alice_did = DeviceId::from(9001u32);
         let bob_did   = DeviceId::from(9002u32);
 
-        let ps = Arc::new(MockPubSub { responses: Mutex::new(HashMap::new()) });
+        let ps = RecordingPubSub::new();
 
         let (mut alice, _adir) = make_manager(alice_jid, alice_did.get(), ps.clone()).await;
         let (mut bob,   _bdir) = make_manager(bob_jid,   bob_did.get(),   ps.clone()).await;
