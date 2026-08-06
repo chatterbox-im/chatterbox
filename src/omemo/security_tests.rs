@@ -376,4 +376,46 @@ mod tests {
         // Only Undecided → no verified device.
         assert!(!storage.has_verified_device(&jid).unwrap());
     }
+
+    // ── §5 Replay rejection ───────────────────────────────────────────────────
+
+    /// Replaying msg1 to bob after msg2 was sent must:
+    ///   (a) be rejected (returns Err),
+    ///   (b) not mutate ratchet state — msg2 must still decrypt.
+    #[tokio::test]
+    async fn replayed_message_rejected_and_ratchet_state_unchanged() -> Result<()> {
+        let alice_jid = "alice@example.com";
+        let bob_jid   = "bob@example.com";
+        let alice_did = DeviceId::from(9001u32);
+        let bob_did   = DeviceId::from(9002u32);
+
+        let ps = Arc::new(MockPubSub { responses: Mutex::new(HashMap::new()) });
+
+        let (mut alice, _adir) = make_manager(alice_jid, alice_did.get(), ps.clone()).await;
+        let (mut bob,   _bdir) = make_manager(bob_jid,   bob_did.get(),   ps.clone()).await;
+
+        ps.add_device_list(alice_jid, &[alice_did.get()]).await;
+        ps.add_device_list(bob_jid,   &[bob_did.get()]).await;
+        ps.add_bundle(alice_jid, alice_did.get(), alice.key_bundle.as_ref().unwrap()).await;
+        ps.add_bundle(bob_jid,   bob_did.get(),   bob.key_bundle.as_ref().unwrap()).await;
+
+        // Alice sends msg1 → bob decrypts it.
+        let msg1 = alice.encrypt_message(bob_jid, "one").await?;
+        let dec1 = bob.decrypt_message(alice_jid, alice_did, &msg1).await?;
+        assert_eq!(dec1, "one");
+
+        // Alice sends msg2.
+        let msg2 = alice.encrypt_message(bob_jid, "two").await?;
+
+        // Replay of msg1 must be rejected.
+        let replay = bob.decrypt_message(alice_jid, alice_did, &msg1).await;
+        assert!(replay.is_err(), "replayed message must be rejected, got: {:?}", replay);
+
+        // Ratchet state must be intact: msg2 must decrypt correctly.
+        let dec2 = bob.decrypt_message(alice_jid, alice_did, &msg2).await
+            .expect("msg2 must decrypt after replay rejection");
+        assert_eq!(dec2, "two", "msg2 content must survive replay");
+
+        Ok(())
+    }
 }

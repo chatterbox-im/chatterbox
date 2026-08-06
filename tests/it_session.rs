@@ -131,3 +131,63 @@ async fn alice_sends_omemo_message_bob_decrypts() {
 
     assert_eq!(decrypted.content, "hello bob");
 }
+
+/// The OMEMO session persists across alice's disconnect and reconnect.
+/// After reconnecting (from the same storage), alice can still send to bob.
+#[tokio::test]
+async fn session_survives_alice_restart() {
+    use tempfile::TempDir;
+    use tokio::time::{timeout, Duration};
+
+    let server = FakeServer::new();
+    let bob_handle = server.register("bob@example.com");
+
+    let alice_dir = TempDir::new().unwrap();
+    let bob_dir = TempDir::new().unwrap();
+
+    // Bob connects and stays connected for the whole test.
+    let (mut bob, mut bob_msgs) = XMPPClient::new();
+    bob.omemo_dir = Some(bob_dir.path().to_path_buf());
+    bob.connect_with_transport(bob_handle, "bob@example.com".to_string(), "example.com").await.unwrap();
+    bob.initialize_client().await.unwrap();
+
+    // Alice's first connection — establish session.
+    {
+        let alice_handle1 = server.register("alice@example.com");
+        let (mut alice, _) = XMPPClient::new();
+        alice.omemo_dir = Some(alice_dir.path().to_path_buf());
+        alice.connect_with_transport(alice_handle1, "alice@example.com".to_string(), "example.com").await.unwrap();
+        alice.initialize_client().await.unwrap();
+
+        alice.send_encrypted_message("bob@example.com", "before restart").await.unwrap();
+    }
+    // alice is dropped here (connection closed).
+
+    // Bob receives "before restart".
+    let msg1 = timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(chatterbox::models::AppEvent::Chat(m)) = bob_msgs.recv().await {
+                if m.content == "before restart" { return m; }
+            }
+        }
+    }).await.expect("message before restart");
+    assert_eq!(msg1.content, "before restart");
+
+    // Alice's second connection — same storage dir.
+    let alice_handle2 = server.register("alice@example.com");
+    let (mut alice2, _) = XMPPClient::new();
+    alice2.omemo_dir = Some(alice_dir.path().to_path_buf());
+    alice2.connect_with_transport(alice_handle2, "alice@example.com".to_string(), "example.com").await.unwrap();
+    alice2.initialize_client().await.unwrap();
+
+    alice2.send_encrypted_message("bob@example.com", "after restart").await.unwrap();
+
+    let msg2 = timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(chatterbox::models::AppEvent::Chat(m)) = bob_msgs.recv().await {
+                if m.content == "after restart" { return m; }
+            }
+        }
+    }).await.expect("message after restart");
+    assert_eq!(msg2.content, "after restart");
+}

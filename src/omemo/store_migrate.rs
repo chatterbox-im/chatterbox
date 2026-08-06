@@ -490,4 +490,37 @@ mod tests {
         assert!(!looks_like_jid("no-at-sign"));
         assert!(!looks_like_jid("a@b@c.com"));
     }
+
+    #[test]
+    fn legacy_store_absent_when_no_directories_exist() {
+        let dir = tempfile::TempDir::new().unwrap();
+        assert!(!legacy_store_present(dir.path()));
+    }
+
+    #[test]
+    fn legacy_store_detected_when_sessions_dir_present() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("sessions")).unwrap();
+        assert!(legacy_store_present(dir.path()));
+    }
+
+    #[test]
+    fn import_empty_legacy_tree_succeeds() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // Create an empty sessions dir — present but no session files.
+        std::fs::create_dir_all(dir.path().join("sessions")).unwrap();
+        let store = SqliteStore::open_in_memory().unwrap();
+        import_legacy_store(dir.path(), &store).expect("import of empty tree must succeed");
+    }
+
+    #[test]
+    fn import_is_idempotent_on_empty_tree() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("sessions")).unwrap();
+        let store = SqliteStore::open_in_memory().unwrap();
+        import_legacy_store(dir.path(), &store).unwrap();
+        // Second import must not fail (legacy dir is renamed aside after first import).
+        // legacy_store_present should return false now.
+        assert!(!legacy_store_present(dir.path()), "legacy dirs must be renamed aside after import");
+    }
 }
