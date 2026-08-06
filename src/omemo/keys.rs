@@ -179,3 +179,16 @@ impl<'a, const N: usize> From<&'a Secret<N>> for Ikm<'a> {
         Ikm(s.expose_secret())
     }
 }
+
+// ── PreKey ID newtypes ───────────────────────────────────────────────────────
+// Each ID type is distinct so `encrypt_key_prekey(msg, registration_id,
+// opk_id, spk_id, ...)` cannot have its u32 arguments silently transposed.
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct RegistrationId(pub u32);
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct SignedPreKeyId(pub u32);
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct OneTimePreKeyId(pub u32);

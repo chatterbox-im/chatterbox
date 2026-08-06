@@ -43,6 +43,20 @@ use std::sync::Mutex;
 use crate::omemo::device_id::DeviceId;
 use crate::omemo::protocol::{DeviceIdentity, RatchetState, X3DHKeyBundle};
 
+impl rusqlite::types::ToSql for DeviceId {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        Ok(rusqlite::types::ToSqlOutput::Owned(
+            rusqlite::types::Value::Integer(self.get() as i64),
+        ))
+    }
+}
+
+impl rusqlite::types::FromSql for DeviceId {
+    fn column_result(v: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        i64::column_result(v).map(|n| DeviceId::from(n as u32))
+    }
+}
+
 /// Current schema version. Bump when adding a migration step in [`migrate`].
 const SCHEMA_VERSION: i64 = 1;
 
@@ -858,7 +872,7 @@ mod tests {
             prev_receive_message_number: 2,
             prev_send_message_number: 1,
             skipped_message_keys: Default::default(),
-            local_device_id: 1,
+            local_device_id: DeviceId::from(1),
             remote_device_id: device_id,
             remote_jid: jid.to_string(),
             establishing_base_key: Some(vec![9u8; 32]),
@@ -893,7 +907,7 @@ mod tests {
             "josé@example.com",
             "中@example.com",
         ] {
-            s.save_session(jid, 42, &state(jid, 42)).unwrap();
+            s.save_session(jid, DeviceId::from(42), &state(jid, DeviceId::from(42))).unwrap();
         }
         let all = s.load_all_sessions().unwrap();
         assert_eq!(all.len(), 6);
@@ -907,14 +921,14 @@ mod tests {
     #[test]
     fn non_ascii_jids_do_not_collide() {
         let s = SqliteStore::open_in_memory().unwrap();
-        s.save_session("中@a.com", 1, &state("中@a.com", 1)).unwrap();
-        s.save_session("ح@a.com", 1, &state("ح@a.com", 1)).unwrap();
+        s.save_session("中@a.com", DeviceId::from(1), &state("中@a.com", DeviceId::from(1))).unwrap();
+        s.save_session("ح@a.com", DeviceId::from(1), &state("ح@a.com", DeviceId::from(1))).unwrap();
         assert_eq!(s.load_all_sessions().unwrap().len(), 2);
     }
 
     #[test]
     fn blob_header_is_versioned_and_rejects_bare_bincode() {
-        let st = state("a@b.com", 7);
+        let st = state("a@b.com", DeviceId::from(7));
         let blob = encode_blob(&st).unwrap();
         assert_eq!(u16::from_le_bytes([blob[0], blob[1]]), BLOB_MAGIC);
         let back: RatchetState = decode_blob(&blob).unwrap();
@@ -928,31 +942,31 @@ mod tests {
     #[test]
     fn prekey_consumption_is_atomic() {
         let s = SqliteStore::open_in_memory().unwrap();
-        let mut b = bundle(1);
+        let mut b = bundle(DeviceId::from(1));
         s.store_key_bundle(&b).unwrap();
 
         b.one_time_pre_key_pairs.remove(&1);
-        s.commit_prekey_consumption("peer@x.com", 9, &state("peer@x.com", 9), &b)
+        s.commit_prekey_consumption("peer@x.com", DeviceId::from(9), &state("peer@x.com", DeviceId::from(9)), &b)
             .unwrap();
 
-        let loaded_bundle = s.load_key_bundle(1).unwrap().unwrap();
+        let loaded_bundle = s.load_key_bundle(DeviceId::from(1)).unwrap().unwrap();
         assert!(!loaded_bundle.one_time_pre_key_pairs.contains_key(&1));
-        assert!(s.load_session("peer@x.com", 9).unwrap().is_some());
+        assert!(s.load_session("peer@x.com", DeviceId::from(9)).unwrap().is_some());
     }
 
     #[test]
     fn device_meta_flags_persist_independently() {
         let s = SqliteStore::open_in_memory().unwrap();
-        s.set_rebuild_needed("a@b.com", 1, true).unwrap();
-        s.set_prekey_pending("a@b.com", 2, Some(1234)).unwrap();
-        s.record_undecryptable("a@b.com", 1, 999).unwrap();
-        s.record_undecryptable("a@b.com", 1, 1000).unwrap();
+        s.set_rebuild_needed("a@b.com", DeviceId::from(1), true).unwrap();
+        s.set_prekey_pending("a@b.com", DeviceId::from(2), Some(1234)).unwrap();
+        s.record_undecryptable("a@b.com", DeviceId::from(1), 999).unwrap();
+        s.record_undecryptable("a@b.com", DeviceId::from(1), 1000).unwrap();
 
-        assert_eq!(s.get_failure_count("a@b.com", 1).unwrap(), 2);
-        assert_eq!(s.all_rebuild_pending().unwrap(), vec![("a@b.com".into(), 1)]);
-        assert_eq!(s.all_prekey_pending().unwrap(), vec![("a@b.com".into(), 2)]);
+        assert_eq!(s.get_failure_count("a@b.com", DeviceId::from(1)).unwrap(), 2);
+        assert_eq!(s.all_rebuild_pending().unwrap(), vec![("a@b.com".into(), DeviceId::from(1))]);
+        assert_eq!(s.all_prekey_pending().unwrap(), vec![("a@b.com".into(), DeviceId::from(2))]);
 
-        s.set_rebuild_needed("a@b.com", 1, false).unwrap();
+        s.set_rebuild_needed("a@b.com", DeviceId::from(1), false).unwrap();
         assert!(s.all_rebuild_pending().unwrap().is_empty());
     }
 

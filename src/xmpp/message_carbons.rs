@@ -6,6 +6,7 @@ use log::{debug, error, info, warn};
 
 use super::custom_ns;
 use crate::models::{DeliveryStatus, Message};
+use crate::omemo::device_id::DeviceId;
 use base64::Engine;
 use xmpp_parsers::minidom::Element;
 
@@ -301,7 +302,7 @@ impl super::XMPPClient {
         );
 
         // Extract encrypted keys
-        let mut encrypted_keys = std::collections::HashMap::new();
+        let mut encrypted_keys: std::collections::HashMap<DeviceId, Vec<u8>> = std::collections::HashMap::new();
 
         for key_elem in header.children().filter(|n| n.name() == "key") {
             if let Some(rid_str) = key_elem.attr("rid") {
@@ -311,7 +312,7 @@ impl super::XMPPClient {
                         match base64::engine::general_purpose::STANDARD.decode(key_base64) {
                             Ok(key_bytes) => {
                                 debug!("Found encrypted key for device ID: {}", recipient_id);
-                                encrypted_keys.insert(recipient_id, key_bytes);
+                                encrypted_keys.insert(DeviceId::from(recipient_id), key_bytes);
                             }
                             Err(e) => {
                                 debug!("Failed to decode key for device {}: {}", rid_str, e);
@@ -328,7 +329,7 @@ impl super::XMPPClient {
         }
 
         // If the sender device is our own device, this is a sent carbon echo — skip decryption
-        if sender_device_id == own_device_id {
+        if DeviceId::from(sender_device_id) == own_device_id {
             debug!(
                 "Skipping decryption of our own sent carbon (device {})",
                 sender_device_id
@@ -461,7 +462,7 @@ impl super::XMPPClient {
 
             // Create an OMEMO message structure with the parts we extracted
             let omemo_message = crate::omemo::protocol::OmemoMessage {
-                sender_device_id,
+                sender_device_id: DeviceId::from(sender_device_id),
                 ratchet_key: vec![], // This will be handled by the session
                 previous_counter: 0, // This will be handled by the session
                 counter: 0,          // This will be handled by the session
@@ -476,7 +477,7 @@ impl super::XMPPClient {
 
             // Try to decrypt the message
             match manager
-                .decrypt_message(&sender_jid, sender_device_id, &omemo_message)
+                .decrypt_message(&sender_jid, DeviceId::from(sender_device_id), &omemo_message)
                 .await
             {
                 Ok(content) => {

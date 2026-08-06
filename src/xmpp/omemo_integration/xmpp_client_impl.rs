@@ -572,7 +572,7 @@ impl crate::xmpp::XMPPClient {
     pub async fn get_own_device_id(&self) -> Result<u32> {
         if let Some(omemo_manager) = &self.omemo_manager {
             let manager = omemo_manager.lock().await;
-            Ok(manager.get_device_id())
+            Ok(manager.get_device_id().get())
         } else {
             Err(anyhow!("OMEMO manager not initialized"))
         }
@@ -686,7 +686,7 @@ impl crate::xmpp::XMPPClient {
 
     /// Request a bundle from a contact
     pub async fn request_bundle(&self, jid: &str, device_id: u32) -> Result<()> {
-        self.request_omemo_bundle(jid, device_id).await
+        self.request_omemo_bundle(jid, DeviceId::from(device_id)).await
     }
 
     /// Rotate OMEMO keys

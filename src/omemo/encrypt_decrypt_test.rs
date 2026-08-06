@@ -258,14 +258,14 @@ mod tests {
             "First message should be a PreKey message"
         );
         assert!(
-            omemo_msg.prekey_devices.contains(&bob_device_id),
+            omemo_msg.prekey_devices.contains(&DeviceId::from(bob_device_id)),
             "Bob's device should be in prekey_devices set"
         );
 
         // Verify: the encrypted key for Bob's device is a valid PreKeySignalMessage
         let encrypted_key = omemo_msg
             .encrypted_keys
-            .get(&bob_device_id)
+            .get(&DeviceId::from(bob_device_id))
             .expect("Should have encrypted key for Bob's device");
 
         let prekey_msg = PreKeySignalMessage::deserialize(encrypted_key)
@@ -346,7 +346,7 @@ mod tests {
             storage
                 .save_device_list(&DeviceListEntry {
                     jid: alice_jid.to_string(),
-                    device_ids: vec![alice_device_id, alice_second_device_id],
+                    device_ids: vec![DeviceId::from(alice_device_id), DeviceId::from(alice_second_device_id)],
                     last_update: chrono::Utc::now().timestamp(),
                 })
                 .expect("cached own device list should be saved");
@@ -358,17 +358,17 @@ mod tests {
             .expect("Encryption should succeed");
 
         assert!(
-            omemo_msg.encrypted_keys.contains_key(&bob_device_id),
+            omemo_msg.encrypted_keys.contains_key(&DeviceId::from(bob_device_id)),
             "Recipient device should receive a message key"
         );
         assert!(
             omemo_msg
                 .encrypted_keys
-                .contains_key(&alice_second_device_id),
+                .contains_key(&DeviceId::from(alice_second_device_id)),
             "Second owned device should receive a message key for sent carbons"
         );
         assert!(
-            !omemo_msg.encrypted_keys.contains_key(&alice_device_id),
+            !omemo_msg.encrypted_keys.contains_key(&DeviceId::from(alice_device_id)),
             "Current sender device should not receive its own message key"
         );
     }
@@ -415,7 +415,7 @@ mod tests {
 
         // Bob decrypts
         let decrypted = bob
-            .decrypt_message(alice_jid, alice_device_id, &omemo_msg)
+            .decrypt_message(alice_jid, DeviceId::from(alice_device_id), &omemo_msg)
             .await
             .expect("Decryption should succeed");
 
@@ -463,14 +463,14 @@ mod tests {
             "Second message should NOT be PreKey format"
         );
         assert!(
-            !msg2.prekey_devices.contains(&bob_device_id),
+            !msg2.prekey_devices.contains(&DeviceId::from(bob_device_id)),
             "Bob's device should not be in prekey_devices for second message"
         );
 
         // Verify the encrypted key is NOT a PreKeySignalMessage (just a regular SignalMessage)
         let encrypted_key = msg2
             .encrypted_keys
-            .get(&bob_device_id)
+            .get(&DeviceId::from(bob_device_id))
             .expect("Should have encrypted key for Bob's device");
         let prekey_parse = PreKeySignalMessage::deserialize(encrypted_key);
         assert!(
@@ -524,7 +524,7 @@ mod tests {
             .encrypt_message(bob_jid, "first message")
             .await
             .expect("first encryption should succeed");
-        bob.decrypt_message(alice_jid, alice_device_id, &msg1)
+        bob.decrypt_message(alice_jid, DeviceId::from(alice_device_id), &msg1)
             .await
             .expect("first decryption should succeed");
 
@@ -532,7 +532,7 @@ mod tests {
         // (simulating a fresh connect where she has a stale cached bundle) so
         // that her next PreKey will reference the same (already-consumed) OPK.
         alice.sessions.insert(
-            (bjid(bob_jid), bob_device_id),
+            (bjid(bob_jid), DeviceId::from(bob_device_id)),
             OmemoSessionState::PeerResetPending,
         );
 
@@ -544,7 +544,7 @@ mod tests {
             .expect("bob→alice encryption should succeed");
         assert!(
             bob.sessions
-                .contains_key(&(bjid(alice_jid), alice_device_id)),
+                .contains_key(&(bjid(alice_jid), DeviceId::from(alice_device_id))),
             "Bob should have a session for Alice before the stale-OPK event"
         );
 
@@ -556,7 +556,7 @@ mod tests {
 
         // Bob tries to decrypt — must hit the stale-OPK path.
         let err = bob
-            .decrypt_message(alice_jid, alice_device_id, &msg2_stale)
+            .decrypt_message(alice_jid, DeviceId::from(alice_device_id), &msg2_stale)
             .await
             .expect_err("stale-OPK PreKey must fail");
 
@@ -571,7 +571,7 @@ mod tests {
         // (the active session has been replaced with the rebuild marker).
         assert!(
             matches!(
-                bob.sessions.get(&(bjid(alice_jid), alice_device_id)),
+                bob.sessions.get(&(bjid(alice_jid), DeviceId::from(alice_device_id))),
                 Some(OmemoSessionState::PeerResetPending)
             ),
             "Bob's session for Alice must be PeerResetPending after stale-OPK rejection"
@@ -580,7 +580,7 @@ mod tests {
         // Invariant 2: Bob must have flagged Alice for a session rebuild.
         assert!(
             matches!(
-                bob.sessions.get(&(bjid(alice_jid), alice_device_id)),
+                bob.sessions.get(&(bjid(alice_jid), DeviceId::from(alice_device_id))),
                 Some(OmemoSessionState::PeerResetPending)
             ),
             "Bob must set PeerResetPending for Alice after stale-OPK rejection"
@@ -632,19 +632,19 @@ mod tests {
             .encrypt_message(bob_jid, "initial message")
             .await
             .unwrap();
-        bob.decrypt_message(alice_jid, alice_device_id, &msg1)
+        bob.decrypt_message(alice_jid, DeviceId::from(alice_device_id), &msg1)
             .await
             .unwrap();
 
         // Force Alice to rebuild (stale cached bundle scenario).
         alice.sessions.insert(
-            (bjid(bob_jid), bob_device_id),
+            (bjid(bob_jid), DeviceId::from(bob_device_id)),
             crate::omemo::session::OmemoSessionState::PeerResetPending,
         );
 
         // Alice sends second PreKey (referencing consumed OPK) — Bob rejects.
         let stale_msg = alice.encrypt_message(bob_jid, "stale").await.unwrap();
-        bob.decrypt_message(alice_jid, alice_device_id, &stale_msg)
+        bob.decrypt_message(alice_jid, DeviceId::from(alice_device_id), &stale_msg)
             .await
             .expect_err("stale OPK must be rejected");
 
@@ -662,7 +662,7 @@ mod tests {
 
         // Alice decrypts Bob's recovery PreKey and establishes Session B.
         let dec = alice
-            .decrypt_message(bob_jid, bob_device_id, &bob_recovery_msg)
+            .decrypt_message(bob_jid, DeviceId::from(bob_device_id), &bob_recovery_msg)
             .await
             .expect("Alice must decrypt Bob's recovery PreKey");
         assert_eq!(dec, "recovery message from Bob");
@@ -673,7 +673,7 @@ mod tests {
             .await
             .expect("post-recovery encryption by Alice should succeed");
         let dec2 = bob
-            .decrypt_message(alice_jid, alice_device_id, &alice_followup)
+            .decrypt_message(alice_jid, DeviceId::from(alice_device_id), &alice_followup)
             .await
             .expect("Bob must decrypt Alice's post-recovery message");
         assert_eq!(dec2, "post-recovery from Alice");
@@ -712,13 +712,13 @@ mod tests {
 
         // Establish a valid session so Bob has one in memory.
         let msg = alice.encrypt_message(bob_jid, "seed").await.unwrap();
-        bob.decrypt_message(alice_jid, alice_device_id, &msg)
+        bob.decrypt_message(alice_jid, DeviceId::from(alice_device_id), &msg)
             .await
             .unwrap();
 
         assert!(
             bob.sessions
-                .contains_key(&(bjid(alice_jid), alice_device_id)),
+                .contains_key(&(bjid(alice_jid), DeviceId::from(alice_device_id))),
             "session must exist before failure simulation"
         );
 
@@ -743,7 +743,7 @@ mod tests {
         // After 3 failures the session must be wiped from Bob's in-memory map.
         assert!(
             !bob.sessions
-                .contains_key(&(bjid(alice_jid), alice_device_id)),
+                .contains_key(&(bjid(alice_jid), DeviceId::from(alice_device_id))),
             "session must be deleted from memory after 3 failures"
         );
 
@@ -789,7 +789,7 @@ mod tests {
 
         // Establish a session
         let msg = alice.encrypt_message(bob_jid, "seed").await.unwrap();
-        bob.decrypt_message(alice_jid, alice_device_id, &msg)
+        bob.decrypt_message(alice_jid, DeviceId::from(alice_device_id), &msg)
             .await
             .unwrap();
 
@@ -812,12 +812,12 @@ mod tests {
         // After an AEAD failure the session must be in RecoveryPreKeySent, NOT absent.
         assert!(
             matches!(
-                bob.sessions.get(&(bjid(alice_jid), alice_device_id)),
+                bob.sessions.get(&(bjid(alice_jid), DeviceId::from(alice_device_id))),
                 Some(OmemoSessionState::RecoveryPreKeySent { .. })
             ),
             "session must be RecoveryPreKeySent after AEAD failure, got: {:?}",
             bob.sessions
-                .get(&(bjid(alice_jid), alice_device_id))
+                .get(&(bjid(alice_jid), DeviceId::from(alice_device_id)))
                 .map(|s| std::mem::discriminant(s))
         );
     }
@@ -862,7 +862,7 @@ mod tests {
         // Bob receives the PreKeySignalMessage.  When Bob verifies Alice's bundle
         // SPK signature, it must be rejected — no session should be established.
         let err = bob
-            .decrypt_message(alice_jid, alice_device_id, &msg)
+            .decrypt_message(alice_jid, DeviceId::from(alice_device_id), &msg)
             .await
             .expect_err("invalid SPK signature must cause decryption to fail");
 
@@ -878,7 +878,7 @@ mod tests {
         // No Active session must have been persisted for Alice.
         assert!(
             !matches!(
-                bob.sessions.get(&(bjid(alice_jid), alice_device_id)),
+                bob.sessions.get(&(bjid(alice_jid), DeviceId::from(alice_device_id))),
                 Some(OmemoSessionState::Active(_))
             ),
             "no Active session must exist after SPK signature rejection"
@@ -915,7 +915,7 @@ mod tests {
             .await;
 
         let seed = alice.encrypt_message(bob_jid, "seed").await.unwrap();
-        bob.decrypt_message(alice_jid, alice_device_id, &seed)
+        bob.decrypt_message(alice_jid, DeviceId::from(alice_device_id), &seed)
             .await
             .unwrap();
 
@@ -931,7 +931,7 @@ mod tests {
         bob.handle_decryption_failure(alice_jid.to_string(), alice_device_id, aead_err())
             .await
             .ok();
-        let attempt_1 = match bob.sessions.get(&(bjid(alice_jid), alice_device_id)) {
+        let attempt_1 = match bob.sessions.get(&(bjid(alice_jid), DeviceId::from(alice_device_id))) {
             Some(OmemoSessionState::RecoveryPreKeySent { attempt }) => *attempt,
             other => panic!(
                 "expected RecoveryPreKeySent, got {:?}",
@@ -943,7 +943,7 @@ mod tests {
         bob.handle_decryption_failure(alice_jid.to_string(), alice_device_id, aead_err())
             .await
             .ok();
-        let attempt_2 = match bob.sessions.get(&(bjid(alice_jid), alice_device_id)) {
+        let attempt_2 = match bob.sessions.get(&(bjid(alice_jid), DeviceId::from(alice_device_id))) {
             Some(OmemoSessionState::RecoveryPreKeySent { attempt }) => *attempt,
             other => panic!(
                 "expected RecoveryPreKeySent, got {:?}",
@@ -991,7 +991,7 @@ mod tests {
 
         // Establish a valid session first
         let seed = alice.encrypt_message(bob_jid, "seed").await.unwrap();
-        bob.decrypt_message(alice_jid, alice_device_id, &seed)
+        bob.decrypt_message(alice_jid, DeviceId::from(alice_device_id), &seed)
             .await
             .unwrap();
 
@@ -1010,7 +1010,7 @@ mod tests {
 
         assert!(
             matches!(
-                bob.sessions.get(&(bjid(alice_jid), alice_device_id)),
+                bob.sessions.get(&(bjid(alice_jid), DeviceId::from(alice_device_id))),
                 Some(OmemoSessionState::RecoveryPreKeySent { .. })
             ),
             "session must be RecoveryPreKeySent before recovery send"
@@ -1031,7 +1031,7 @@ mod tests {
         // After sending, RecoveryPreKeySent transitions to InitiatorAwaitingReply
         assert!(
             matches!(
-                bob.sessions.get(&(bjid(alice_jid), alice_device_id)),
+                bob.sessions.get(&(bjid(alice_jid), DeviceId::from(alice_device_id))),
                 Some(OmemoSessionState::InitiatorAwaitingReply { .. })
             ),
             "session must be InitiatorAwaitingReply after recovery PreKey is sent"
@@ -1039,7 +1039,7 @@ mod tests {
 
         // Alice decrypts the recovery PreKey — session established
         let dec = alice
-            .decrypt_message(bob_jid, bob_device_id, &recovery_msg)
+            .decrypt_message(bob_jid, DeviceId::from(bob_device_id), &recovery_msg)
             .await
             .expect("Alice must decrypt Bob's recovery PreKey");
         assert_eq!(dec, "recovery from Bob");
@@ -1050,7 +1050,7 @@ mod tests {
             .await
             .expect("post-recovery encrypt must succeed");
         let dec2 = bob
-            .decrypt_message(alice_jid, alice_device_id, &post)
+            .decrypt_message(alice_jid, DeviceId::from(alice_device_id), &post)
             .await
             .expect("Bob must decrypt Alice's post-recovery message");
         assert_eq!(dec2, "post-recovery from Alice");
@@ -1097,7 +1097,7 @@ mod tests {
             .await
             .expect("first encrypt should succeed");
         let base_key_1 =
-            PreKeySignalMessage::deserialize(msg1.encrypted_keys.get(&bob_device_id).unwrap())
+            PreKeySignalMessage::deserialize(msg1.encrypted_keys.get(&DeviceId::from(bob_device_id)).unwrap())
                 .expect("should be PreKeySignalMessage")
                 .base_key
                 .clone();
@@ -1107,7 +1107,7 @@ mod tests {
             ref mut sent_at, ..
         }) = alice
             .sessions
-            .get_mut(&(bjid(bob_jid), bob_device_id))
+            .get_mut(&(bjid(bob_jid), DeviceId::from(bob_device_id)))
         {
             *sent_at = std::time::Instant::now() - std::time::Duration::from_secs(25 * 3600);
         } else {
@@ -1122,7 +1122,7 @@ mod tests {
 
         assert!(msg2.is_prekey, "message after timeout must be a PreKey");
         let base_key_2 =
-            PreKeySignalMessage::deserialize(msg2.encrypted_keys.get(&bob_device_id).unwrap())
+            PreKeySignalMessage::deserialize(msg2.encrypted_keys.get(&DeviceId::from(bob_device_id)).unwrap())
                 .expect("should be PreKeySignalMessage")
                 .base_key
                 .clone();
@@ -1164,7 +1164,7 @@ mod tests {
             .await;
 
         let seed = alice.encrypt_message(bob_jid, "seed").await.unwrap();
-        bob.decrypt_message(alice_jid, alice_device_id, &seed)
+        bob.decrypt_message(alice_jid, DeviceId::from(alice_device_id), &seed)
             .await
             .unwrap();
 
@@ -1183,7 +1183,7 @@ mod tests {
                 .ok();
         }
 
-        let attempt = match bob.sessions.get(&(bjid(alice_jid), alice_device_id)) {
+        let attempt = match bob.sessions.get(&(bjid(alice_jid), DeviceId::from(alice_device_id))) {
             Some(OmemoSessionState::RecoveryPreKeySent { attempt }) => *attempt,
             other => panic!(
                 "session should still be RecoveryPreKeySent, got: {:?}",
@@ -1232,7 +1232,7 @@ mod tests {
 
         let ratchet_state = alice
             .sessions
-            .get(&(bjid(bob_jid), bob_device_id))
+            .get(&(bjid(bob_jid), DeviceId::from(bob_device_id)))
             .and_then(|s| s.as_session())
             .expect("session must exist after first encrypt")
             .ratchet_state
@@ -1244,10 +1244,10 @@ mod tests {
             "ratchet_state must be initialized"
         );
         assert_eq!(ratchet_state.remote_jid, bob_jid);
-        assert_eq!(ratchet_state.remote_device_id, bob_device_id);
+        assert_eq!(ratchet_state.remote_device_id, DeviceId::from(bob_device_id));
 
         // from_state must produce a correctly wired, initialized session
-        let session = OmemoSession::from_state(alice_device_id, ratchet_state);
+        let session = OmemoSession::from_state(DeviceId::from(alice_device_id), ratchet_state);
 
         assert!(
             session.is_initialized(),
@@ -1258,11 +1258,11 @@ mod tests {
             "JID must come from RatchetState"
         );
         assert_eq!(
-            session.remote_device_id, bob_device_id,
+            session.remote_device_id, DeviceId::from(bob_device_id),
             "device_id must come from RatchetState"
         );
         assert_eq!(
-            session.local_device_id, alice_device_id,
+            session.local_device_id, DeviceId::from(alice_device_id),
             "local_device_id must be the provided argument"
         );
     }
@@ -1309,7 +1309,7 @@ mod tests {
         // Verify it really is a PreKey message for Bob's device
         let raw_key = omemo_msg
             .encrypted_keys
-            .get(&bob_device_id)
+            .get(&DeviceId::from(bob_device_id))
             .expect("key for Bob's device must exist");
         let prekey_msg =
             PreKeySignalMessage::deserialize(raw_key).expect("should parse as PreKeySignalMessage");
@@ -1350,7 +1350,7 @@ mod tests {
         // Bob (now on SPK id 2, with SPK id 1 in history) should still decrypt
         // the PreKey message that Alice built against SPK id 1.
         let decrypted = bob
-            .decrypt_message(alice_jid, alice_device_id, &omemo_msg)
+            .decrypt_message(alice_jid, DeviceId::from(alice_device_id), &omemo_msg)
             .await
             .expect("decryption with historic SPK should succeed");
 
@@ -1396,7 +1396,7 @@ mod tests {
         // Pull out the raw key bytes and parse them
         let raw_key = omemo_msg
             .encrypted_keys
-            .get(&bob_device_id)
+            .get(&DeviceId::from(bob_device_id))
             .unwrap()
             .clone();
         let mut parsed = PreKeySignalMessage::deserialize(&raw_key)
@@ -1411,10 +1411,10 @@ mod tests {
         let mut tampered_msg = omemo_msg.clone();
         tampered_msg
             .encrypted_keys
-            .insert(bob_device_id, tampered_key);
+            .insert(DeviceId::from(bob_device_id), tampered_key);
 
         let err = bob
-            .decrypt_message(alice_jid, alice_device_id, &tampered_msg)
+            .decrypt_message(alice_jid, DeviceId::from(alice_device_id), &tampered_msg)
             .await
             .expect_err("decryption with unknown SPK must fail");
 
@@ -1517,7 +1517,7 @@ mod tests {
             .expect("msg1 encryption should succeed");
 
         let dec1 = bob
-            .decrypt_message(alice_jid, alice_device_id, &msg1)
+            .decrypt_message(alice_jid, DeviceId::from(alice_device_id), &msg1)
             .await
             .expect("msg1 decryption should succeed");
         assert_eq!(dec1, "msg1");
@@ -1542,7 +1542,7 @@ mod tests {
             .expect("msg2 encryption should succeed after restart");
 
         let dec2 = bob
-            .decrypt_message(alice_jid, alice_device_id, &msg2)
+            .decrypt_message(alice_jid, DeviceId::from(alice_device_id), &msg2)
             .await
             .expect("msg2 decryption should succeed after restart");
         assert_eq!(dec2, "msg2 after restart");
@@ -1564,9 +1564,9 @@ mod tests {
 
         // Set all three flag types
         storage1
-            .set_session_rebuild_needed(&bjid("alice@example.com"), 42)
+            .set_session_rebuild_needed(&bjid("alice@example.com"), DeviceId::from(42))
             .unwrap();
-        storage1.set_prekey_pending(&bjid("bob@example.com"), 99).unwrap();
+        storage1.set_prekey_pending(&bjid("bob@example.com"), DeviceId::from(99)).unwrap();
         storage1
             .persist_failed_message_id("msg-id-deadbeef")
             .unwrap();
@@ -1576,14 +1576,14 @@ mod tests {
 
         let rebuild = storage2.load_all_rebuild_pending();
         assert!(
-            rebuild.contains(&("alice@example.com".to_string(), 42)),
+            rebuild.contains(&("alice@example.com".to_string(), DeviceId::from(42))),
             "rebuild flag must survive restart, got: {:?}",
             rebuild
         );
 
         let prekey = storage2.load_all_prekey_pending();
         assert!(
-            prekey.contains(&("bob@example.com".to_string(), 99)),
+            prekey.contains(&("bob@example.com".to_string(), DeviceId::from(99))),
             "prekey-pending flag must survive restart, got: {:?}",
             prekey
         );
@@ -1597,10 +1597,10 @@ mod tests {
 
         // Verify clear works
         storage2
-            .clear_session_rebuild_needed(&bjid("alice@example.com"), 42)
+            .clear_session_rebuild_needed(&bjid("alice@example.com"), DeviceId::from(42))
             .unwrap();
         storage2
-            .clear_prekey_pending(&bjid("bob@example.com"), 99)
+            .clear_prekey_pending(&bjid("bob@example.com"), DeviceId::from(99))
             .unwrap();
 
         let rebuild_after = storage2.load_all_rebuild_pending();

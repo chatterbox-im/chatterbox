@@ -464,12 +464,12 @@ impl OmemoStorage {
     }
 
     /// Check if bundle has been published
-    pub async fn has_published_bundle(&self, device_id: u32) -> Result<bool> {
+    pub async fn has_published_bundle(&self, device_id: DeviceId) -> Result<bool> {
         self.store.is_bundle_published(device_id)
     }
 
     /// Mark bundle as published
-    pub async fn mark_bundle_published(&self, device_id: u32) -> Result<()> {
+    pub async fn mark_bundle_published(&self, device_id: DeviceId) -> Result<()> {
         self.store.mark_bundle_published(device_id)
     }
 
@@ -670,7 +670,7 @@ mod tests {
         let mut storage = OmemoStorage::new_in_memory().unwrap();
 
         let jid = BareJid::parse("alice@example.org").unwrap();
-        let dev: DeviceId = 1234;
+        let dev = DeviceId::from(1234u32);
 
         // First contact: store identity A. No prior key → not a change.
         let id_a = make_identity(dev, 0x11);
@@ -728,13 +728,13 @@ mod tests {
             storage
                 .save_device_list(&DeviceListEntry {
                     jid: jid_str.to_string(),
-                    device_ids: vec![1, 2, 3],
+                    device_ids: vec![DeviceId::from(1), DeviceId::from(2), DeviceId::from(3)],
                     last_update: 42,
                 })
                 .unwrap();
             let back = storage.load_device_list(&jid).unwrap();
             assert_eq!(back.jid, jid_str);
-            assert_eq!(back.device_ids, vec![1, 2, 3]);
+            assert_eq!(back.device_ids, vec![DeviceId::from(1), DeviceId::from(2), DeviceId::from(3)]);
         }
     }
 

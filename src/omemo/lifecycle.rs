@@ -148,7 +148,7 @@ impl OmemoManager {
             // session is fully initialized in a single step — no uninitialized window.
             let session = OmemoSession::from_state(self.device_id, state);
             self.sessions
-                .insert((bare_jid, device_id), OmemoSessionState::Active(session));
+                .insert((bare_jid, DeviceId::from(device_id)), OmemoSessionState::Active(session));
         }
 
         info!("Loaded {} existing sessions", self.sessions.len());
@@ -322,7 +322,7 @@ impl OmemoManager {
     }
 
     /// Fetch device list from the XMPP server
-    pub async fn fetch_device_list_from_server(&self, jid: &str) -> Result<Vec<u32>, OmemoError> {
+    pub async fn fetch_device_list_from_server(&self, jid: &str) -> Result<Vec<DeviceId>, OmemoError> {
         let bare_jid = if jid.contains('/') {
             jid.split('/').next().unwrap_or(jid)
         } else {
@@ -605,7 +605,7 @@ impl OmemoManager {
                 "Force resetting stuck session with {}:{}",
                 bare_jid, device_id
             );
-            if let Err(e) = self.reset_session(&bare_jid, device_id).await {
+            if let Err(e) = self.reset_session(&bare_jid, device_id.get()).await {
                 error!(
                     "Failed to force reset session {}:{}: {}",
                     bare_jid, device_id, e
@@ -840,7 +840,7 @@ impl OmemoManager {
         let storage_guard = self.storage.lock().await;
         if let Err(e) = storage_guard.update_last_undecryptable_message(
             &bare_jid,
-            remote_device_id,
+            DeviceId::from(remote_device_id),
             current_time as i64,
         ) {
             warn!("Failed to update undecryptable message timestamp: {}", e);
@@ -888,7 +888,7 @@ impl OmemoManager {
 
         let storage_guard = self.storage.lock().await;
         if let Err(e) =
-            storage_guard.set_device_ignore_until(remote_jid, remote_device_id, ignore_until)
+            storage_guard.set_device_ignore_until(remote_jid, DeviceId::from(remote_device_id), ignore_until)
         {
             warn!("Failed to set device ignore status: {}", e);
         }
@@ -910,7 +910,7 @@ impl OmemoManager {
         remote_device_id: u32,
     ) -> Result<bool, OmemoError> {
         let storage_guard = self.storage.lock().await;
-        match storage_guard.get_device_ignore_until(remote_jid, remote_device_id) {
+        match storage_guard.get_device_ignore_until(remote_jid, DeviceId::from(remote_device_id)) {
             Ok(Some(ignore_until)) => {
                 let now = std::time::SystemTime::now();
                 Ok(now < ignore_until)
@@ -928,7 +928,7 @@ impl OmemoManager {
     ) -> u32 {
         let storage_guard = self.storage.lock().await;
         storage_guard
-            .get_device_failure_count(remote_jid, remote_device_id)
+            .get_device_failure_count(remote_jid, DeviceId::from(remote_device_id))
             .unwrap_or(0)
     }
 
@@ -938,7 +938,7 @@ impl OmemoManager {
         remote_jid: &BareJid,
         remote_device_id: u32,
     ) -> Result<(), OmemoError> {
-        let key = (remote_jid.clone(), remote_device_id);
+        let key = (remote_jid.clone(), DeviceId::from(remote_device_id));
 
         warn!(
             "Aggressively resetting OMEMO session with {}:{} due to repeated failures",
@@ -958,14 +958,14 @@ impl OmemoManager {
             );
         }
 
-        if let Err(e) = storage_guard.clear_device_ignore_status(remote_jid, remote_device_id) {
+        if let Err(e) = storage_guard.clear_device_ignore_status(remote_jid, DeviceId::from(remote_device_id)) {
             warn!(
                 "Failed to clear ignore status for {}:{}: {}",
                 remote_jid, remote_device_id, e
             );
         }
 
-        if let Err(e) = storage_guard.reset_device_failure_count(remote_jid, remote_device_id) {
+        if let Err(e) = storage_guard.reset_device_failure_count(remote_jid, DeviceId::from(remote_device_id)) {
             warn!(
                 "Failed to reset failure count for {}:{}: {}",
                 remote_jid, remote_device_id, e
@@ -974,13 +974,13 @@ impl OmemoManager {
 
         // Clear persistent rebuild / prekey-pending flags so they are not
         // mistakenly re-loaded on the next restart.
-        if let Err(e) = storage_guard.clear_session_rebuild_needed(remote_jid, remote_device_id) {
+        if let Err(e) = storage_guard.clear_session_rebuild_needed(remote_jid, DeviceId::from(remote_device_id)) {
             warn!(
                 "Failed to clear rebuild flag for {}:{}: {}",
                 remote_jid, remote_device_id, e
             );
         }
-        if let Err(e) = storage_guard.clear_prekey_pending(remote_jid, remote_device_id) {
+        if let Err(e) = storage_guard.clear_prekey_pending(remote_jid, DeviceId::from(remote_device_id)) {
             warn!(
                 "Failed to clear prekey-pending flag for {}:{}: {}",
                 remote_jid, remote_device_id, e
@@ -1362,7 +1362,7 @@ impl OmemoManager {
     pub(crate) fn parse_device_list_response(
         &self,
         response: &str,
-    ) -> Result<Vec<u32>, OmemoError> {
+    ) -> Result<Vec<DeviceId>, OmemoError> {
         debug!("Parsing device list response - starting");
 
         if response.trim().is_empty() {
@@ -1449,8 +1449,8 @@ impl OmemoManager {
                     if let Some(id_str) = device.attribute("id") {
                         if let Ok(id) = id_str.parse::<u32>() {
                             debug!("Found device ID: {}", id);
-                            if !device_ids.contains(&id) {
-                                device_ids.push(id);
+                            if !device_ids.contains(&DeviceId::from(id)) {
+                                device_ids.push(DeviceId::from(id));
                             }
                         } else {
                             warn!("Invalid device ID '{}' in device list", id_str);
@@ -1482,8 +1482,8 @@ impl OmemoManager {
                             if let Some(id_str) = device.attribute("id") {
                                 if let Ok(id) = id_str.parse::<u32>() {
                                     debug!("Found device ID: {}", id);
-                                    if !device_ids.contains(&id) {
-                                        device_ids.push(id);
+                                    if !device_ids.contains(&DeviceId::from(id)) {
+                                        device_ids.push(DeviceId::from(id));
                                     }
                                 } else {
                                     warn!("Invalid device ID '{}' in device list", id_str);
@@ -1503,8 +1503,8 @@ impl OmemoManager {
                     if let Some(id_str) = device.attribute("id") {
                         if let Ok(id) = id_str.parse::<u32>() {
                             debug!("Found device ID: {}", id);
-                            if !device_ids.contains(&id) {
-                                device_ids.push(id);
+                            if !device_ids.contains(&DeviceId::from(id)) {
+                                device_ids.push(DeviceId::from(id));
                             }
                         } else {
                             warn!("Invalid device ID '{}' in device list", id_str);
@@ -1570,7 +1570,7 @@ impl OmemoManager {
     }
 
     /// Get our own device IDs for session management
-    pub(crate) async fn get_own_device_ids(&self) -> Result<Vec<u32>, OmemoError> {
+    pub(crate) async fn get_own_device_ids(&self) -> Result<Vec<DeviceId>, OmemoError> {
         let bare_jid = Self::normalize_jid_to_bare(&self.local_jid);
         match self.get_device_ids(&bare_jid).await {
             Ok(device_ids) => Ok(device_ids),

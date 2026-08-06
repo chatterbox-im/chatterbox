@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use thiserror::Error;
 
 use crate::omemo::device_id::DeviceId;
-use crate::omemo::keys::Secret;
+use crate::omemo::keys::{OneTimePreKeyId, RegistrationId, Secret, SignedPreKeyId};
 use crate::omemo::protocol::{DoubleRatchet, DoubleRatchetError, KeyPair, RatchetState};
 
 /// Session manager errors
@@ -381,9 +381,9 @@ impl OmemoSession {
     pub fn encrypt_key_prekey(
         &mut self,
         key: &[u8],
-        registration_id: u32,
-        pre_key_id: Option<u32>,
-        signed_pre_key_id: u32,
+        registration_id: RegistrationId,
+        pre_key_id: Option<OneTimePreKeyId>,
+        signed_pre_key_id: SignedPreKeyId,
         base_key: &[u8],
         identity_key: &[u8],
     ) -> Result<Vec<u8>, SessionError> {
@@ -399,9 +399,9 @@ impl OmemoSession {
         // Wrap in PreKeySignalMessage, embedding the raw inner bytes directly
         // (no re-serialization, preserving the original MAC)
         let prekey_msg = crate::omemo::wire::PreKeySignalMessage {
-            registration_id,
-            pre_key_id,
-            signed_pre_key_id,
+            registration_id: registration_id.0,
+            pre_key_id: pre_key_id.map(|id| id.0),
+            signed_pre_key_id: signed_pre_key_id.0,
             base_key: base_key.to_vec(),
             identity_key: identity_key.to_vec(),
             message: crate::omemo::wire::SignalMessage {
@@ -467,8 +467,8 @@ mod tests {
         use std::collections::HashMap;
 
         let remote_jid = "User@Domain.Com".to_string();
-        let remote_device_id = 123;
-        let local_device_id = 456;
+        let remote_device_id = DeviceId::from(123u32);
+        let local_device_id = DeviceId::from(456u32);
 
         let mut session = OmemoSession::new(remote_jid.clone(), remote_device_id, local_device_id);
 

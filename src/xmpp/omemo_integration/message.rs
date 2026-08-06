@@ -8,6 +8,7 @@ use xmpp_parsers::jid::BareJid as JidBare;
 use xmpp_parsers::minidom::Element;
 
 use crate::omemo::crypto;
+use crate::omemo::device_id::DeviceId;
 use crate::omemo::OmemoError;
 use crate::omemo::{OmemoManager, OMEMO_NAMESPACE};
 
@@ -367,10 +368,10 @@ pub async fn process_incoming_omemo_message(
     // Find a matching key for our device
     let mut message_key_option: Option<Vec<u8>> = None;
     for (rid, key_data) in encrypted_keys {
-        if own_device_ids.contains(&rid) {
+        if own_device_ids.contains(&DeviceId::from(rid)) {
             // Decrypt the message key
             let _key_result = match omemo
-                .decrypt_message_key(from_jid.to_string(), sender_device_id, &key_data)
+                .decrypt_message_key(from_jid.to_string(), DeviceId::from(sender_device_id), &key_data)
                 .await
             {
                 Ok(key) => {

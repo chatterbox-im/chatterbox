@@ -232,7 +232,7 @@ impl super::OmemoManager {
             );
 
             // In production, return a proper error
-            return Err(OmemoError::NoKeyBundleError(device_id));
+            return Err(OmemoError::NoKeyBundleError(device_id.into()));
         }
 
         // Check for items element
@@ -251,7 +251,7 @@ impl super::OmemoManager {
                 "No items element found in bundle response from device {}",
                 device_id
             );
-            return Err(OmemoError::NoKeyBundleError(device_id));
+            return Err(OmemoError::NoKeyBundleError(device_id.into()));
         }
 
         // Check for item element
@@ -273,7 +273,7 @@ impl super::OmemoManager {
                 "No item element found in bundle response from device {}",
                 device_id
             );
-            return Err(OmemoError::NoKeyBundleError(device_id));
+            return Err(OmemoError::NoKeyBundleError(device_id.into()));
         }
 
         // Check for bundle element
@@ -298,7 +298,7 @@ impl super::OmemoManager {
                 "No bundle element found in bundle response from device {}",
                 device_id
             );
-            return Err(OmemoError::NoKeyBundleError(device_id));
+            return Err(OmemoError::NoKeyBundleError(device_id.into()));
         }
         let bundle_elem = bundle_elem.unwrap();
         let identity_key = bundle_elem

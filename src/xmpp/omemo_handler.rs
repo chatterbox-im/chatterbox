@@ -156,7 +156,7 @@ impl XMPPClient {
                 {
                     let manager_guard = omemo_manager.lock().await;
                     let own_device_id = manager_guard.get_device_id();
-                    if sender_device_id == own_device_id {
+                    if DeviceId::from(sender_device_id) == own_device_id {
                         debug!(
                             "Skipping decryption of our own sent message (device {})",
                             sender_device_id
@@ -203,7 +203,7 @@ impl XMPPClient {
                 };
 
                 // Collect encrypted keys for each device
-                let mut encrypted_keys = std::collections::HashMap::new();
+                let mut encrypted_keys: std::collections::HashMap<DeviceId, Vec<u8>> = std::collections::HashMap::new();
                 let mut is_prekey_message = false;
                 for key_elem in header.children().filter(|e| e.name() == "key") {
                     if let (Some(rid_str), text) = (key_elem.attr("rid"), key_elem.text()) {
@@ -218,7 +218,7 @@ impl XMPPClient {
                             Ok(recipient_id) => {
                                 match base64::engine::general_purpose::STANDARD.decode(key_base64) {
                                     Ok(key_bytes) => {
-                                        encrypted_keys.insert(recipient_id, key_bytes);
+                                        encrypted_keys.insert(DeviceId::from(recipient_id), key_bytes);
                                     }
                                     Err(e) => {
                                         error!(
@@ -274,7 +274,7 @@ impl XMPPClient {
                     if let Some(our_key) = encrypted_keys.get(&omemo_manager_guard.get_device_id())
                     {
                         match omemo_manager_guard
-                            .decrypt_message_key(from.to_string(), sender_device_id, our_key)
+                            .decrypt_message_key(from.to_string(), DeviceId::from(sender_device_id), our_key)
                             .await
                         {
                             Ok(_) => debug!(
@@ -292,7 +292,7 @@ impl XMPPClient {
 
                 // Create the OMEMO message
                 let omemo_message = crate::omemo::protocol::OmemoMessage {
-                    sender_device_id,
+                    sender_device_id: DeviceId::from(sender_device_id),
                     ratchet_key: vec![],
                     previous_counter: 0,
                     counter: 0,
@@ -312,7 +312,7 @@ impl XMPPClient {
                     from, sender_device_id
                 );
                 match omemo_manager_guard
-                    .decrypt_message(from, sender_device_id, &omemo_message)
+                    .decrypt_message(from, DeviceId::from(sender_device_id), &omemo_message)
                     .await
                 {
                     Ok(plaintext) => {

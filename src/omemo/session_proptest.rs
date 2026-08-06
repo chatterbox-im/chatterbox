@@ -212,21 +212,21 @@ mod proptest_session {
             rt.block_on(async {
                 let alice_jid = "alice@prop.test";
                 let bob_jid   = "bob@prop.test";
-                let alice_did: u32 = 40001;
-                let bob_did:   u32 = 40002;
+                let alice_did = DeviceId::from(40001u32);
+                let bob_did   = DeviceId::from(40002u32);
 
                 let pubsub = Arc::new(MockPubSub::new());
                 let alice_dir = TempDir::new().unwrap();
                 let bob_dir   = TempDir::new().unwrap();
 
-                let mut alice = make_manager(alice_jid, alice_did, &alice_dir, pubsub.clone()).await;
-                let mut bob   = make_manager(bob_jid,   bob_did,   &bob_dir,   pubsub.clone()).await;
+                let mut alice = make_manager(alice_jid, alice_did.get(), &alice_dir, pubsub.clone()).await;
+                let mut bob   = make_manager(bob_jid,   bob_did.get(),   &bob_dir,   pubsub.clone()).await;
 
                 // Publish both bundles
-                pubsub.add_device_list(alice_jid, &[alice_did]).await;
-                pubsub.add_device_list(bob_jid,   &[bob_did]).await;
-                pubsub.add_bundle(alice_jid, alice_did, alice.key_bundle.as_ref().unwrap()).await;
-                pubsub.add_bundle(bob_jid,   bob_did,   bob.key_bundle.as_ref().unwrap()).await;
+                pubsub.add_device_list(alice_jid, &[alice_did.get()]).await;
+                pubsub.add_device_list(bob_jid,   &[bob_did.get()]).await;
+                pubsub.add_bundle(alice_jid, alice_did.get(), alice.key_bundle.as_ref().unwrap()).await;
+                pubsub.add_bundle(bob_jid,   bob_did.get(),   bob.key_bundle.as_ref().unwrap()).await;
 
                 // Apply the generated sequence
                 for op in &ops {
@@ -242,10 +242,10 @@ mod proptest_session {
                             }
                         }
                         Op::RestartAlice => {
-                            alice = restart(alice_jid, alice_did, &alice_dir, pubsub.clone()).await;
+                            alice = restart(alice_jid, alice_did.get(), &alice_dir, pubsub.clone()).await;
                         }
                         Op::RestartBob => {
-                            bob = restart(bob_jid, bob_did, &bob_dir, pubsub.clone()).await;
+                            bob = restart(bob_jid, bob_did.get(), &bob_dir, pubsub.clone()).await;
                         }
                     }
                 }
@@ -275,10 +275,10 @@ mod proptest_session {
     async fn try_exchange(
         alice: &mut OmemoManager,
         alice_jid: &str,
-        alice_did: u32,
+        alice_did: DeviceId,
         bob: &mut OmemoManager,
         bob_jid: &str,
-        bob_did: u32,
+        bob_did: DeviceId,
     ) -> bool {
         let Ok(msg_a) = alice
             .encrypt_message(bob_jid, "convergence-check-a2b")

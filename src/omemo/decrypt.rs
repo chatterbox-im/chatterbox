@@ -6,6 +6,7 @@ use log::{debug, error, info, warn};
 
 use crate::jid::BareJid;
 use crate::omemo::crypto;
+use crate::omemo::device_id::DeviceId;
 use crate::omemo::keys::{AesGcmKey, GcmNonce};
 use crate::omemo::protocol::{self, OmemoMessage};
 use crate::omemo::session::{self, OmemoSession, OmemoSessionState};
@@ -16,7 +17,7 @@ impl OmemoManager {
     pub async fn decrypt_message(
         &mut self,
         sender: &str,
-        device_id: u32,
+        device_id: DeviceId,
         message: &OmemoMessage,
     ) -> Result<String, OmemoError> {
         info!("Decrypting message from {}:{}", sender, device_id);
@@ -397,7 +398,7 @@ impl OmemoManager {
                 }
                 Err(session_error) => {
                     return self
-                        .handle_decryption_failure(sender_str, device_id, session_error)
+                        .handle_decryption_failure(sender_str, device_id.get(), session_error)
                         .await;
                 }
             }
@@ -601,7 +602,7 @@ impl OmemoManager {
     pub async fn decrypt_message_key(
         &mut self,
         from: String,
-        sender_device_id: u32,
+        sender_device_id: DeviceId,
         encrypted_key: &[u8],
     ) -> Result<Vec<u8>, OmemoError> {
         debug!(
@@ -739,7 +740,7 @@ impl OmemoManager {
 
         // Save the existing recovery attempt count BEFORE reset_session removes the
         // sessions entry — otherwise prev_attempt would always read 0.
-        let key = (bare_jid.clone(), device_id);
+        let key = (bare_jid.clone(), DeviceId::from(device_id));
         let prev_attempt = self
             .sessions
             .get(&key)
@@ -783,7 +784,7 @@ impl OmemoManager {
         // Persist so the recovery state survives a process restart.
         {
             let storage_guard = self.storage.lock().await;
-            if let Err(e) = storage_guard.set_prekey_pending(&bare_jid, device_id) {
+            if let Err(e) = storage_guard.set_prekey_pending(&bare_jid, DeviceId::from(device_id)) {
                 warn!(
                     "Failed to persist prekey-pending flag for {}:{}: {}",
                     bare_jid, device_id, e
@@ -819,7 +820,7 @@ impl OmemoManager {
         // Mark all devices of this contact for PreKey message sending
         let target_device_ids = match self.get_device_ids(&bare_jid).await {
             Ok(devices) => devices,
-            Err(_) => vec![device_id],
+            Err(_) => vec![DeviceId::from(device_id)],
         };
 
         for target_device_id in target_device_ids {

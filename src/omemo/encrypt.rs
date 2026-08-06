@@ -38,7 +38,7 @@ impl OmemoManager {
     pub async fn get_or_create_session(
         &mut self,
         remote_jid: &str,
-        remote_device_id: u32,
+        remote_device_id: DeviceId,
     ) -> Result<&mut OmemoSession, OmemoError> {
         // Normalize the JID to bare JID for consistent session lookup
         let bare_jid = Self::normalize_jid_to_bare(remote_jid);
@@ -523,7 +523,7 @@ impl OmemoManager {
 
             // FALLBACK: Try to use known sessions as a source of device IDs
             warn!("ENCRYPT_DEBUG: Falling back to known sessions for device discovery");
-            let fallback_devices: Vec<u32> = self
+            let fallback_devices: Vec<DeviceId> = self
                 .sessions
                 .keys()
                 .filter(|(jid, _device_id)| jid == recipient)
@@ -776,7 +776,7 @@ impl OmemoManager {
 
                 // Skip ignored devices UNLESS they need a PreKey message
                 if !needs_prekey {
-                    if let Ok(true) = self.is_device_ignored(&jid, device_id).await {
+                    if let Ok(true) = self.is_device_ignored(&jid, device_id.get()).await {
                         warn!(
                             "ENCRYPT_DEBUG: Skipping ignored device {}:{} (no PreKey needed)",
                             jid, device_id
@@ -882,9 +882,9 @@ impl OmemoManager {
 
                         session.encrypt_key_prekey(
                             &message_key,
-                            registration_id,
-                            remote_opk_id,
-                            remote_spk_id,
+                            crate::omemo::keys::RegistrationId(registration_id.get()),
+                            remote_opk_id.map(crate::omemo::keys::OneTimePreKeyId),
+                            crate::omemo::keys::SignedPreKeyId(remote_spk_id),
                             &base_key,
                             &identity_key,
                         )

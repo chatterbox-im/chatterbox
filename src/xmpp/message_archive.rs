@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use super::custom_ns;
 use crate::models::{DeliveryStatus, Message};
+use crate::omemo::device_id::DeviceId;
 use crate::omemo::crypto;
 
 #[derive(Debug, Clone)]
@@ -637,7 +638,7 @@ impl super::XMPPClient {
         // WE sent.  The ratchet for the self-session has already advanced; trying
         // to re-decrypt it will always fail and corrupt the session state.
         // Skip decryption — we already have the plaintext from when we sent it.
-        if sender_device_id == own_device_id {
+        if DeviceId::from(sender_device_id) == own_device_id {
             debug!(
                 "Skipping MAM decryption of own-device message (device {})",
                 sender_device_id
@@ -660,7 +661,7 @@ impl super::XMPPClient {
             {
                 if let Some(rid) = child.attr("rid") {
                     match rid.parse::<u32>() {
-                        Ok(device_id) if device_id == own_device_id => {
+                        Ok(device_id) if DeviceId::from(device_id) == own_device_id => {
                             // This key is for our device
                             let key_base64 = child.text();
                             match base64::engine::general_purpose::STANDARD.decode(key_base64) {
@@ -741,9 +742,9 @@ impl super::XMPPClient {
             match manager
                 .decrypt_message(
                     bare_sender_jid,
-                    sender_device_id,
+                    DeviceId::from(sender_device_id),
                     &crate::omemo::protocol::OmemoMessage {
-                        sender_device_id,
+                        sender_device_id: DeviceId::from(sender_device_id),
                         ratchet_key: vec![], // This will be handled by the session
                         previous_counter: 0, // This will be handled by the session
                         counter: 0,          // This will be handled by the session
@@ -791,7 +792,7 @@ impl super::XMPPClient {
         if let Some(omemo_manager) = omemo_manager {
             let manager = omemo_manager.lock().await;
             // Consider OMEMO fully initialized if we have a device ID and bundle published
-            if manager.get_device_id() > 0 {
+            if manager.get_device_id().get() > 0 {
                 // Additional check to make sure the bundle is published
                 if let Ok(true) = manager.is_bundle_published().await {
                     return true;

@@ -195,7 +195,7 @@ pub struct OmemoManager {
     /// Each entry is an `OmemoSessionState` rather than a bare `OmemoSession` so
     /// that pending-rebuild markers (`PeerResetPending`) can be stored in the same
     /// map, eliminating the old `pending_session_rebuilds: HashSet` side-channel.
-    pub(crate) sessions: HashMap<(BareJid, u32), OmemoSessionState>,
+    pub(crate) sessions: HashMap<(BareJid, DeviceId), OmemoSessionState>,
 
     /// PreKey rotation configuration
     pub prekey_rotation_config: PreKeyRotationConfig,
@@ -246,18 +246,18 @@ impl OmemoManager {
 
                 let mut storage_guard = storage.lock().await;
                 storage_guard
-                    .store_device_id(id)
+                    .store_device_id(DeviceId::from(id))
                     .map_err(|e| OmemoError::StorageError(e.to_string()))?;
                 drop(storage_guard);
 
-                device_id::save_device_id(id).map_err(|e| {
+                device_id::save_device_id(DeviceId::from(id)).map_err(|e| {
                     OmemoError::StorageError(format!(
                         "Failed to save device ID to filesystem: {}",
                         e
                     ))
                 })?;
 
-                id
+                DeviceId::from(id)
             }
             None => {
                 // Use the device ID from OmemoStorage (already loaded from the correct path)
@@ -265,7 +265,7 @@ impl OmemoManager {
                 let storage_device_id = storage_guard.get_device_id();
                 drop(storage_guard);
 
-                if storage_device_id > 0 {
+                if storage_device_id.get() > 0 {
                     info!("Loaded existing device ID: {}", storage_device_id);
                     storage_device_id
                 } else {
@@ -452,7 +452,7 @@ impl OmemoManager {
     pub async fn reset_failure_count(&mut self, jid: &str, device_id: u32) -> Result<(), crate::omemo::OmemoError> {
         let bare = Self::normalize_jid_to_bare(jid);
         let storage = self.storage.lock().await;
-        let _ = storage.reset_device_failure_count(&bare, device_id);
+        let _ = storage.reset_device_failure_count(&bare, DeviceId::from(device_id));
         Ok(())
     }
 
@@ -460,7 +460,7 @@ impl OmemoManager {
     pub async fn clear_device_ignore(&mut self, jid: &str, device_id: u32) -> Result<(), crate::omemo::OmemoError> {
         let bare = Self::normalize_jid_to_bare(jid);
         let storage = self.storage.lock().await;
-        let _ = storage.clear_device_ignore_status(&bare, device_id);
+        let _ = storage.clear_device_ignore_status(&bare, DeviceId::from(device_id));
         Ok(())
     }
 
@@ -559,10 +559,10 @@ mod tests {
     #[tokio::test]
     async fn test_device_id_generation() {
         let device_id = generate_device_id();
-        assert!(device_id > 0, "Device ID should be non-zero");
+        assert!(device_id.get() > 0, "Device ID should be non-zero");
 
         let device_id2 = generate_device_id();
-        assert!(device_id2 > 0, "Second device ID should be non-zero");
+        assert!(device_id2.get() > 0, "Second device ID should be non-zero");
         assert_ne!(
             device_id, device_id2,
             "Two generated device IDs should likely be different"
@@ -580,7 +580,7 @@ mod tests {
                 .expect("Failed to create OmemoManager");
 
         let device_id = manager.get_device_id();
-        assert!(device_id > 0, "Manager's device ID should be non-zero");
+        assert!(device_id.get() > 0, "Manager's device ID should be non-zero");
 
         let storage_path = std::env::temp_dir().join("omemo_device_id_test.db");
         if storage_path.exists() {
@@ -599,7 +599,7 @@ mod tests {
 
         let device_id1 = manager1.get_device_id();
         assert!(
-            device_id1 > 0,
+            device_id1.get() > 0,
             "First manager's device ID should be non-zero"
         );
 
@@ -631,11 +631,11 @@ mod tests {
     async fn test_explicit_device_id() -> Result<(), anyhow::Error> {
         let storage = create_test_storage().await?;
 
-        let explicit_id: DeviceId = 12345;
+        let explicit_id = DeviceId::from(12345u32);
         let manager = OmemoManager::new(
             storage,
             "test@example.com".to_string(),
-            Some(explicit_id),
+            Some(explicit_id.get()),
             test_pubsub(),
         )
         .await
@@ -666,16 +666,16 @@ mod tests {
 
         // prekey_ephemeral_keys and remote_prekey_ids are TTL-evicted
         manager.prekey_ephemeral_keys.insert(
-            (BareJid::from_raw_lossy("old@peer.com"), 1u32),
+            (BareJid::from_raw_lossy("old@peer.com"), DeviceId::from(1u32)),
             (vec![0xAA; 32], old_time),
         );
         manager.prekey_ephemeral_keys.insert(
-            (BareJid::from_raw_lossy("fresh@peer.com"), 2u32),
+            (BareJid::from_raw_lossy("fresh@peer.com"), DeviceId::from(2u32)),
             (vec![0xBB; 32], fresh_time),
         );
         manager
             .remote_prekey_ids
-            .insert((BareJid::from_raw_lossy("old@peer.com"), 1u32), (1, Some(2), old_time));
+            .insert((BareJid::from_raw_lossy("old@peer.com"), DeviceId::from(1u32)), (1, Some(2), old_time));
 
         assert_eq!(manager.prekey_ephemeral_keys.len(), 2);
         manager.evict_stale_entries();
@@ -683,7 +683,7 @@ mod tests {
         assert_eq!(manager.prekey_ephemeral_keys.len(), 1);
         assert!(manager
             .prekey_ephemeral_keys
-            .contains_key(&(BareJid::from_raw_lossy("fresh@peer.com"), 2u32)));
+            .contains_key(&(BareJid::from_raw_lossy("fresh@peer.com"), DeviceId::from(2u32))));
         assert!(manager.remote_prekey_ids.is_empty());
 
         Ok(())

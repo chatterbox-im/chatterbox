@@ -13,6 +13,7 @@ use crate::{
 };
 use chatterbox::{
     models::{Message, PresenceEvent},
+    omemo::device_id::DeviceId,
     storage::MessageStore,
     xmpp::message_archive::MAMQueryOptions,
     xmpp::{chat_states::TypingStatus, XMPPClient},
@@ -949,7 +950,7 @@ async fn handle_user_command(
                 let jid = parts[2];
                 let trusted = flag == "1";
                 if let Err(e) = xmpp_client
-                    .set_single_device_trust(jid, device_id, trusted)
+                    .set_single_device_trust(jid, DeviceId::from(device_id), trusted)
                     .await
                 {
                     info!("MAIN: set_single_device_trust failed: {}", e);
@@ -1131,7 +1132,7 @@ async fn handle_show_device_fingerprints(
     async fn fetch_fp_trust(
         client: &XMPPClient,
         jid: &str,
-        device_id: u32,
+        device_id: DeviceId,
     ) -> (String, TrustLevel) {
         let fp = match tokio::time::timeout(
             std::time::Duration::from_secs(3),
@@ -1164,7 +1165,7 @@ async fn handle_show_device_fingerprints(
             let mut own_rows: Vec<(String, String, TrustLevel, bool)> = Vec::new();
             for device_id in &device_ids {
                 let (fp, trust) = fetch_fp_trust(xmpp_client, bare_jid, *device_id).await;
-                let is_current = current_device_id.map_or(false, |id| id == *device_id);
+                let is_current = current_device_id.map_or(false, |id| id == device_id.get());
                 own_rows.push((device_id.to_string(), fp, trust, is_current));
             }
 
@@ -1751,7 +1752,7 @@ async fn check_pending_key_verifications(
             continue;
         }
 
-        match storage.get_pending_device_verification(&contact) {
+        match storage.get_pending_device_verification(&chatterbox::jid::BareJid::from_raw_lossy(&contact)) {
             Ok(Some((device_id, fingerprint))) => {
                 info!(
                     "Found pending key verification for {}:{} with fingerprint {}",

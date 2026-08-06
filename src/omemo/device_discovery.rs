@@ -20,7 +20,7 @@ const DEVICE_LIST_TIMEOUT_SECS: u64 = 5;
 
 /// Static function to parse device list response without requiring locks
 /// This is a duplicate of the logic in OmemoManager to avoid deadlock situations
-fn parse_device_list_response_static(response: &str) -> Result<Vec<u32>, OmemoError> {
+fn parse_device_list_response_static(response: &str) -> Result<Vec<DeviceId>, OmemoError> {
     debug!("Static parsing device list response - starting");
     debug!(
         "Raw XML response (first 500 chars): {}",
@@ -124,8 +124,8 @@ fn parse_device_list_response_static(response: &str) -> Result<Vec<u32>, OmemoEr
                 if let Some(id_str) = device.attribute("id") {
                     if let Ok(id) = id_str.parse::<u32>() {
                         debug!("Found device ID: {}", id);
-                        if !device_ids.contains(&id) {
-                            device_ids.push(id);
+                        if !device_ids.contains(&DeviceId::from(id)) {
+                            device_ids.push(DeviceId::from(id));
                         }
                     } else {
                         warn!("Invalid device ID '{}' in device list", id_str);
@@ -157,8 +157,8 @@ fn parse_device_list_response_static(response: &str) -> Result<Vec<u32>, OmemoEr
                         if let Some(id_str) = device.attribute("id") {
                             if let Ok(id) = id_str.parse::<u32>() {
                                 debug!("Found device ID: {}", id);
-                                if !device_ids.contains(&id) {
-                                    device_ids.push(id);
+                                if !device_ids.contains(&DeviceId::from(id)) {
+                                    device_ids.push(DeviceId::from(id));
                                 }
                             } else {
                                 warn!("Invalid device ID '{}' in device list", id_str);
@@ -178,8 +178,8 @@ fn parse_device_list_response_static(response: &str) -> Result<Vec<u32>, OmemoEr
                 if let Some(id_str) = device.attribute("id") {
                     if let Ok(id) = id_str.parse::<u32>() {
                         debug!("Found device ID: {}", id);
-                        if !device_ids.contains(&id) {
-                            device_ids.push(id);
+                        if !device_ids.contains(&DeviceId::from(id)) {
+                            device_ids.push(DeviceId::from(id));
                         }
                     } else {
                         warn!("Invalid device ID '{}' in device list", id_str);
@@ -437,7 +437,7 @@ async fn try_fetch_bundle_for_common_device_ids(
                     "[OMEMO] Found device {} for {} by directly checking bundle",
                     device_id, jid
                 );
-                found_devices.push(device_id);
+                found_devices.push(DeviceId::from(device_id));
             }
             Ok(Err(e)) => {
                 debug!("[OMEMO] Failed to fetch bundle for device {}: {}", device_id, e);
@@ -447,7 +447,7 @@ async fn try_fetch_bundle_for_common_device_ids(
             }
         }
 
-        if found_devices.contains(&device_id) {
+        if found_devices.contains(&DeviceId::from(device_id)) {
             continue;
         }
 
@@ -464,7 +464,7 @@ async fn try_fetch_bundle_for_common_device_ids(
                     "[OMEMO] Found device {} for {} by checking legacy bundle format",
                     device_id, jid
                 );
-                found_devices.push(device_id);
+                found_devices.push(DeviceId::from(device_id));
             }
             Ok(Err(e)) => {
                 debug!("[OMEMO] Failed to fetch legacy bundle for device {}: {}", device_id, e);

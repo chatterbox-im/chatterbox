@@ -1127,6 +1127,7 @@ pub mod utils {
     use thiserror::Error;
 
     use super::{DeviceIdentity, OmemoMessage};
+    use crate::omemo::device_id::DeviceId;
     // Use the legacy OMEMO namespace that actually works
     const OMEMO_NAMESPACE: &str = "eu.siacs.conversations.axolotl";
 
@@ -1189,7 +1190,7 @@ pub mod utils {
     }
 
     /// Convert a device list to XML for publishing
-    pub fn device_list_to_xml(device_ids: &[u32]) -> Result<String, XmlError> {
+    pub fn device_list_to_xml(device_ids: &[DeviceId]) -> Result<String, XmlError> {
         let mut xml = String::new();
 
         xml.push_str(&format!("<list xmlns='{}'>", OMEMO_NAMESPACE));
@@ -1284,7 +1285,7 @@ pub mod utils {
                 device_id,
                 key.len()
             );
-            encrypted_keys.insert(device_id, key);
+            encrypted_keys.insert(DeviceId::from(device_id), key);
         }
 
         log::debug!(
@@ -1348,7 +1349,7 @@ pub mod utils {
 
         // Create the OMEMO message
         let message = OmemoMessage {
-            sender_device_id,
+            sender_device_id: DeviceId::from(sender_device_id),
             ratchet_key: vec![0; 32], // Placeholder
             previous_counter: 0,      // Placeholder
             counter: 0,               // Placeholder
@@ -1447,11 +1448,11 @@ mod tests {
 
     fn sample_omemo_message(prekey_devices: HashSet<DeviceId>) -> OmemoMessage {
         let mut encrypted_keys = HashMap::new();
-        encrypted_keys.insert(1001u32, vec![0xAA; 32]);
-        encrypted_keys.insert(2002u32, vec![0xBB; 32]);
+        encrypted_keys.insert(DeviceId::from(1001u32), vec![0xAA; 32]);
+        encrypted_keys.insert(DeviceId::from(2002u32), vec![0xBB; 32]);
 
         OmemoMessage {
-            sender_device_id: 12345u32,
+            sender_device_id: DeviceId::from(12345u32),
             ratchet_key: vec![0; 32],
             previous_counter: 0,
             counter: 0,
@@ -1513,7 +1514,7 @@ mod tests {
     #[test]
     fn test_prekey_true_attribute_present_in_xml() {
         let mut prekey_set = HashSet::new();
-        prekey_set.insert(1001u32);
+        prekey_set.insert(DeviceId::from(1001u32));
         let msg = sample_omemo_message(prekey_set);
         let xml = utils::omemo_message_to_xml(&msg);
 
@@ -1553,7 +1554,7 @@ mod tests {
 
     #[test]
     fn test_device_list_to_xml_format() {
-        let xml = utils::device_list_to_xml(&[111, 222, 333]).unwrap();
+        let xml = utils::device_list_to_xml(&[DeviceId::from(111), DeviceId::from(222), DeviceId::from(333)]).unwrap();
         assert!(xml.contains("<device id='111'"));
         assert!(xml.contains("<device id='222'"));
         assert!(xml.contains("<device id='333'"));
@@ -1568,7 +1569,7 @@ mod tests {
         use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 
         let mut prekey_set = HashSet::new();
-        prekey_set.insert(1001u32);
+        prekey_set.insert(DeviceId::from(1001u32));
         let msg = sample_omemo_message(prekey_set);
         let xml = utils::omemo_message_to_xml(&msg);
 
@@ -1632,8 +1633,8 @@ mod tests {
             bob_spk.public_key.clone(),
             Some(bob_opk.public_key.clone()),
             ephemeral.private_key.expose_secret().to_vec(),
-            1, // local device id
-            2, // remote device id
+            DeviceId::from(1), // local device id
+            DeviceId::from(2), // remote device id
             "bob@example.com".to_string(),
         )
         .unwrap();
@@ -1644,8 +1645,8 @@ mod tests {
             bob_spk,
             Some(bob_opk),
             ephemeral.public_key.clone(),
-            2,
-            1,
+            DeviceId::from(2),
+            DeviceId::from(1),
             "alice@example.com".to_string(),
         )
         .unwrap();
