@@ -106,13 +106,26 @@ mod proptest_session {
                         .to_string()
                 }))
         }
+        // publish_item updates stored state so post-restart bundle replacements
+        // are visible to the other party.  Without this, OPK exhaustion and
+        // SPK rotation are structurally unreachable in the property.
         async fn publish_item(
             &self,
             _to: Option<&str>,
-            _node: &str,
+            node: &str,
             _id: &str,
-            _payload: &str,
+            payload: &str,
         ) -> Result<()> {
+            let items_xml = format!("<items node=\"{}\">{}</items>", node, payload);
+            let mut r = self.responses.lock().await;
+            // Update every existing key whose node part matches.
+            let matching: Vec<String> = r.keys()
+                .filter(|k| k.splitn(2, '|').nth(1) == Some(node))
+                .cloned()
+                .collect();
+            for key in matching {
+                r.insert(key, items_xml.clone());
+            }
             Ok(())
         }
         async fn publish_item_alternative(
@@ -176,18 +189,17 @@ mod proptest_session {
         RestartBob,
     }
 
-    /// Strategy: sequences of 1..=12 operations drawn from the Op enum.
+    /// Strategy: sequences of 1..=20 operations.
+    /// Sends are 7x more frequent than restarts so the ratchet actually advances.
     fn arb_ops() -> impl Strategy<Value = Vec<Op>> {
         prop::collection::vec(
             prop_oneof![
-                Just(Op::AliceToBob),
-                Just(Op::BobToAlice),
-                // Restarts are less frequent so the sequence has enough sends
-                // to make convergence observable.
-                Just(Op::RestartAlice).prop_filter("restart", |_| true),
-                Just(Op::RestartBob).prop_filter("restart", |_| true),
+                7 => Just(Op::AliceToBob),
+                7 => Just(Op::BobToAlice),
+                1 => Just(Op::RestartAlice),
+                1 => Just(Op::RestartBob),
             ],
-            1..=12,
+            1..=20,
         )
     }
 
@@ -248,13 +260,11 @@ mod proptest_session {
                 }
 
                 // Convergence check: after the sequence, both sides must be
-                // able to exchange a message.  We allow one recovery exchange
-                // (the FSM will create a fresh session on the first post-op send
-                // if the session is broken) before requiring success.
+                // able to exchange a message in a single round-trip.
+                // Allowing two attempts hides a real regression (a session that
+                // reliably needs two round-trips to recover is broken).
                 let converged = try_exchange(&mut alice, alice_jid, alice_did,
-                                             &mut bob, bob_jid, bob_did).await
-                    || try_exchange(&mut alice, alice_jid, alice_did,
-                                    &mut bob, bob_jid, bob_did).await;
+                                             &mut bob, bob_jid, bob_did).await;
 
                 // Return the assertion as a Result so proptest can shrink failures
                 if converged {
