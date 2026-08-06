@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 use tokio::time::{timeout, Duration};
 
+use crate::jid::BareJid;
 use crate::omemo::crypto;
 use crate::omemo::device_id::DeviceId;
 use crate::omemo::keys::{AesGcmKey, GcmNonce};
@@ -14,7 +15,7 @@ use crate::omemo::session::{self, OmemoSession, OmemoSessionState};
 use crate::omemo::{EncryptionVerificationError, OmemoError, OmemoManager, OMEMO_NAMESPACE};
 
 impl OmemoManager {
-    async fn cached_or_session_device_ids_for(&self, bare_jid: &str) -> Vec<DeviceId> {
+    async fn cached_or_session_device_ids_for(&self, bare_jid: &BareJid) -> Vec<DeviceId> {
         let mut device_ids = Vec::new();
 
         {
@@ -282,7 +283,7 @@ impl OmemoManager {
             .insert(device_key, (remote_spk_id, remote_opk_id, Instant::now()));
 
         let session = OmemoSession::new_initiator_with_ephemeral(
-            bare_jid.clone(),
+            bare_jid.to_string(),
             remote_device_id,
             our_identity_key_pair,
             crypto::ensure_montgomery_form(&remote_identity.identity_key)
@@ -353,7 +354,7 @@ impl OmemoManager {
     /// Get a device identity from storage or fetch it
     pub(crate) async fn get_device_identity(
         &self,
-        remote_jid: &str,
+        remote_jid: &BareJid,
         device_id: DeviceId,
     ) -> Result<DeviceIdentity, OmemoError> {
         debug!("Getting device identity for {}:{}", remote_jid, device_id);
@@ -377,7 +378,7 @@ impl OmemoManager {
     /// Fetch a device identity directly from the server, bypassing and replacing the cache
     async fn fetch_device_identity_from_server(
         &self,
-        remote_jid: &str,
+        remote_jid: &BareJid,
         device_id: DeviceId,
     ) -> Result<DeviceIdentity, OmemoError> {
         info!(
@@ -388,7 +389,7 @@ impl OmemoManager {
         let bundle_node = format!("{}.bundles:{}", OMEMO_NAMESPACE, device_id);
 
         // Make the request
-        let response = match self.pubsub.request_items(remote_jid, &bundle_node).await {
+        let response = match self.pubsub.request_items(remote_jid.as_str(), &bundle_node).await {
             Ok(resp) => resp,
             Err(e) => {
                 warn!(
@@ -456,7 +457,7 @@ impl OmemoManager {
         }
         let recipient_device_ids = match timeout(
             device_discovery_timeout,
-            self.get_device_ids_with_force_refresh(recipient, force_refresh_recipient),
+            self.get_device_ids_with_force_refresh(recipient.as_str(), force_refresh_recipient),
         )
         .await
         {
@@ -566,7 +567,7 @@ impl OmemoManager {
         }
         let own_device_ids = match timeout(
             device_discovery_timeout,
-            self.get_device_ids_with_force_refresh(&user_bare_jid, force_refresh_own),
+            self.get_device_ids_with_force_refresh(user_bare_jid.as_str(), force_refresh_own),
         )
         .await
         {
@@ -676,8 +677,8 @@ impl OmemoManager {
                 );
                 continue;
             }
-            if !all_devices.contains(&(recipient.to_string(), device_id)) {
-                all_devices.push((recipient.to_string(), device_id));
+            if !all_devices.contains(&((*recipient).clone(), device_id)) {
+                all_devices.push(((*recipient).clone(), device_id));
                 info!(
                     "ENCRYPT_DEBUG: Added recipient device {}:{}",
                     recipient, device_id
@@ -790,7 +791,7 @@ impl OmemoManager {
                     jid, device_id
                 );
                 let session_result =
-                    timeout(device_timeout, self.get_or_create_session(&jid, device_id)).await;
+                    timeout(device_timeout, self.get_or_create_session(jid.as_str(), device_id)).await;
 
                 // Check if session creation succeeded. We can't hold the session
                 // reference while accessing other self fields, so just check success here.

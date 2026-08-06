@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 
+use crate::jid::BareJid;
 use crate::omemo::crypto;
 use crate::omemo::device_id::DeviceId;
 use crate::omemo::keys::{AesCbcKey, CbcIv, Ikm, Salt, Secret};
@@ -691,7 +692,7 @@ impl DoubleRatchet {
                 skipped_message_keys: std::collections::HashMap::new(),
                 local_device_id,
                 remote_device_id,
-                remote_jid: normalize_jid_to_bare(&remote_jid),
+                remote_jid: normalize_jid_to_bare(&remote_jid).to_string(),
                 // Initiator side: we chose the base key, so there is nothing to
                 // recognise on the way back in.
                 establishing_base_key: None,
@@ -732,7 +733,7 @@ impl DoubleRatchet {
                 skipped_message_keys: std::collections::HashMap::new(),
                 local_device_id,
                 remote_device_id,
-                remote_jid: normalize_jid_to_bare(&remote_jid),
+                remote_jid: normalize_jid_to_bare(&remote_jid).to_string(),
                 // Recipient side: `ephemeral_key` here IS the initiator's base
                 // key from the PreKeySignalMessage (decrypt.rs passes
                 // `prekey_msg.base_key` straight through).  Record it so
@@ -1435,16 +1436,8 @@ pub mod utils {
 }
 
 /// Normalize a JID to bare JID for OMEMO session consistency
-/// This ensures OMEMO sessions are bound to accounts, not specific resources
-fn normalize_jid_to_bare(jid: &str) -> String {
-    let clean_jid = jid.to_lowercase().trim().to_string();
-
-    // Strip the resource part (everything after the last '/')
-    if let Some(slash_pos) = clean_jid.rfind('/') {
-        clean_jid[..slash_pos].to_string()
-    } else {
-        clean_jid
-    }
+fn normalize_jid_to_bare(jid: &str) -> BareJid {
+    BareJid::from_raw_lossy(jid)
 }
 
 #[cfg(test)]

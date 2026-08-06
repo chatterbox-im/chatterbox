@@ -5,6 +5,7 @@ use anyhow::{anyhow, Result};
 use log::{debug, error, info, warn};
 use tokio::time::{timeout, Duration};
 
+use crate::jid::BareJid;
 use crate::omemo::device_discovery;
 use crate::omemo::device_id::DeviceId;
 use crate::omemo::protocol::{self, RatchetState, X3DHProtocol};
@@ -158,30 +159,28 @@ impl OmemoManager {
     /// Store a session's ratchet state
     pub async fn store_session_state(
         &mut self,
-        jid: &str,
+        jid: &BareJid,
         device_id: DeviceId,
         state: &RatchetState,
     ) -> Result<(), OmemoError> {
-        let bare_jid = Self::normalize_jid_to_bare(jid);
-
         let storage_guard = self.storage.lock().await;
         storage_guard
-            .save_session(&bare_jid, device_id, state)
+            .save_session(jid, device_id, state)
             .map_err(|e| OmemoError::StorageError(format!("Failed to store session: {}", e)))?;
 
-        debug!("Stored session state for {}:{}", bare_jid, device_id);
+        debug!("Stored session state for {}:{}", jid, device_id);
         Ok(())
     }
 
     /// Force refresh device list for a JID (public method)
-    pub async fn force_refresh_device_list(&self, jid: &str) -> Result<Vec<DeviceId>, OmemoError> {
+    pub async fn force_refresh_device_list(&self, jid: &BareJid) -> Result<Vec<DeviceId>, OmemoError> {
         info!("[OMEMO] Force refreshing device list for {}", jid);
-        self.get_device_ids_with_force_refresh(jid, true).await
+        self.get_device_ids_with_force_refresh(jid.as_str(), true).await
     }
 
     /// Get the device IDs for a user
-    pub(crate) async fn get_device_ids(&self, jid: &str) -> Result<Vec<DeviceId>, OmemoError> {
-        self.get_device_ids_with_force_refresh(jid, false).await
+    pub(crate) async fn get_device_ids(&self, jid: &BareJid) -> Result<Vec<DeviceId>, OmemoError> {
+        self.get_device_ids_with_force_refresh(jid.as_str(), false).await
     }
 
     /// Get the device IDs for a user with optional force refresh
@@ -206,16 +205,16 @@ impl OmemoManager {
             )));
         }
 
-        let bare_jid = if jid.contains('/') {
+        let bare_jid = BareJid::from_raw_lossy(if jid.contains('/') {
             jid.split('/').next().unwrap_or(jid)
         } else {
             jid
-        };
+        });
 
         // If not force refresh, try cached data first
         if !force_refresh {
             let storage_guard = self.storage.lock().await;
-            if let Ok(entry) = storage_guard.load_device_list(bare_jid) {
+            if let Ok(entry) = storage_guard.load_device_list(&bare_jid) {
                 if !entry.device_ids.is_empty() {
                     info!(
                         "[OMEMO] get_device_ids: Using cached device list for {}: {:?}",
@@ -242,7 +241,7 @@ impl OmemoManager {
             bare_jid
         );
 
-        match self.fetch_device_list_from_server(bare_jid).await {
+        match self.fetch_device_list_from_server(bare_jid.as_str()).await {
             Ok(ids) => {
                 info!(
                     "[OMEMO] get_device_ids: Successfully fetched device list for {}: {:?}",
@@ -304,7 +303,7 @@ impl OmemoManager {
 
                 // Fall back to cached data
                 let storage_guard = self.storage.lock().await;
-                if let Ok(entry) = storage_guard.load_device_list(bare_jid) {
+                if let Ok(entry) = storage_guard.load_device_list(&bare_jid) {
                     if !entry.device_ids.is_empty() {
                         warn!("[OMEMO] get_device_ids: Using cached device list as fallback for {}: {:?}", bare_jid, entry.device_ids);
                         drop(storage_guard);
@@ -804,7 +803,7 @@ impl OmemoManager {
                 info!("Device list published successfully: {:?}", devices);
 
                 let storage_guard = self.storage.lock().await;
-                if let Err(e) = storage_guard.mark_device_list_published(bare_jid) {
+                if let Err(e) = storage_guard.mark_device_list_published(&BareJid::from_raw_lossy(bare_jid)) {
                     warn!("Failed to mark device list as published: {}", e);
                 }
 
@@ -822,7 +821,7 @@ impl OmemoManager {
 
     /// Get the device IDs for a user (public wrapper for testing)
     pub async fn get_device_ids_for_test(&self, jid: &str) -> Result<Vec<DeviceId>, OmemoError> {
-        self.get_device_ids(jid).await
+        self.get_device_ids(&BareJid::from_raw_lossy(jid)).await
     }
 
     /// Track an undecryptable message from a device
@@ -881,17 +880,15 @@ impl OmemoManager {
     /// Ignore a device temporarily
     pub async fn ignore_device(
         &mut self,
-        remote_jid: &str,
+        remote_jid: &BareJid,
         remote_device_id: u32,
         duration: std::time::Duration,
     ) -> Result<(), OmemoError> {
-        let bare_jid = Self::normalize_jid_to_bare(remote_jid);
-
         let ignore_until = std::time::SystemTime::now() + duration;
 
         let storage_guard = self.storage.lock().await;
         if let Err(e) =
-            storage_guard.set_device_ignore_until(&bare_jid, remote_device_id, ignore_until)
+            storage_guard.set_device_ignore_until(remote_jid, remote_device_id, ignore_until)
         {
             warn!("Failed to set device ignore status: {}", e);
         }
@@ -899,7 +896,7 @@ impl OmemoManager {
 
         info!(
             "Ignoring device {}:{} for {} seconds",
-            bare_jid,
+            remote_jid,
             remote_device_id,
             duration.as_secs()
         );
@@ -909,13 +906,11 @@ impl OmemoManager {
     /// Check if a device is currently being ignored
     pub async fn is_device_ignored(
         &self,
-        remote_jid: &str,
+        remote_jid: &BareJid,
         remote_device_id: u32,
     ) -> Result<bool, OmemoError> {
-        let bare_jid = Self::normalize_jid_to_bare(remote_jid);
-
         let storage_guard = self.storage.lock().await;
-        match storage_guard.get_device_ignore_until(&bare_jid, remote_device_id) {
+        match storage_guard.get_device_ignore_until(remote_jid, remote_device_id) {
             Ok(Some(ignore_until)) => {
                 let now = std::time::SystemTime::now();
                 Ok(now < ignore_until)
@@ -928,7 +923,7 @@ impl OmemoManager {
     /// Get the number of consecutive decryption failures for a device
     pub(crate) async fn get_device_failure_count(
         &self,
-        remote_jid: &str,
+        remote_jid: &BareJid,
         remote_device_id: u32,
     ) -> u32 {
         let storage_guard = self.storage.lock().await;
@@ -940,56 +935,55 @@ impl OmemoManager {
     /// Reset a session with a specific device
     pub async fn reset_session(
         &mut self,
-        remote_jid: &str,
+        remote_jid: &BareJid,
         remote_device_id: u32,
     ) -> Result<(), OmemoError> {
-        let bare_jid = Self::normalize_jid_to_bare(remote_jid);
-        let key = (bare_jid.clone(), remote_device_id);
+        let key = (remote_jid.clone(), remote_device_id);
 
         warn!(
             "Aggressively resetting OMEMO session with {}:{} due to repeated failures",
-            bare_jid, remote_device_id
+            remote_jid, remote_device_id
         );
 
         // Remove from memory
         self.sessions.remove(&key);
 
         // Remove from storage
-        let session_key = format!("{}:{}", bare_jid, remote_device_id);
+        let session_key = format!("{}:{}", remote_jid, remote_device_id);
         let storage_guard = self.storage.lock().await;
         if let Err(e) = storage_guard.delete_session(&session_key) {
             warn!(
                 "Failed to delete stored session for {}:{}: {}",
-                bare_jid, remote_device_id, e
+                remote_jid, remote_device_id, e
             );
         }
 
-        if let Err(e) = storage_guard.clear_device_ignore_status(&bare_jid, remote_device_id) {
+        if let Err(e) = storage_guard.clear_device_ignore_status(remote_jid, remote_device_id) {
             warn!(
                 "Failed to clear ignore status for {}:{}: {}",
-                bare_jid, remote_device_id, e
+                remote_jid, remote_device_id, e
             );
         }
 
-        if let Err(e) = storage_guard.reset_device_failure_count(&bare_jid, remote_device_id) {
+        if let Err(e) = storage_guard.reset_device_failure_count(remote_jid, remote_device_id) {
             warn!(
                 "Failed to reset failure count for {}:{}: {}",
-                bare_jid, remote_device_id, e
+                remote_jid, remote_device_id, e
             );
         }
 
         // Clear persistent rebuild / prekey-pending flags so they are not
         // mistakenly re-loaded on the next restart.
-        if let Err(e) = storage_guard.clear_session_rebuild_needed(&bare_jid, remote_device_id) {
+        if let Err(e) = storage_guard.clear_session_rebuild_needed(remote_jid, remote_device_id) {
             warn!(
                 "Failed to clear rebuild flag for {}:{}: {}",
-                bare_jid, remote_device_id, e
+                remote_jid, remote_device_id, e
             );
         }
-        if let Err(e) = storage_guard.clear_prekey_pending(&bare_jid, remote_device_id) {
+        if let Err(e) = storage_guard.clear_prekey_pending(remote_jid, remote_device_id) {
             warn!(
                 "Failed to clear prekey-pending flag for {}:{}: {}",
-                bare_jid, remote_device_id, e
+                remote_jid, remote_device_id, e
             );
         }
         drop(storage_guard);
@@ -999,11 +993,11 @@ impl OmemoManager {
 
         info!(
             "Completely reset session with {}:{} - fresh start on next encryption/decryption",
-            bare_jid, remote_device_id
+            remote_jid, remote_device_id
         );
         info!(
             "Successfully reset session with {}:{}",
-            bare_jid, remote_device_id
+            remote_jid, remote_device_id
         );
         Ok(())
     }
@@ -1023,7 +1017,7 @@ impl OmemoManager {
 
         let storage_guard = self.storage.lock().await;
         let trusted = storage_guard
-            .is_device_trusted(sender, device_id)
+            .is_device_trusted(&BareJid::from_raw_lossy(sender), device_id)
             .map_err(|e| OmemoError::StorageError(format!("Failed to check trust: {}", e)))?;
 
         Ok(trusted)
@@ -1110,7 +1104,7 @@ impl OmemoManager {
 
         let storage_guard = self.storage.lock().await;
         storage_guard
-            .set_trust_level(sender, device_id, TrustLevel::Verified)
+            .set_trust_level(&BareJid::from_raw_lossy(sender), device_id, TrustLevel::Verified)
             .map_err(|e| OmemoError::StorageError(format!("Failed to set verified: {}", e)))?;
 
         Ok(())
@@ -1129,7 +1123,7 @@ impl OmemoManager {
 
         let storage_guard = self.storage.lock().await;
         storage_guard
-            .set_trust_level(sender, device_id, TrustLevel::Untrusted)
+            .set_trust_level(&BareJid::from_raw_lossy(sender), device_id, TrustLevel::Untrusted)
             .map_err(|e| OmemoError::StorageError(format!("Failed to set untrust: {}", e)))?;
 
         Ok(())
@@ -1143,7 +1137,7 @@ impl OmemoManager {
     ) -> Result<TrustLevel, OmemoError> {
         let storage_guard = self.storage.lock().await;
         storage_guard
-            .get_trust_level(sender, device_id)
+            .get_trust_level(&BareJid::from_raw_lossy(sender), device_id)
             .map_err(|e| OmemoError::StorageError(format!("Failed to get trust level: {}", e)))
     }
 
@@ -1154,7 +1148,7 @@ impl OmemoManager {
         device_id: DeviceId,
     ) -> Result<String, OmemoError> {
         debug!("Getting fingerprint for device {}:{}", sender, device_id);
-        let device_identity = self.get_device_identity(sender, device_id).await?;
+        let device_identity = self.get_device_identity(&BareJid::from_raw_lossy(sender), device_id).await?;
         let raw_bytes = &device_identity.identity_key;
         let hex_dump = raw_bytes
             .iter()
@@ -1538,7 +1532,7 @@ impl OmemoManager {
         debug!("Getting device IDs for JID: {}", jid);
 
         let storage_guard = self.storage.lock().await;
-        if let Ok(device_list) = storage_guard.load_device_list(jid) {
+        if let Ok(device_list) = storage_guard.load_device_list(&BareJid::from_raw_lossy(jid)) {
             debug!("Found device list in storage: {:?}", device_list.device_ids);
             return Ok(device_list.device_ids);
         }

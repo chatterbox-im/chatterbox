@@ -13,6 +13,7 @@ use std::time::Instant;
 use thiserror::Error;
 use tokio::sync::Mutex;
 
+use crate::jid::BareJid;
 use crate::omemo::crypto::CryptoError;
 use crate::omemo::device_id::DeviceId;
 use crate::omemo::session::{OmemoSessionState, SessionError};
@@ -194,7 +195,7 @@ pub struct OmemoManager {
     /// Each entry is an `OmemoSessionState` rather than a bare `OmemoSession` so
     /// that pending-rebuild markers (`PeerResetPending`) can be stored in the same
     /// map, eliminating the old `pending_session_rebuilds: HashSet` side-channel.
-    pub(crate) sessions: HashMap<(String, u32), OmemoSessionState>,
+    pub(crate) sessions: HashMap<(BareJid, u32), OmemoSessionState>,
 
     /// PreKey rotation configuration
     pub prekey_rotation_config: PreKeyRotationConfig,
@@ -202,15 +203,15 @@ pub struct OmemoManager {
     /// Devices whose trust level should be restored to Trusted after a session rebuild.
     /// This prevents identity-key-pinning from overriding an explicit user trust decision
     /// when the remote device has a new identity (e.g. fresh install).
-    pub(crate) pending_trust_restorations: HashSet<(String, DeviceId)>,
+    pub(crate) pending_trust_restorations: HashSet<(BareJid, DeviceId)>,
 
     /// Ephemeral keys for pending PreKey messages to specific devices.
     /// Value is (key_bytes, insertion_time) for TTL eviction.
-    pub(crate) prekey_ephemeral_keys: HashMap<(String, DeviceId), (Vec<u8>, Instant)>,
+    pub(crate) prekey_ephemeral_keys: HashMap<(BareJid, DeviceId), (Vec<u8>, Instant)>,
 
     /// Remote device PreKey IDs captured during session creation:
     /// (jid, device_id) → (signed_pre_key_id, Option<one_time_pre_key_id>, insertion_time)
-    pub(crate) remote_prekey_ids: HashMap<(String, DeviceId), (u32, Option<u32>, Instant)>,
+    pub(crate) remote_prekey_ids: HashMap<(BareJid, DeviceId), (u32, Option<u32>, Instant)>,
 
     /// Message IDs that have been successfully decrypted. Used to skip duplicate
     /// decryption attempts when the same OMEMO message arrives both as a direct
@@ -340,19 +341,14 @@ impl OmemoManager {
             )
         };
         for (jid, device_id) in rebuild_pending {
-            // Represent "needs rebuild" directly in the sessions map so it
-            // survives restarts without a separate HashSet.
             manager
                 .sessions
-                .insert((jid, device_id), OmemoSessionState::PeerResetPending);
+                .insert((BareJid::from_raw_lossy(&jid), device_id), OmemoSessionState::PeerResetPending);
         }
         for (jid, device_id) in prekey_pending {
-            // Load recovery state: any device with a prekey-pending-since file
-            // was in RecoveryPreKeySent before the last restart.
-            // `PeerResetPending` takes priority if already set by rebuild_pending.
             manager
                 .sessions
-                .entry((jid, device_id))
+                .entry((BareJid::from_raw_lossy(&jid), device_id))
                 .or_insert(OmemoSessionState::RecoveryPreKeySent { attempt: 0 });
         }
         for msg_id in failed_ids {
@@ -488,14 +484,8 @@ impl OmemoManager {
     }
 
     /// Normalize a JID to bare JID (without resource) for OMEMO session storage
-    pub(crate) fn normalize_jid_to_bare(jid: &str) -> String {
-        let clean_jid = jid.to_lowercase().trim().to_string();
-
-        if let Some(slash_pos) = clean_jid.rfind('/') {
-            clean_jid[..slash_pos].to_string()
-        } else {
-            clean_jid
-        }
+    pub(crate) fn normalize_jid_to_bare(jid: &str) -> BareJid {
+        BareJid::from_raw_lossy(jid)
     }
 }
 
@@ -676,16 +666,16 @@ mod tests {
 
         // prekey_ephemeral_keys and remote_prekey_ids are TTL-evicted
         manager.prekey_ephemeral_keys.insert(
-            ("old@peer.com".to_string(), 1u32),
+            (BareJid::from_raw_lossy("old@peer.com"), 1u32),
             (vec![0xAA; 32], old_time),
         );
         manager.prekey_ephemeral_keys.insert(
-            ("fresh@peer.com".to_string(), 2u32),
+            (BareJid::from_raw_lossy("fresh@peer.com"), 2u32),
             (vec![0xBB; 32], fresh_time),
         );
         manager
             .remote_prekey_ids
-            .insert(("old@peer.com".to_string(), 1u32), (1, Some(2), old_time));
+            .insert((BareJid::from_raw_lossy("old@peer.com"), 1u32), (1, Some(2), old_time));
 
         assert_eq!(manager.prekey_ephemeral_keys.len(), 2);
         manager.evict_stale_entries();
@@ -693,7 +683,7 @@ mod tests {
         assert_eq!(manager.prekey_ephemeral_keys.len(), 1);
         assert!(manager
             .prekey_ephemeral_keys
-            .contains_key(&("fresh@peer.com".to_string(), 2u32)));
+            .contains_key(&(BareJid::from_raw_lossy("fresh@peer.com"), 2u32)));
         assert!(manager.remote_prekey_ids.is_empty());
 
         Ok(())
@@ -709,7 +699,7 @@ mod tests {
         let now = Instant::now();
         for i in 0..1050u32 {
             manager.prekey_ephemeral_keys.insert(
-                (format!("peer{}@test.com", i), DeviceId::from(i)),
+                (BareJid::from_raw_lossy(&format!("peer{}@test.com", i)), DeviceId::from(i)),
                 (vec![0u8; 32], now),
             );
         }

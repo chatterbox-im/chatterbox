@@ -1,4 +1,5 @@
 // Re-export needed modules for testing
+pub mod jid;
 pub mod models;
 pub mod omemo; // OMEMO module
 pub mod storage; // Local message persistence

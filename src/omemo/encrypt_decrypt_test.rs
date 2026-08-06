@@ -16,7 +16,10 @@ mod tests {
     use tempfile::TempDir;
     use tokio::sync::Mutex;
 
+    use crate::jid::BareJid;
     use crate::omemo::device_id::DeviceId;
+
+    fn bjid(s: &str) -> BareJid { BareJid::parse(s).unwrap() }
     use crate::omemo::protocol::X3DHKeyBundle;
     use crate::omemo::session::OmemoSessionState;
     use crate::omemo::storage::{DeviceListEntry, OmemoStorage};
@@ -529,7 +532,7 @@ mod tests {
         // (simulating a fresh connect where she has a stale cached bundle) so
         // that her next PreKey will reference the same (already-consumed) OPK.
         alice.sessions.insert(
-            (bob_jid.to_string(), bob_device_id),
+            (bjid(bob_jid), bob_device_id),
             OmemoSessionState::PeerResetPending,
         );
 
@@ -541,7 +544,7 @@ mod tests {
             .expect("bob→alice encryption should succeed");
         assert!(
             bob.sessions
-                .contains_key(&(alice_jid.to_string(), alice_device_id)),
+                .contains_key(&(bjid(alice_jid), alice_device_id)),
             "Bob should have a session for Alice before the stale-OPK event"
         );
 
@@ -568,7 +571,7 @@ mod tests {
         // (the active session has been replaced with the rebuild marker).
         assert!(
             matches!(
-                bob.sessions.get(&(alice_jid.to_string(), alice_device_id)),
+                bob.sessions.get(&(bjid(alice_jid), alice_device_id)),
                 Some(OmemoSessionState::PeerResetPending)
             ),
             "Bob's session for Alice must be PeerResetPending after stale-OPK rejection"
@@ -577,7 +580,7 @@ mod tests {
         // Invariant 2: Bob must have flagged Alice for a session rebuild.
         assert!(
             matches!(
-                bob.sessions.get(&(alice_jid.to_string(), alice_device_id)),
+                bob.sessions.get(&(bjid(alice_jid), alice_device_id)),
                 Some(OmemoSessionState::PeerResetPending)
             ),
             "Bob must set PeerResetPending for Alice after stale-OPK rejection"
@@ -585,7 +588,7 @@ mod tests {
 
         // Invariant 3: failure count must still be 0 (stale OPK is not a ratchet failure).
         let failure_count = bob
-            .get_device_failure_count(alice_jid, alice_device_id)
+            .get_device_failure_count(&bjid(alice_jid), alice_device_id)
             .await;
         assert_eq!(
             failure_count, 0,
@@ -635,7 +638,7 @@ mod tests {
 
         // Force Alice to rebuild (stale cached bundle scenario).
         alice.sessions.insert(
-            (bob_jid.to_string(), bob_device_id),
+            (bjid(bob_jid), bob_device_id),
             crate::omemo::session::OmemoSessionState::PeerResetPending,
         );
 
@@ -715,7 +718,7 @@ mod tests {
 
         assert!(
             bob.sessions
-                .contains_key(&(alice_jid.to_string(), alice_device_id)),
+                .contains_key(&(bjid(alice_jid), alice_device_id)),
             "session must exist before failure simulation"
         );
 
@@ -740,13 +743,13 @@ mod tests {
         // After 3 failures the session must be wiped from Bob's in-memory map.
         assert!(
             !bob.sessions
-                .contains_key(&(alice_jid.to_string(), alice_device_id)),
+                .contains_key(&(bjid(alice_jid), alice_device_id)),
             "session must be deleted from memory after 3 failures"
         );
 
         // The failure count must be reset (not stuck at 3).
         let count_after = bob
-            .get_device_failure_count(alice_jid, alice_device_id)
+            .get_device_failure_count(&bjid(alice_jid), alice_device_id)
             .await;
         assert_eq!(
             count_after, 0,
@@ -809,12 +812,12 @@ mod tests {
         // After an AEAD failure the session must be in RecoveryPreKeySent, NOT absent.
         assert!(
             matches!(
-                bob.sessions.get(&(alice_jid.to_string(), alice_device_id)),
+                bob.sessions.get(&(bjid(alice_jid), alice_device_id)),
                 Some(OmemoSessionState::RecoveryPreKeySent { .. })
             ),
             "session must be RecoveryPreKeySent after AEAD failure, got: {:?}",
             bob.sessions
-                .get(&(alice_jid.to_string(), alice_device_id))
+                .get(&(bjid(alice_jid), alice_device_id))
                 .map(|s| std::mem::discriminant(s))
         );
     }
@@ -875,7 +878,7 @@ mod tests {
         // No Active session must have been persisted for Alice.
         assert!(
             !matches!(
-                bob.sessions.get(&(alice_jid.to_string(), alice_device_id)),
+                bob.sessions.get(&(bjid(alice_jid), alice_device_id)),
                 Some(OmemoSessionState::Active(_))
             ),
             "no Active session must exist after SPK signature rejection"
@@ -928,7 +931,7 @@ mod tests {
         bob.handle_decryption_failure(alice_jid.to_string(), alice_device_id, aead_err())
             .await
             .ok();
-        let attempt_1 = match bob.sessions.get(&(alice_jid.to_string(), alice_device_id)) {
+        let attempt_1 = match bob.sessions.get(&(bjid(alice_jid), alice_device_id)) {
             Some(OmemoSessionState::RecoveryPreKeySent { attempt }) => *attempt,
             other => panic!(
                 "expected RecoveryPreKeySent, got {:?}",
@@ -940,7 +943,7 @@ mod tests {
         bob.handle_decryption_failure(alice_jid.to_string(), alice_device_id, aead_err())
             .await
             .ok();
-        let attempt_2 = match bob.sessions.get(&(alice_jid.to_string(), alice_device_id)) {
+        let attempt_2 = match bob.sessions.get(&(bjid(alice_jid), alice_device_id)) {
             Some(OmemoSessionState::RecoveryPreKeySent { attempt }) => *attempt,
             other => panic!(
                 "expected RecoveryPreKeySent, got {:?}",
@@ -1007,7 +1010,7 @@ mod tests {
 
         assert!(
             matches!(
-                bob.sessions.get(&(alice_jid.to_string(), alice_device_id)),
+                bob.sessions.get(&(bjid(alice_jid), alice_device_id)),
                 Some(OmemoSessionState::RecoveryPreKeySent { .. })
             ),
             "session must be RecoveryPreKeySent before recovery send"
@@ -1028,7 +1031,7 @@ mod tests {
         // After sending, RecoveryPreKeySent transitions to InitiatorAwaitingReply
         assert!(
             matches!(
-                bob.sessions.get(&(alice_jid.to_string(), alice_device_id)),
+                bob.sessions.get(&(bjid(alice_jid), alice_device_id)),
                 Some(OmemoSessionState::InitiatorAwaitingReply { .. })
             ),
             "session must be InitiatorAwaitingReply after recovery PreKey is sent"
@@ -1104,7 +1107,7 @@ mod tests {
             ref mut sent_at, ..
         }) = alice
             .sessions
-            .get_mut(&(bob_jid.to_string(), bob_device_id))
+            .get_mut(&(bjid(bob_jid), bob_device_id))
         {
             *sent_at = std::time::Instant::now() - std::time::Duration::from_secs(25 * 3600);
         } else {
@@ -1180,7 +1183,7 @@ mod tests {
                 .ok();
         }
 
-        let attempt = match bob.sessions.get(&(alice_jid.to_string(), alice_device_id)) {
+        let attempt = match bob.sessions.get(&(bjid(alice_jid), alice_device_id)) {
             Some(OmemoSessionState::RecoveryPreKeySent { attempt }) => *attempt,
             other => panic!(
                 "session should still be RecoveryPreKeySent, got: {:?}",
@@ -1229,7 +1232,7 @@ mod tests {
 
         let ratchet_state = alice
             .sessions
-            .get(&(bob_jid.to_string(), bob_device_id))
+            .get(&(bjid(bob_jid), bob_device_id))
             .and_then(|s| s.as_session())
             .expect("session must exist after first encrypt")
             .ratchet_state
@@ -1561,9 +1564,9 @@ mod tests {
 
         // Set all three flag types
         storage1
-            .set_session_rebuild_needed("alice@example.com", 42)
+            .set_session_rebuild_needed(&bjid("alice@example.com"), 42)
             .unwrap();
-        storage1.set_prekey_pending("bob@example.com", 99).unwrap();
+        storage1.set_prekey_pending(&bjid("bob@example.com"), 99).unwrap();
         storage1
             .persist_failed_message_id("msg-id-deadbeef")
             .unwrap();
@@ -1594,10 +1597,10 @@ mod tests {
 
         // Verify clear works
         storage2
-            .clear_session_rebuild_needed("alice@example.com", 42)
+            .clear_session_rebuild_needed(&bjid("alice@example.com"), 42)
             .unwrap();
         storage2
-            .clear_prekey_pending("bob@example.com", 99)
+            .clear_prekey_pending(&bjid("bob@example.com"), 99)
             .unwrap();
 
         let rebuild_after = storage2.load_all_rebuild_pending();

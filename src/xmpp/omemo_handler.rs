@@ -12,6 +12,7 @@ use tokio::time::Duration;
 use super::transport;
 use super::{custom_ns, XMPPClient, NS_JABBER_CLIENT};
 use crate::models::{DeliveryStatus, Message};
+use crate::jid::BareJid;
 use crate::omemo::device_id::DeviceId;
 
 impl XMPPClient {
@@ -560,7 +561,7 @@ impl XMPPClient {
                         }
                     };
                     let storage_guard = storage.lock().await;
-                    match storage_guard.load_device_list(bare_jid) {
+                    match storage_guard.load_device_list(&BareJid::from_raw_lossy(bare_jid)) {
                         Ok(entry) if !entry.device_ids.is_empty() => Ok(entry.device_ids),
                         Ok(_) => Ok(vec![]),
                         Err(e) => Err(anyhow!("No cached device list for {}: {}", bare_jid, e)),
@@ -722,7 +723,7 @@ pub(crate) async fn prompt_first_untrusted_key(
     }
 
     let storage = crate::omemo::storage::OmemoStorage::new_default()?;
-    if let Ok(Some(_)) = storage.get_pending_device_verification(contact) {
+    if let Ok(Some(_)) = storage.get_pending_device_verification(&BareJid::from_raw_lossy(contact)) {
         return Ok(());
     }
 
@@ -790,7 +791,7 @@ pub(crate) async fn prompt_first_untrusted_key(
                 }
             };
 
-            if storage.is_device_trusted(contact, device_id)? {
+            if storage.is_device_trusted(&BareJid::from_raw_lossy(contact), device_id)? {
                 let _ = tokio::time::timeout(
                     Duration::from_secs(5),
                     omemo_manager.trust_device_identity(contact, device_id),
@@ -800,13 +801,13 @@ pub(crate) async fn prompt_first_untrusted_key(
             }
 
             // Skip devices the user has already explicitly rejected — don't re-prompt.
-            if storage.get_trust_level(contact, device_id)?
+            if storage.get_trust_level(&BareJid::from_raw_lossy(contact), device_id)?
                 == crate::omemo::storage::TrustLevel::Untrusted
             {
                 continue;
             }
 
-            let _ = storage.store_pending_device_verification(contact, device_id, &fingerprint);
+            let _ = storage.store_pending_device_verification(&BareJid::from_raw_lossy(contact), device_id, &fingerprint);
             info!(
                 "Requesting verification for untrusted device {}:{} with fingerprint {}",
                 contact, device_id, fingerprint

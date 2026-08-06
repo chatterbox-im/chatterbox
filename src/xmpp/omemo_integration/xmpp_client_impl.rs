@@ -2,6 +2,7 @@ use anyhow::{anyhow, Result};
 use log::{debug, error, info, warn};
 use uuid::Uuid;
 
+use crate::jid::BareJid;
 use crate::models::Message;
 use crate::omemo::device_id::DeviceId;
 use crate::xmpp::custom_ns;
@@ -488,7 +489,7 @@ impl crate::xmpp::XMPPClient {
         let storage = crate::omemo::storage::OmemoStorage::new_default()?;
 
         // Parse out the device ID and fingerprint from storage
-        let device_id = match storage.get_pending_device_verification(contact) {
+        let device_id = match storage.get_pending_device_verification(&BareJid::from_raw_lossy(contact)) {
             Ok(Some((device_id, _fingerprint))) => device_id,
             Ok(None) => {
                 warn!(
@@ -506,7 +507,7 @@ impl crate::xmpp::XMPPClient {
         match response {
             "__KEY_ACCEPTED__" => {
                 // First, mark the device as trusted in the database directly
-                if let Err(e) = storage.set_device_trust(contact, device_id, true) {
+                if let Err(e) = storage.set_device_trust(&BareJid::from_raw_lossy(contact), device_id, true) {
                     error!("Failed to mark device as trusted in database: {}", e);
                 }
 
@@ -526,7 +527,7 @@ impl crate::xmpp::XMPPClient {
                 );
 
                 // Clear the pending verification since it's been processed
-                if let Err(e) = storage.remove_pending_device_verification(contact, device_id) {
+                if let Err(e) = storage.remove_pending_device_verification(&BareJid::from_raw_lossy(contact), device_id) {
                     warn!("Failed to remove pending verification: {}", e);
                 }
 
@@ -534,7 +535,7 @@ impl crate::xmpp::XMPPClient {
             }
             "__KEY_REJECTED__" => {
                 // First, mark the device as explicitly untrusted in the database directly
-                if let Err(e) = storage.set_device_trust(contact, device_id, false) {
+                if let Err(e) = storage.set_device_trust(&BareJid::from_raw_lossy(contact), device_id, false) {
                     error!("Failed to mark device as untrusted in database: {}", e);
                 }
 
@@ -554,7 +555,7 @@ impl crate::xmpp::XMPPClient {
                 );
 
                 // Clear the pending verification since it's been processed
-                if let Err(e) = storage.remove_pending_device_verification(contact, device_id) {
+                if let Err(e) = storage.remove_pending_device_verification(&BareJid::from_raw_lossy(contact), device_id) {
                     warn!("Failed to remove pending verification: {}", e);
                 }
 

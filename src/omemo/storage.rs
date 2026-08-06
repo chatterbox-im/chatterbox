@@ -16,6 +16,7 @@
 //! On first run with an existing filesystem store, `OmemoStorage::new` imports
 //! it (see `store_migrate.rs`) and archives the old tree.
 
+use crate::jid::BareJid;
 use crate::omemo::device_id;
 use crate::omemo::device_id::DeviceId;
 use crate::omemo::protocol::{DeviceIdentity, RatchetState, X3DHKeyBundle};
@@ -215,8 +216,8 @@ impl OmemoStorage {
     }
 
     /// Load a device list
-    pub fn load_device_list(&self, jid: &str) -> Result<DeviceListEntry> {
-        match self.store.load_device_list(jid)? {
+    pub fn load_device_list(&self, jid: &BareJid) -> Result<DeviceListEntry> {
+        match self.store.load_device_list(jid.as_str())? {
             Some((device_ids, last_update)) => Ok(DeviceListEntry {
                 jid: jid.to_string(),
                 device_ids,
@@ -231,7 +232,7 @@ impl OmemoStorage {
     /// Store a device identity with BTBV trust model
     pub fn save_device_identity(
         &mut self,
-        jid: &str,
+        jid: &BareJid,
         identity: &DeviceIdentity,
         trusted: bool,
     ) -> Result<()> {
@@ -246,10 +247,10 @@ impl OmemoStorage {
         };
 
         self.store
-            .save_identity(jid, identity, trust_level.as_str())?;
+            .save_identity(jid.as_str(), identity, trust_level.as_str())?;
         // `save_identity` preserves an existing trust level on conflict, so set
         // it explicitly for the first-insert case and for an intentional change.
-        self.store.set_trust(jid, identity.id, trust_level.as_str())
+        self.store.set_trust(jid.as_str(), identity.id, trust_level.as_str())
     }
 
     /// Persist a freshly-fetched device identity with **identity-key pinning**.
@@ -267,7 +268,7 @@ impl OmemoStorage {
     /// `true` iff the identity key changed.
     pub fn save_fetched_identity(
         &mut self,
-        jid: &str,
+        jid: &BareJid,
         identity: &DeviceIdentity,
         new_fingerprint: &str,
     ) -> Result<bool> {
@@ -303,8 +304,6 @@ impl OmemoStorage {
                 );
             }
         } else if let Some(trust) = existing_trust {
-            // Same key (or first contact with a prior trust marker): preserve an
-            // explicitly-set trust level across the refetch.
             if trust != TrustLevel::Undecided {
                 self.set_trust_level(jid, device_id, trust)?;
             }
@@ -316,10 +315,10 @@ impl OmemoStorage {
     /// Load a device identity
     pub fn load_device_identity(
         &mut self,
-        jid: &str,
+        jid: &BareJid,
         device_id: DeviceId,
     ) -> Result<DeviceIdentity> {
-        self.store.load_identity(jid, device_id)?.ok_or_else(|| {
+        self.store.load_identity(jid.as_str(), device_id)?.ok_or_else(|| {
             anyhow!(
                 "Device identity not found for JID: {}, device_id: {}",
                 jid,
@@ -329,40 +328,33 @@ impl OmemoStorage {
     }
 
     /// Check if a device identity is trusted
-    pub fn is_device_trusted(&self, jid: &str, device_id: DeviceId) -> Result<bool> {
-        // BTBV: "trusted" and "verified" both count as trusted
-        // "undecided" also counts as trusted (blind trust before verification)
-        // Only "untrusted" is explicitly not trusted
+    pub fn is_device_trusted(&self, jid: &BareJid, device_id: DeviceId) -> Result<bool> {
         Ok(self.get_trust_level(jid, device_id)? != TrustLevel::Untrusted)
     }
 
     /// Get the trust level for a device
-    pub fn get_trust_level(&self, jid: &str, device_id: DeviceId) -> Result<TrustLevel> {
+    pub fn get_trust_level(&self, jid: &BareJid, device_id: DeviceId) -> Result<TrustLevel> {
         Ok(self
             .store
-            .get_trust(jid, device_id)?
+            .get_trust(jid.as_str(), device_id)?
             .map(|s| TrustLevel::from_str(&s))
             .unwrap_or(TrustLevel::Undecided))
     }
 
     /// Set the trust level for a device
-    pub fn set_trust_level(&self, jid: &str, device_id: DeviceId, level: TrustLevel) -> Result<()> {
-        self.store.set_trust(jid, device_id, level.as_str())
+    pub fn set_trust_level(&self, jid: &BareJid, device_id: DeviceId, level: TrustLevel) -> Result<()> {
+        self.store.set_trust(jid.as_str(), device_id, level.as_str())
     }
 
     /// Check if any device for a contact has been manually verified
-    pub fn has_verified_device(&self, jid: &str) -> Result<bool> {
+    pub fn has_verified_device(&self, jid: &BareJid) -> Result<bool> {
         self.store
-            .has_trust_level(jid, TrustLevel::Verified.as_str())
+            .has_trust_level(jid.as_str(), TrustLevel::Verified.as_str())
     }
 
     /// Set the trust status of a device identity
-    pub fn set_device_trust(&self, jid: &str, device_id: DeviceId, trusted: bool) -> Result<()> {
-        let level = if trusted {
-            TrustLevel::Trusted
-        } else {
-            TrustLevel::Untrusted
-        };
+    pub fn set_device_trust(&self, jid: &BareJid, device_id: DeviceId, trusted: bool) -> Result<()> {
+        let level = if trusted { TrustLevel::Trusted } else { TrustLevel::Untrusted };
         self.set_trust_level(jid, device_id, level)
     }
 
@@ -390,8 +382,8 @@ impl OmemoStorage {
     // -------------------------------------------------------------- sessions --
 
     /// Store a session
-    pub fn save_session(&self, jid: &str, device_id: DeviceId, state: &RatchetState) -> Result<()> {
-        self.store.save_session(jid, device_id, state)
+    pub fn save_session(&self, jid: &BareJid, device_id: DeviceId, state: &RatchetState) -> Result<()> {
+        self.store.save_session(jid.as_str(), device_id, state)
     }
 
     /// Atomically persist a session together with the key bundle whose one-time
@@ -403,13 +395,13 @@ impl OmemoStorage {
     /// both of which surface later as an unrecoverable session.
     pub fn commit_prekey_consumption(
         &self,
-        jid: &str,
+        jid: &BareJid,
         device_id: DeviceId,
         state: &RatchetState,
         bundle: &X3DHKeyBundle,
     ) -> Result<()> {
         self.store
-            .commit_prekey_consumption(jid, device_id, state, bundle)
+            .commit_prekey_consumption(jid.as_str(), device_id, state, bundle)
     }
 
     /// Load all sessions, keyed as `"<jid>:<device_id>"`.
@@ -424,10 +416,10 @@ impl OmemoStorage {
     /// Get the session state for a peer device
     pub fn get_session_ratchet_state(
         &self,
-        jid: &str,
+        jid: &BareJid,
         device_id: DeviceId,
     ) -> Result<Option<RatchetState>> {
-        self.store.load_session(jid, device_id)
+        self.store.load_session(jid.as_str(), device_id)
     }
 
     /// Delete a session identified by `"<jid>:<device_id>"`.
@@ -462,13 +454,13 @@ impl OmemoStorage {
     }
 
     /// Check if device list has been published
-    pub async fn has_published_device_list(&self, jid: &str) -> Result<bool> {
-        self.store.is_device_list_published(jid)
+    pub async fn has_published_device_list(&self, jid: &BareJid) -> Result<bool> {
+        self.store.is_device_list_published(jid.as_str())
     }
 
     /// Mark device list as published (can be called from both sync and async contexts)
-    pub fn mark_device_list_published(&self, jid: &str) -> Result<()> {
-        self.store.mark_device_list_published(jid)
+    pub fn mark_device_list_published(&self, jid: &BareJid) -> Result<()> {
+        self.store.mark_device_list_published(jid.as_str())
     }
 
     /// Check if bundle has been published
@@ -489,22 +481,22 @@ impl OmemoStorage {
     /// Store information about a pending device verification
     pub fn store_pending_device_verification(
         &self,
-        jid: &str,
+        jid: &BareJid,
         device_id: DeviceId,
         fingerprint: &str,
     ) -> Result<()> {
         self.store
-            .set_pending_verification(jid, device_id, fingerprint)
+            .set_pending_verification(jid.as_str(), device_id, fingerprint)
     }
 
     /// Check if there's a pending verification for a device
-    pub fn get_pending_device_verification(&self, jid: &str) -> Result<Option<(DeviceId, String)>> {
-        self.store.get_pending_verification(jid)
+    pub fn get_pending_device_verification(&self, jid: &BareJid) -> Result<Option<(DeviceId, String)>> {
+        self.store.get_pending_verification(jid.as_str())
     }
 
     /// Remove a pending verification
-    pub fn remove_pending_device_verification(&self, jid: &str, device_id: DeviceId) -> Result<()> {
-        self.store.remove_pending_verification(jid, device_id)
+    pub fn remove_pending_device_verification(&self, jid: &BareJid, device_id: DeviceId) -> Result<()> {
+        self.store.remove_pending_verification(jid.as_str(), device_id)
     }
 
     // ------------------------------------------------------ per-device state --
@@ -512,13 +504,13 @@ impl OmemoStorage {
     /// Update the last undecryptable message timestamp for a device
     pub fn update_last_undecryptable_message(
         &self,
-        jid: &str,
+        jid: &BareJid,
         device_id: DeviceId,
         timestamp: i64,
     ) -> Result<()> {
         // Timestamp and failure-count increment are now a single statement;
         // previously two file writes, so a crash between them lost the bump.
-        self.store.record_undecryptable(jid, device_id, timestamp)?;
+        self.store.record_undecryptable(jid.as_str(), device_id, timestamp)?;
         debug!(
             "Updated undecryptable message timestamp for {}:{} to {}",
             jid, device_id, timestamp
@@ -529,14 +521,14 @@ impl OmemoStorage {
     /// Set the ignore-until timestamp for a device
     pub fn set_device_ignore_until(
         &self,
-        jid: &str,
+        jid: &BareJid,
         device_id: DeviceId,
         ignore_until: std::time::SystemTime,
     ) -> Result<()> {
         let timestamp = ignore_until
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs() as i64;
-        self.store.set_ignore_until(jid, device_id, timestamp)?;
+        self.store.set_ignore_until(jid.as_str(), device_id, timestamp)?;
         debug!(
             "Set device ignore until timestamp for {}:{} to {}",
             jid, device_id, timestamp
@@ -547,29 +539,29 @@ impl OmemoStorage {
     /// Get the ignore-until timestamp for a device
     pub fn get_device_ignore_until(
         &self,
-        jid: &str,
+        jid: &BareJid,
         device_id: DeviceId,
     ) -> Result<Option<std::time::SystemTime>> {
-        Ok(self.store.get_ignore_until(jid, device_id)?.map(|ts| {
+        Ok(self.store.get_ignore_until(jid.as_str(), device_id)?.map(|ts| {
             std::time::UNIX_EPOCH + std::time::Duration::from_secs(ts.max(0) as u64)
         }))
     }
 
     /// Clear the ignore status for a device
-    pub fn clear_device_ignore_status(&self, jid: &str, device_id: DeviceId) -> Result<()> {
-        self.store.clear_ignore_until(jid, device_id)?;
+    pub fn clear_device_ignore_status(&self, jid: &BareJid, device_id: DeviceId) -> Result<()> {
+        self.store.clear_ignore_until(jid.as_str(), device_id)?;
         debug!("Cleared ignore status for {}:{}", jid, device_id);
         Ok(())
     }
 
     /// Get the failure count for a device
-    pub fn get_device_failure_count(&self, jid: &str, device_id: DeviceId) -> Result<u32> {
-        self.store.get_failure_count(jid, device_id)
+    pub fn get_device_failure_count(&self, jid: &BareJid, device_id: DeviceId) -> Result<u32> {
+        self.store.get_failure_count(jid.as_str(), device_id)
     }
 
     /// Reset the failure count for a device
-    pub fn reset_device_failure_count(&self, jid: &str, device_id: DeviceId) -> Result<()> {
-        self.store.reset_failure_count(jid, device_id)?;
+    pub fn reset_device_failure_count(&self, jid: &BareJid, device_id: DeviceId) -> Result<()> {
+        self.store.reset_failure_count(jid.as_str(), device_id)?;
         debug!("Reset failure count for {}:{}", jid, device_id);
         Ok(())
     }
@@ -578,34 +570,34 @@ impl OmemoStorage {
 
     /// Mark that the session with `(jid, device_id)` needs to be rebuilt the
     /// next time we encrypt for that device.  Survives process restarts.
-    pub fn set_session_rebuild_needed(&self, jid: &str, device_id: DeviceId) -> Result<()> {
-        self.store.set_rebuild_needed(jid, device_id, true)
+    pub fn set_session_rebuild_needed(&self, jid: &BareJid, device_id: DeviceId) -> Result<()> {
+        self.store.set_rebuild_needed(jid.as_str(), device_id, true)
     }
 
     /// Clear the rebuild-needed flag once the rebuild has been performed.
-    pub fn clear_session_rebuild_needed(&self, jid: &str, device_id: DeviceId) -> Result<()> {
-        self.store.set_rebuild_needed(jid, device_id, false)
+    pub fn clear_session_rebuild_needed(&self, jid: &BareJid, device_id: DeviceId) -> Result<()> {
+        self.store.set_rebuild_needed(jid.as_str(), device_id, false)
     }
 
     /// Mark that a PreKey message is pending for `(jid, device_id)`.
-    pub fn set_prekey_pending(&self, jid: &str, device_id: DeviceId) -> Result<()> {
+    pub fn set_prekey_pending(&self, jid: &BareJid, device_id: DeviceId) -> Result<()> {
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
-        self.store.set_prekey_pending(jid, device_id, Some(ts))
+        self.store.set_prekey_pending(jid.as_str(), device_id, Some(ts))
     }
 
     /// Clear the prekey-pending flag once the PreKey message has been sent.
-    pub fn clear_prekey_pending(&self, jid: &str, device_id: DeviceId) -> Result<()> {
-        self.store.set_prekey_pending(jid, device_id, None)
+    pub fn clear_prekey_pending(&self, jid: &BareJid, device_id: DeviceId) -> Result<()> {
+        self.store.set_prekey_pending(jid.as_str(), device_id, None)
     }
 
     /// Return the unix timestamp (seconds) at which the prekey-pending flag was
     /// set, or `None` if the flag is not set.
-    pub fn get_prekey_pending_since(&self, jid: &str, device_id: DeviceId) -> Option<u64> {
+    pub fn get_prekey_pending_since(&self, jid: &BareJid, device_id: DeviceId) -> Option<u64> {
         self.store
-            .get_prekey_pending_since(jid, device_id)
+            .get_prekey_pending_since(jid.as_str(), device_id)
             .ok()
             .flatten()
             .map(|ts| ts.max(0) as u64)
@@ -677,50 +669,50 @@ mod tests {
     fn test_identity_key_pinning_resets_trust_on_change() {
         let mut storage = OmemoStorage::new_in_memory().unwrap();
 
-        let jid = "alice@example.org";
+        let jid = BareJid::parse("alice@example.org").unwrap();
         let dev: DeviceId = 1234;
 
         // First contact: store identity A. No prior key → not a change.
         let id_a = make_identity(dev, 0x11);
-        let changed = storage.save_fetched_identity(jid, &id_a, "FP_A").unwrap();
+        let changed = storage.save_fetched_identity(&jid, &id_a, "FP_A").unwrap();
         assert!(!changed, "first save must not be flagged as a key change");
 
         // User verifies the device.
         storage
-            .set_trust_level(jid, dev, TrustLevel::Verified)
+            .set_trust_level(&jid, dev, TrustLevel::Verified)
             .unwrap();
         assert_eq!(
-            storage.get_trust_level(jid, dev).unwrap(),
+            storage.get_trust_level(&jid, dev).unwrap(),
             TrustLevel::Verified
         );
 
         // Same key refetched → trust preserved, no pending verification raised.
-        let changed = storage.save_fetched_identity(jid, &id_a, "FP_A").unwrap();
+        let changed = storage.save_fetched_identity(&jid, &id_a, "FP_A").unwrap();
         assert!(!changed, "same key must not be flagged as changed");
         assert_eq!(
-            storage.get_trust_level(jid, dev).unwrap(),
+            storage.get_trust_level(&jid, dev).unwrap(),
             TrustLevel::Verified,
             "verified trust must survive a same-key refetch"
         );
 
         // Attacker swaps the identity key for the SAME device id.
         let id_b = make_identity(dev, 0x22);
-        let changed = storage.save_fetched_identity(jid, &id_b, "FP_B").unwrap();
+        let changed = storage.save_fetched_identity(&jid, &id_b, "FP_B").unwrap();
 
         assert!(changed, "key swap MUST be detected");
         assert_eq!(
-            storage.get_trust_level(jid, dev).unwrap(),
+            storage.get_trust_level(&jid, dev).unwrap(),
             TrustLevel::Untrusted,
             "trust MUST be reset to Untrusted on key change (no MITM trust transfer)"
         );
         // New key is persisted.
         assert_eq!(
-            storage.load_device_identity(jid, dev).unwrap().identity_key,
+            storage.load_device_identity(&jid, dev).unwrap().identity_key,
             id_b.identity_key
         );
         // UI re-verification is flagged with the new fingerprint.
         assert_eq!(
-            storage.get_pending_device_verification(jid).unwrap(),
+            storage.get_pending_device_verification(&jid).unwrap(),
             Some((dev, "FP_B".to_string()))
         );
     }
@@ -731,16 +723,17 @@ mod tests {
     #[test]
     fn jids_with_digits_survive_a_save_load_cycle() {
         let storage = OmemoStorage::new_in_memory().unwrap();
-        for jid in ["user1@example.com", "b0b@example.com", "user@10.0.0.5"] {
+        for jid_str in ["user1@example.com", "b0b@example.com", "user@10.0.0.5"] {
+            let jid = BareJid::parse(jid_str).unwrap();
             storage
                 .save_device_list(&DeviceListEntry {
-                    jid: jid.to_string(),
+                    jid: jid_str.to_string(),
                     device_ids: vec![1, 2, 3],
                     last_update: 42,
                 })
                 .unwrap();
-            let back = storage.load_device_list(jid).unwrap();
-            assert_eq!(back.jid, jid);
+            let back = storage.load_device_list(&jid).unwrap();
+            assert_eq!(back.jid, jid_str);
             assert_eq!(back.device_ids, vec![1, 2, 3]);
         }
     }

@@ -4,6 +4,7 @@
 use hex;
 use log::{debug, error, info, warn};
 
+use crate::jid::BareJid;
 use crate::omemo::crypto;
 use crate::omemo::keys::{AesGcmKey, GcmNonce};
 use crate::omemo::protocol::{self, OmemoMessage};
@@ -313,7 +314,7 @@ impl OmemoManager {
 
             // Create recipient session
             let session = OmemoSession::new_recipient(
-                bare_jid.clone(),
+                bare_jid.to_string(),
                 device_id,
                 our_identity_key_pair,
                 sender_identity.identity_key,
@@ -405,7 +406,7 @@ impl OmemoManager {
         // Reset failure count after successful decryption
         {
             let storage_guard = self.storage.lock().await;
-            if let Err(e) = storage_guard.reset_device_failure_count(&sender_str, device_id) {
+            if let Err(e) = storage_guard.reset_device_failure_count(&BareJid::from_raw_lossy(&sender_str), device_id) {
                 warn!(
                     "Failed to reset failure count for {}:{}: {}",
                     sender_str, device_id, e
@@ -480,7 +481,7 @@ impl OmemoManager {
 
         // Store the updated session state
         if let Some(ratchet_state) = session_state_to_store {
-            self.store_session_state(&sender_str, device_id, &ratchet_state)
+            self.store_session_state(&BareJid::from_raw_lossy(&sender_str), device_id, &ratchet_state)
                 .await?;
         }
 
