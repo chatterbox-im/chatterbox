@@ -191,7 +191,24 @@ fn handle_iq(
     let iq_id = iq.attr("id").unwrap_or("").to_string();
     let to = iq.attr("to").map(String::from);
 
-    // IQ addressed to another JID → route it
+    // PubSub get addressed to another JID: FakeServer acts as the PEP service.
+    if iq_type == "get" {
+        if let Some(pubsub) = iq.get_child("pubsub", "http://jabber.org/protocol/pubsub") {
+            if let Some(ref to_jid) = to {
+                let pep_owner = bare_jid(to_jid);
+                if pep_owner != bare_jid(from_jid) {
+                    // Cross-account PEP fetch — serve from state directly.
+                    let requester = accounts.get(&bare_jid(from_jid));
+                    if let Some(acc) = requester {
+                        handle_pubsub_iq(state, acc, &pep_owner, iq_type, &iq_id, pubsub);
+                    }
+                    return;
+                }
+            }
+        }
+    }
+
+    // IQ addressed to another JID → route it (non-PubSub)
     if let Some(ref to_jid) = to {
         let bare_to = bare_jid(to_jid);
         if bare_to != bare_jid(from_jid) {
@@ -291,13 +308,22 @@ fn handle_pubsub_iq(
 
 // ── Message routing ───────────────────────────────────────────────────────────
 
-fn handle_message(accounts: &HashMap<String, Account>, _from_jid: &str, msg: &Element) {
+fn handle_message(accounts: &HashMap<String, Account>, from_jid: &str, msg: &Element) {
     let to = match msg.attr("to") {
         Some(t) => bare_jid(t),
         None => return,
     };
     if let Some(acc) = accounts.get(&to) {
-        if let Ok(stanza) = tokio_xmpp::Stanza::try_from(msg.clone()) {
+        // Add from= attribute if missing (a real server would always set this).
+        let mut routed = msg.clone();
+        if routed.attr("from").is_none() {
+            routed.set_attr(
+                xmpp_parsers::minidom::rxml::Namespace::NONE,
+                "from".try_into().unwrap(),
+                from_jid,
+            );
+        }
+        if let Ok(stanza) = tokio_xmpp::Stanza::try_from(routed) {
             let _ = acc.event_tx.send(XMPPEvent::Stanza(stanza));
         }
     }

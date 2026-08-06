@@ -325,7 +325,7 @@ impl OmemoManager {
             remote_jid, device_id
         );
 
-        let bundle_node = format!("{}.bundles:{}", OMEMO_NAMESPACE, device_id);
+        let bundle_node = crate::omemo::bundle_node(device_id);
 
         // Make the request
         let response = match self.pubsub.request_items(remote_jid.as_str(), &bundle_node).await {

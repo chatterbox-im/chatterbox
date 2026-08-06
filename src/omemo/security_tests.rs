@@ -58,7 +58,7 @@ mod tests {
                 ns = OMEMO_NAMESPACE, devs = devs
             );
             let mut r = self.responses.lock().await;
-            for node in [format!("{}.devicelist", OMEMO_NAMESPACE), format!("{}:devices", OMEMO_NAMESPACE)] {
+            for node in crate::omemo::devicelist_node_variants() {
                 r.insert(format!("{}|{}", jid, node), xml.clone());
             }
         }
@@ -82,8 +82,10 @@ mod tests {
                 ns = OMEMO_NAMESPACE, did = did,
                 ik = ik, spkid = bundle.signed_pre_key_id, spk = spk, sig = sig, pks = pks
             );
-            let key = format!("{}|{}.bundles:{}", jid, OMEMO_NAMESPACE, did);
-            self.responses.lock().await.insert(key, xml);
+            for node in crate::omemo::bundle_node_variants(crate::omemo::device_id::DeviceId::from(did)) {
+                let key = format!("{}|{}", jid, node);
+                self.responses.lock().await.insert(key, xml.clone());
+            }
         }
     }
     #[async_trait]

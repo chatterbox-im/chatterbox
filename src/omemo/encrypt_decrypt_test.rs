@@ -55,11 +55,7 @@ mod tests {
 
             // Add for all node format variants that device_discovery tries
             let mut responses = self.responses.lock().await;
-            let node_formats = [
-                format!("{}.devicelist", OMEMO_NAMESPACE),
-                format!("{}:devices", OMEMO_NAMESPACE),
-            ];
-            for node in &node_formats {
+            for node in crate::omemo::devicelist_node_variants() {
                 let key = format!("{}|{}", jid, node);
                 responses.insert(key, xml.clone());
             }
@@ -98,9 +94,12 @@ mod tests {
                 pks = prekeys_xml,
             );
 
-            let node = format!("{}.bundles:{}", OMEMO_NAMESPACE, device_id);
-            let key = format!("{}|{}", jid, node);
-            self.responses.lock().await.insert(key, xml);
+            for node in crate::omemo::bundle_node_variants(
+                crate::omemo::device_id::DeviceId::from(device_id)
+            ) {
+                let key = format!("{}|{}", jid, node);
+                self.responses.lock().await.insert(key, xml.clone());
+            }
         }
     }
 

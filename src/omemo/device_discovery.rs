@@ -363,7 +363,7 @@ pub async fn fetch_device_list_with_fallbacks(
     }
 
     // If we didn't find any devices, try the standard node as a final attempt
-    let standard_node = format!("{}:devices", OMEMO_NAMESPACE);
+    let standard_node = crate::omemo::devicelist_node_variants()[1].clone();
     match timeout(
         Duration::from_secs(DEVICE_LIST_TIMEOUT_SECS),
         pubsub.request_items(bare_jid, &standard_node),
@@ -386,7 +386,7 @@ pub async fn fetch_device_list_with_fallbacks(
     }
 
     // Try legacy format as final attempt
-    let legacy_node = format!("{}:devicelist", OMEMO_NAMESPACE);
+    let legacy_node = crate::omemo::devicelist_node_variants()[2].clone();
     match timeout(
         Duration::from_secs(DEVICE_LIST_TIMEOUT_SECS),
         pubsub.request_items(bare_jid, &legacy_node),
@@ -424,7 +424,7 @@ async fn try_fetch_bundle_for_common_device_ids(
     let mut found_devices = Vec::new();
 
     for &device_id in &common_device_ids {
-        let bundle_node = format!("{}.bundles:{}", OMEMO_NAMESPACE, device_id);
+        let bundle_node = crate::omemo::bundle_node_variants(DeviceId::from(device_id))[0].clone();
         match timeout(
             Duration::from_secs(DEVICE_LIST_TIMEOUT_SECS),
             pubsub.request_items(jid, &bundle_node),
@@ -452,7 +452,7 @@ async fn try_fetch_bundle_for_common_device_ids(
         }
 
         // Try alternative format (legacy with colon)
-        let alt_bundle_node = format!("{}:bundles:{}", OMEMO_NAMESPACE, device_id);
+        let alt_bundle_node = crate::omemo::bundle_node_variants(DeviceId::from(device_id))[1].clone();
         match timeout(
             Duration::from_secs(DEVICE_LIST_TIMEOUT_SECS),
             pubsub.request_items(jid, &alt_bundle_node),

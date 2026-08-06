@@ -49,11 +49,8 @@ mod proptest_session {
                 devs = devices_xml,
             );
             let mut r = self.responses.lock().await;
-            for fmt in &[
-                format!("{}.devicelist", OMEMO_NAMESPACE),
-                format!("{}:devices", OMEMO_NAMESPACE),
-            ] {
-                r.insert(format!("{}|{}", jid, fmt), xml.clone());
+            for node in crate::omemo::devicelist_node_variants() {
+                r.insert(format!("{}|{}", jid, node), xml.clone());
             }
         }
 
@@ -84,11 +81,11 @@ mod proptest_session {
                 sig = b64.encode(&bundle.signed_pre_key_signature),
                 pks = pks,
             );
-            let node = format!("{}.bundles:{}", OMEMO_NAMESPACE, device_id);
-            self.responses
-                .lock()
-                .await
-                .insert(format!("{}|{}", jid, node), xml);
+            for node in crate::omemo::bundle_node_variants(
+                crate::omemo::device_id::DeviceId::from(device_id)
+            ) {
+                self.responses.lock().await.insert(format!("{}|{}", jid, node), xml.clone());
+            }
         }
     }
 

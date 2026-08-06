@@ -44,6 +44,33 @@ pub mod wire;
 /// The OMEMO namespace used in XMPP stanzas
 pub const OMEMO_NAMESPACE: &str = "eu.siacs.conversations.axolotl";
 
+/// Primary PEP node for device lists (legacy Conversations format).
+pub fn devicelist_node() -> String {
+    format!("{}.devicelist", OMEMO_NAMESPACE)
+}
+
+/// Primary PEP node for a device's bundle.
+pub fn bundle_node(device_id: crate::omemo::device_id::DeviceId) -> String {
+    format!("{}.bundles:{}", OMEMO_NAMESPACE, device_id)
+}
+
+/// All node-name variants tried when fetching a device list (primary first).
+pub fn devicelist_node_variants() -> [String; 3] {
+    [
+        format!("{}.devicelist", OMEMO_NAMESPACE),
+        format!("{}:devices",    OMEMO_NAMESPACE),
+        format!("{}:devicelist", OMEMO_NAMESPACE),
+    ]
+}
+
+/// All node-name variants tried when fetching a bundle (primary first).
+pub fn bundle_node_variants(device_id: crate::omemo::device_id::DeviceId) -> [String; 2] {
+    [
+        format!("{}.bundles:{}", OMEMO_NAMESPACE, device_id),
+        format!("{}:bundles:{}", OMEMO_NAMESPACE, device_id),
+    ]
+}
+
 /// Trait abstracting the XMPP PubSub operations that OMEMO needs.
 /// This breaks the circular dependency: OmemoManager depends on this trait,
 /// and the XMPP layer implements it. No globals needed.

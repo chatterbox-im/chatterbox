@@ -354,7 +354,7 @@ impl OmemoManager {
 
         // Fall back to basic method
         {
-            let standard_node = format!("{}:devices", OMEMO_NAMESPACE);
+            let standard_node = crate::omemo::devicelist_node_variants()[1].clone();
             info!("[OMEMO] Trying standard node: {}", standard_node);
             match timeout(Duration::from_secs(5), self.pubsub.request_items(bare_jid, &standard_node)).await {
                 Ok(Ok(xml)) => match self.parse_device_list_response(&xml) {
