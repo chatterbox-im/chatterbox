@@ -100,7 +100,7 @@ pub struct Message {
     pub sender_id: String,
     pub recipient_id: String,
     pub content: String,
-    pub timestamp: u64,
+    pub timestamp: crate::units::Millis,
     pub delivery_status: DeliveryStatus,
     pub encrypted: bool,
 }
@@ -117,7 +117,7 @@ impl Message {
             sender_id: "me".to_string(),
             recipient_id: recipient.into(),
             content: content.into(),
-            timestamp: Utc::now().timestamp_millis() as u64,
+            timestamp: Utc::now().timestamp_millis().into(),
             delivery_status: DeliveryStatus::Sent,
             encrypted: true,
         }
@@ -134,7 +134,7 @@ impl Message {
             sender_id: "me".to_string(),
             recipient_id: recipient.into(),
             content: content.into(),
-            timestamp: Utc::now().timestamp_millis() as u64,
+            timestamp: Utc::now().timestamp_millis().into(),
             delivery_status: DeliveryStatus::Sent,
             encrypted: false,
         }
@@ -151,7 +151,7 @@ impl Message {
             sender_id: sender.into(),
             recipient_id: "me".to_string(),
             content: content.into(),
-            timestamp: Utc::now().timestamp_millis() as u64,
+            timestamp: Utc::now().timestamp_millis().into(),
             delivery_status: DeliveryStatus::Delivered,
             encrypted: true,
         }
@@ -168,7 +168,7 @@ impl Message {
             sender_id: sender.into(),
             recipient_id: "me".to_string(),
             content: content.into(),
-            timestamp: Utc::now().timestamp_millis() as u64,
+            timestamp: Utc::now().timestamp_millis().into(),
             delivery_status: DeliveryStatus::Delivered,
             encrypted: false,
         }
@@ -181,7 +181,7 @@ impl Message {
             sender_id: "system".to_string(),
             recipient_id: recipient.into(),
             content: content.into(),
-            timestamp: Utc::now().timestamp_millis() as u64,
+            timestamp: Utc::now().timestamp_millis().into(),
             delivery_status: DeliveryStatus::Delivered,
             encrypted: false,
         }
@@ -200,7 +200,7 @@ impl Message {
             sender_id: "me".to_string(),
             recipient_id: recipient.into(),
             content: content.into(),
-            timestamp: Utc::now().timestamp_millis() as u64,
+            timestamp: Utc::now().timestamp_millis().into(),
             delivery_status: status,
             encrypted,
         }
@@ -212,7 +212,7 @@ pub struct PendingMessage {
     pub id: String,
     pub to: String,
     pub content: String,
-    pub timestamp: u64,
+    pub timestamp: crate::units::Millis,
     pub status: DeliveryStatus,
 }
 

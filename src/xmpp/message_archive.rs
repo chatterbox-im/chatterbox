@@ -336,11 +336,11 @@ impl super::XMPPClient {
                         let timestamp_str = delay.attr("stamp").unwrap_or("");
                         let timestamp = if !timestamp_str.is_empty() {
                             match chrono::DateTime::parse_from_rfc3339(timestamp_str) {
-                                Ok(dt) => dt.timestamp_millis() as u64,
-                                Err(_) => chrono::Utc::now().timestamp_millis() as u64,
+                                Ok(dt) => dt.timestamp_millis().into(),
+                                Err(_) => chrono::Utc::now().timestamp_millis().into(),
                             }
                         } else {
-                            chrono::Utc::now().timestamp_millis() as u64
+                            chrono::Utc::now().timestamp_millis().into()
                         };
 
                         let message_id = message_stanza
@@ -839,7 +839,7 @@ impl super::XMPPClient {
                         current_result.messages.len(),
                         count
                     ),
-                    timestamp: chrono::Utc::now().timestamp_millis() as u64,
+                    timestamp: chrono::Utc::now().timestamp_millis().into(),
                     delivery_status: DeliveryStatus::Delivered,
                     encrypted: false,
                 };
@@ -892,7 +892,7 @@ impl super::XMPPClient {
                                     "Loading message history ({}/{} messages)...",
                                     loaded_so_far, count
                                 ),
-                                timestamp: chrono::Utc::now().timestamp_millis() as u64,
+                                timestamp: chrono::Utc::now().timestamp_millis().into(),
                                 delivery_status: DeliveryStatus::Delivered,
                                 encrypted: false,
                             };
@@ -927,7 +927,7 @@ impl super::XMPPClient {
                             sender_id: "[System]".to_string(),
                             recipient_id: jid.to_string(),
                             content: format!("Failed to retrieve full message history: {}", e),
-                            timestamp: chrono::Utc::now().timestamp_millis() as u64,
+                            timestamp: chrono::Utc::now().timestamp_millis().into(),
                             delivery_status: DeliveryStatus::Delivered,
                             encrypted: false,
                         };
@@ -960,7 +960,7 @@ impl super::XMPPClient {
             } else {
                 "Partial message history loaded (not all messages could be retrieved)".to_string()
             },
-            timestamp: chrono::Utc::now().timestamp_millis() as u64,
+            timestamp: chrono::Utc::now().timestamp_millis().into(),
             delivery_status: DeliveryStatus::Delivered,
             encrypted: false,
         };

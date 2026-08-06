@@ -2,6 +2,7 @@
 pub mod jid;
 pub mod models;
 pub mod omemo; // OMEMO module
+pub mod units;
 pub mod storage; // Local message persistence
 pub mod xmpp; // Our new modular XMPP implementation
 
@@ -76,7 +77,7 @@ mod tests {
             sender_id: "sender1".to_string(),
             recipient_id: "recipient1".to_string(),
             content: "Hello, world!".to_string(),
-            timestamp: 1650000000,
+            timestamp: crate::units::Millis(1650000000),
             delivery_status: DeliveryStatus::Sending,
             encrypted: false,
         };
@@ -86,7 +87,7 @@ mod tests {
         assert_eq!(msg.sender_id, "sender1");
         assert_eq!(msg.recipient_id, "recipient1");
         assert_eq!(msg.content, "Hello, world!");
-        assert_eq!(msg.timestamp, 1650000000);
+        assert_eq!(msg.timestamp, crate::units::Millis(1650000000));
         assert_eq!(msg.delivery_status, DeliveryStatus::Sending);
 
         // Test different delivery statuses
@@ -144,7 +145,7 @@ mod tests {
             sender_id: "sender1".to_string(),
             recipient_id: "recipient1".to_string(),
             content: "Hello, this is a valid message".to_string(),
-            timestamp: 1650000000,
+            timestamp: crate::units::Millis(1650000000),
             delivery_status: DeliveryStatus::Sending,
             encrypted: false,
         };
@@ -155,7 +156,7 @@ mod tests {
             sender_id: "sender1".to_string(),
             recipient_id: "recipient1".to_string(),
             content: "".to_string(),
-            timestamp: 1650000000,
+            timestamp: crate::units::Millis(1650000000),
             delivery_status: DeliveryStatus::Sending,
             encrypted: false,
         };
@@ -167,7 +168,7 @@ mod tests {
             sender_id: "sender1".to_string(),
             recipient_id: "recipient1".to_string(),
             content: long_content,
-            timestamp: 1650000000,
+            timestamp: crate::units::Millis(1650000000),
             delivery_status: DeliveryStatus::Sending,
             encrypted: false,
         };
@@ -183,10 +184,7 @@ mod tests {
     #[test]
     fn test_timestamp_handling() {
         // Test with current timestamp
-        let current_timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("Time went backwards")
-            .as_millis() as u64;
+        let current_timestamp = crate::units::Millis::now();
 
         let current_message = Message {
             id: "msg_current".to_string(),
@@ -199,7 +197,7 @@ mod tests {
         };
 
         // Test with past timestamp
-        let past_timestamp = current_timestamp - 3_600_000; // 1 hour ago
+        let past_timestamp = crate::units::Millis(current_timestamp.get() - 3_600_000); // 1 hour ago
         let past_message = Message {
             id: "msg_past".to_string(),
             sender_id: "sender1".to_string(),
@@ -214,6 +212,6 @@ mod tests {
         assert_eq!(current_message.timestamp, current_timestamp);
         assert_eq!(past_message.timestamp, past_timestamp);
         assert!(current_message.timestamp > past_message.timestamp);
-        assert_eq!(current_message.timestamp - past_message.timestamp, 3_600_000);
+        assert_eq!(current_message.timestamp.get() - past_message.timestamp.get(), 3_600_000);
     }
 }

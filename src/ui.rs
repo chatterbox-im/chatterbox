@@ -1,4 +1,5 @@
 use anyhow::Result;
+use chatterbox::units::Millis;
 use crossterm::{
     event::{self, DisableFocusChange, EnableFocusChange, Event, KeyCode, KeyEventKind},
     execute,
@@ -231,7 +232,7 @@ impl ChatUI {
         } else {
             // Also check for matching content from the same sender within a recent timeframe
             // This helps deduplicate messages that might have different IDs but are the same message
-            let recent_threshold = chrono::Utc::now().timestamp_millis() as u64 - 10_000; // Within last 10 seconds
+            let recent_threshold = Millis(chrono::Utc::now().timestamp_millis() - 10_000); // Within last 10 seconds
             if let Some(idx) = self.messages.iter().position(|m| {
                 m.sender_id == message.sender_id
                     && m.recipient_id == message.recipient_id
@@ -1248,7 +1249,7 @@ fn draw_messages(f: &mut Frame, messages: &[Message], area: Rect, ui: &ChatUI) {
     let messages_with_status: Vec<ListItem> = messages
         .iter()
         .flat_map(|m| {
-            let datetime = chrono::DateTime::from_timestamp_millis(m.timestamp as i64)
+            let datetime = chrono::DateTime::from_timestamp_millis(m.timestamp.get())
                 .unwrap_or_else(|| chrono::Utc::now());
 
             let now = chrono::Utc::now();

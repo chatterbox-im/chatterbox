@@ -207,7 +207,7 @@ impl XMPPClient {
                 id: id.clone(),
                 to: to.to_string(),
                 content: content.to_string(),
-                timestamp: chrono::Utc::now().timestamp_millis() as u64,
+                timestamp: chrono::Utc::now().timestamp_millis().into(),
                 status: DeliveryStatus::Sent,
             };
             pending_receipts_guard.insert(id.clone(), pending_message);
@@ -231,7 +231,7 @@ impl XMPPClient {
             id: message_id.to_string(),
             to: recipient.to_string(),
             content: String::new(),
-            timestamp: chrono::Utc::now().timestamp_millis() as u64,
+            timestamp: chrono::Utc::now().timestamp_millis().into(),
             status: DeliveryStatus::Sent,
         };
 

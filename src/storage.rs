@@ -114,7 +114,7 @@ impl MessageStore {
                 msg.sender_id,
                 msg.recipient_id,
                 msg.content,
-                msg.timestamp as i64,
+                msg.timestamp.get(),
                 status,
                 msg.encrypted as i32,
             ],
@@ -138,7 +138,7 @@ impl MessageStore {
                 sender_id: row.get(1)?,
                 recipient_id: row.get(2)?,
                 content: row.get(3)?,
-                timestamp: row.get::<_, i64>(4)? as u64,
+                timestamp: crate::units::Millis(row.get::<_, i64>(4)?),
                 delivery_status: Self::status_from_i32(row.get(5)?),
                 encrypted: row.get::<_, i32>(6).unwrap_or(0) != 0,
             })
@@ -229,13 +229,13 @@ impl MessageStore {
 mod tests {
     use super::*;
 
-    fn make_msg(id: &str, sender: &str, recipient: &str, content: &str, ts: u64) -> Message {
+    fn make_msg(id: &str, sender: &str, recipient: &str, content: &str, ts: i64) -> Message {
         Message {
             id: id.to_string(),
             sender_id: sender.to_string(),
             recipient_id: recipient.to_string(),
             content: content.to_string(),
-            timestamp: ts,
+            timestamp: crate::units::Millis(ts),
             delivery_status: DeliveryStatus::Delivered,
             encrypted: false,
         }
