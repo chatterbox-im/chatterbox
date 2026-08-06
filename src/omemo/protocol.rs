@@ -259,7 +259,7 @@ impl std::fmt::Debug for RatchetState {
 pub(crate) mod legacy_ratchet {
     use super::{KeyPair, RatchetState};
     use crate::omemo::device_id::DeviceId;
-    use crate::omemo::keys::{ChainKey, MessageKey, RootKey, Secret};
+    use crate::omemo::keys::{ChainKey, MessageKey, RootKey};
     use serde::Deserialize;
 
     /// Layout before `prev_send_message_number` and `establishing_base_key`.

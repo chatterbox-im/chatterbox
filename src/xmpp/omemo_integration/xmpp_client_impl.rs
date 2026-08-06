@@ -3,7 +3,6 @@ use log::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::jid::BareJid;
-use crate::models::Message;
 use crate::omemo::device_id::DeviceId;
 use crate::xmpp::custom_ns;
 use crate::xmpp::transport;

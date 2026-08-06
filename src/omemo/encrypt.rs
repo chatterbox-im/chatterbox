@@ -12,7 +12,7 @@ use crate::omemo::device_id::DeviceId;
 use crate::omemo::keys::{AesGcmKey, GcmNonce};
 use crate::omemo::protocol::{self, DeviceIdentity, OmemoMessage};
 use crate::omemo::session::{self, OmemoSession, OmemoSessionState};
-use crate::omemo::{EncryptionVerificationError, OmemoError, OmemoManager, OMEMO_NAMESPACE};
+use crate::omemo::{EncryptionVerificationError, OmemoError, OmemoManager};
 
 impl OmemoManager {
     async fn cached_or_session_device_ids_for(&self, bare_jid: &BareJid) -> Vec<DeviceId> {
@@ -157,7 +157,7 @@ impl OmemoManager {
             "SESSION_DEBUG: {} — force-fetching bundle from server for {}:{}",
             label, bare_jid, remote_device_id
         );
-        let mut remote_identity = match self
+        let remote_identity = match self
             .fetch_device_identity_from_server(&bare_jid, remote_device_id)
             .await
         {

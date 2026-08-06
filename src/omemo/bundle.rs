@@ -47,7 +47,7 @@ impl super::OmemoManager {
     pub async fn publish_bundle(&self, bundle: OmemoBundle) -> Result<()> {
         //debug!("Publishing bundle for device {}", self.device_id);
         let node_name = crate::omemo::bundle_node(self.device_id);
-        let bundle_xml = self.bundle_to_xml(&bundle)?;;
+        let bundle_xml = self.bundle_to_xml(&bundle)?;
         let item_id = "current";
 
         // First try the standard publication method
