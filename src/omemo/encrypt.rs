@@ -608,7 +608,7 @@ impl OmemoManager {
         for device_id in final_recipient_device_ids {
             let trust_level = storage_guard
                 .get_trust_level(recipient, device_id)
-                .unwrap_or(crate::omemo::storage::TrustLevel::Undecided);
+                .unwrap_or(crate::omemo::storage::TrustLevel::Untrusted);
             if trust_level == crate::omemo::storage::TrustLevel::Untrusted {
                 warn!(
                     "ENCRYPT_DEBUG: Skipping untrusted device {}:{}",
@@ -645,7 +645,7 @@ impl OmemoManager {
 
             let trust_level = storage_guard
                 .get_trust_level(&user_bare_jid, device_id)
-                .unwrap_or(crate::omemo::storage::TrustLevel::Undecided);
+                .unwrap_or(crate::omemo::storage::TrustLevel::Untrusted);
             if trust_level == crate::omemo::storage::TrustLevel::Untrusted {
                 warn!(
                     "ENCRYPT_DEBUG: Skipping untrusted own device {}:{}",

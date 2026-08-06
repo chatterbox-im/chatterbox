@@ -37,6 +37,8 @@ mod session_proptest;
 pub mod storage;
 mod store_migrate;
 pub mod store_sqlite;
+#[cfg(test)]
+mod security_tests;
 pub mod wire;
 
 /// The OMEMO namespace used in XMPP stanzas
