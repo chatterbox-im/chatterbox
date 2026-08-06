@@ -434,6 +434,8 @@ impl OmemoManager {
         recipient: &str,
         plaintext: &str,
     ) -> Result<OmemoMessage, OmemoError> {
+        // Normalize once at the boundary; every downstream use sees a consistent bare JID.
+        let recipient = &Self::normalize_jid_to_bare(recipient);
         debug!("encrypt_message called for recipient '{}'", recipient);
         info!("Encrypting message for {}", recipient);
 
@@ -523,10 +525,7 @@ impl OmemoManager {
             let fallback_devices: Vec<u32> = self
                 .sessions
                 .keys()
-                .filter(|(jid, _device_id)| {
-                    let recipient_bare = Self::normalize_jid_to_bare(recipient);
-                    *jid == recipient_bare
-                })
+                .filter(|(jid, _device_id)| jid == recipient)
                 .map(|(_jid, device_id)| *device_id)
                 .collect();
 
@@ -956,10 +955,9 @@ impl OmemoManager {
         // Require at least one key for a recipient device.  Sending a message
         // with only own-device (carbon) keys — or with no keys at all — means
         // the actual recipient can never decrypt it.
-        let recipient_bare_jid = Self::normalize_jid_to_bare(recipient);
         let has_recipient_key = device_list_copy
             .iter()
-            .filter(|(jid, _)| *jid == recipient_bare_jid)
+            .filter(|(jid, _)| jid == recipient)
             .any(|(_, did)| encrypted_keys.contains_key(did));
         if !has_recipient_key {
             return Err(OmemoError::ProtocolError(if encrypted_keys.is_empty() {
@@ -968,7 +966,7 @@ impl OmemoManager {
                 format!(
                     "No recipient-device key encrypted for {} \
                      (only {} own-device carbon key(s) produced)",
-                    recipient_bare_jid,
+                    recipient,
                     encrypted_keys.len()
                 )
             }));
