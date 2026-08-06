@@ -207,10 +207,10 @@ mod req3_xeddsa {
         let key_pair = X3DHProtocol::generate_key_pair().unwrap();
         let message = b"test signed prekey data";
 
-        let signature = xeddsa_sign(&key_pair.private_key, message).unwrap();
+        let signature = xeddsa_sign(key_pair.private_key.expose_secret(), message).unwrap();
         assert_eq!(signature.len(), 64, "XEdDSA signature must be 64 bytes");
 
-        let valid = xeddsa_verify(&key_pair.public_key, message, &signature).unwrap();
+        let valid = xeddsa_verify(&key_pair.public_key, message, &signature).is_ok();
         assert!(
             valid,
             "XEdDSA signature must verify with matching public key"
@@ -223,10 +223,10 @@ mod req3_xeddsa {
         let other_pair = X3DHProtocol::generate_key_pair().unwrap();
         let message = b"test prekey";
 
-        let signature = xeddsa_sign(&key_pair.private_key, message).unwrap();
+        let signature = xeddsa_sign(key_pair.private_key.expose_secret(), message).unwrap();
 
         // Verification with wrong public key must fail
-        let valid = xeddsa_verify(&other_pair.public_key, message, &signature).unwrap();
+        let valid = xeddsa_verify(&other_pair.public_key, message, &signature).is_ok();
         assert!(!valid, "XEdDSA must reject signature with wrong public key");
     }
 
@@ -235,10 +235,10 @@ mod req3_xeddsa {
         let key_pair = X3DHProtocol::generate_key_pair().unwrap();
         let message = b"original prekey";
 
-        let signature = xeddsa_sign(&key_pair.private_key, message).unwrap();
+        let signature = xeddsa_sign(key_pair.private_key.expose_secret(), message).unwrap();
 
         let tampered = b"tampered prekey";
-        let valid = xeddsa_verify(&key_pair.public_key, tampered, &signature).unwrap();
+        let valid = xeddsa_verify(&key_pair.public_key, tampered, &signature).is_ok();
         assert!(!valid, "XEdDSA must reject signature with tampered message");
     }
 
@@ -250,13 +250,13 @@ mod req3_xeddsa {
         let spk_pair = X3DHProtocol::generate_key_pair().unwrap();
 
         let signature =
-            X3DHProtocol::sign_pre_key(&key_pair.private_key, &spk_pair.public_key).unwrap();
+            X3DHProtocol::sign_pre_key(key_pair.private_key.expose_secret(), &spk_pair.public_key).unwrap();
 
         // Encode with 0x05 prefix as they appear in bundle XML
         let identity_33 = encode_public_key_with_prefix(&key_pair.public_key);
         let spk_33 = encode_public_key_with_prefix(&spk_pair.public_key);
 
-        let valid = X3DHProtocol::verify_pre_key(&identity_33, &spk_33, &signature).unwrap();
+        let valid = X3DHProtocol::verify_pre_key(&identity_33, &spk_33, &signature).is_ok();
         assert!(
             valid,
             "verify_pre_key must work with 0x05-prefixed keys from bundles"
@@ -447,7 +447,8 @@ mod req5_pep_node_names {
     #[test]
     fn device_list_xml_uses_correct_namespace() {
         use chatterbox::omemo::protocol::utils;
-        let xml = utils::device_list_to_xml(&[111, 222]).unwrap();
+        use chatterbox::omemo::device_id::DeviceId;
+        let xml = utils::device_list_to_xml(&[DeviceId::from(111u32), DeviceId::from(222u32)]).unwrap();
         assert!(
             xml.contains("xmlns='eu.siacs.conversations.axolotl'"),
             "Device list XML must use legacy OMEMO namespace"
@@ -466,13 +467,14 @@ mod req6_key_element_format {
     // `xmpp_parsers::Element` are no longer re-exported at those crate roots.
     use xmpp_parsers::minidom::Element;
 
-    fn make_test_message(prekey_devices: HashSet<u32>) -> OmemoMessage {
+    fn make_test_message(prekey_devices: HashSet<chatterbox::omemo::device_id::DeviceId>) -> OmemoMessage {
+        use chatterbox::omemo::device_id::DeviceId;
         let mut encrypted_keys = HashMap::new();
-        encrypted_keys.insert(1001u32, vec![0xAA; 48]);
-        encrypted_keys.insert(2002u32, vec![0xBB; 32]);
+        encrypted_keys.insert(DeviceId::from(1001u32), vec![0xAA; 48]);
+        encrypted_keys.insert(DeviceId::from(2002u32), vec![0xBB; 32]);
 
         OmemoMessage {
-            sender_device_id: 5555,
+            sender_device_id: DeviceId::from(5555u32),
             ratchet_key: vec![0; 32],
             previous_counter: 0,
             counter: 0,
@@ -514,7 +516,7 @@ mod req6_key_element_format {
     #[test]
     fn prekey_true_attribute_on_prekey_messages() {
         let mut prekey_set = HashSet::new();
-        prekey_set.insert(1001u32);
+        prekey_set.insert(chatterbox::omemo::device_id::DeviceId::from(1001u32));
         let msg = make_test_message(prekey_set);
         let xml = utils::omemo_message_to_xml(&msg);
 
@@ -581,6 +583,7 @@ mod req7_aes128gcm_payload {
         aes_gcm_decrypt, aes_gcm_encrypt, generate_aes_key, generate_gcm_iv, AES_GCM_IV_SIZE,
         AES_GCM_KEY_SIZE,
     };
+    use chatterbox::omemo::keys::{AesGcmKey, GcmNonce};
 
     #[test]
     fn key_size_is_128_bits() {
@@ -610,8 +613,10 @@ mod req7_aes128gcm_payload {
     #[test]
     fn encrypt_decrypt_roundtrip() {
         let plaintext = b"Hello from chatterbox!";
-        let key = generate_aes_key();
-        let iv = generate_gcm_iv();
+        let key_bytes = generate_aes_key();
+        let iv_bytes = generate_gcm_iv();
+        let key = AesGcmKey::from_slice(&key_bytes).unwrap();
+        let iv = GcmNonce::from_slice(&iv_bytes).unwrap();
 
         let ciphertext = aes_gcm_encrypt(plaintext, &key, &iv).expect("Encryption must succeed");
 
@@ -629,9 +634,12 @@ mod req7_aes128gcm_payload {
     #[test]
     fn rejects_wrong_key() {
         let plaintext = b"secret message";
-        let key = generate_aes_key();
-        let wrong_key = generate_aes_key();
-        let iv = generate_gcm_iv();
+        let key_bytes = generate_aes_key();
+        let wrong_key_bytes = generate_aes_key();
+        let iv_bytes = generate_gcm_iv();
+        let key = AesGcmKey::from_slice(&key_bytes).unwrap();
+        let wrong_key = AesGcmKey::from_slice(&wrong_key_bytes).unwrap();
+        let iv = GcmNonce::from_slice(&iv_bytes).unwrap();
 
         let ciphertext = aes_gcm_encrypt(plaintext, &key, &iv).unwrap();
 
@@ -641,21 +649,13 @@ mod req7_aes128gcm_payload {
 
     #[test]
     fn rejects_invalid_key_size() {
-        let plaintext = b"test";
         let bad_key = vec![0u8; 32]; // 256-bit key - wrong size
-        let iv = generate_gcm_iv();
-
-        let result = aes_gcm_encrypt(plaintext, &bad_key, &iv);
-        assert!(result.is_err(), "Must reject non-128-bit keys");
+        assert!(AesGcmKey::from_slice(&bad_key).is_none(), "Must reject non-128-bit keys");
     }
 
     #[test]
     fn rejects_invalid_iv_size() {
-        let plaintext = b"test";
-        let key = generate_aes_key();
         let bad_iv = vec![0u8; 16]; // 128-bit IV - wrong size
-
-        let result = aes_gcm_encrypt(plaintext, &key, &bad_iv);
-        assert!(result.is_err(), "Must reject non-96-bit IVs");
+        assert!(GcmNonce::from_slice(&bad_iv).is_none(), "Must reject non-96-bit IVs");
     }
 }

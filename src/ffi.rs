@@ -26,8 +26,10 @@ use tokio::sync::{mpsc, Mutex};
 use uuid::Uuid;
 
 use crate::{
-    models::{DeliveryStatus, Message},
+    jid::BareJid,
+    models::{DeliveryStatus, Direction, Message},
     storage::MessageStore,
+    units::Millis,
     xmpp::XMPPClient,
 };
 
@@ -82,6 +84,8 @@ pub struct FfiFingerprint {
     /// 64-char hex string, space-grouped for display: "AABB CCDD …"
     pub fingerprint: String,
     pub is_trusted: bool,
+    /// Full trust level: "undecided" | "trusted" | "verified" | "untrusted"
+    pub trust_level: String,
 }
 
 /// Events the Swift layer receives via `nextEvent()`.
@@ -357,8 +361,8 @@ impl ChatterboxClient {
             if let Some(ref mgr) = xmpp.omemo_manager {
                 if let Ok((own_device_id, _)) = crate::omemo::device_id::load_or_generate_device_id() {
                     let mut manager = mgr.lock().await;
-                    let _ = manager.reset_failure_count(&bare_jid, own_device_id).await;
-                    let _ = manager.clear_device_ignore(&bare_jid, own_device_id).await;
+                    let _ = manager.reset_failure_count(&bare_jid, own_device_id.into()).await;
+                    let _ = manager.clear_device_ignore(&bare_jid, own_device_id.into()).await;
                 }
             }
 
@@ -401,15 +405,17 @@ impl ChatterboxClient {
                 let mut rx = msg_rx;
                 loop {
                     match rx.recv().await {
-                        Some(m) => {
+                        Some(crate::models::AppEvent::KeyVerifyRequest { sender, fingerprint, device_id: _ }) => {
+                            let body = format!("Key verification request from {} — fingerprint: {}", sender, fingerprint);
+                            let sys = crate::models::Message::system(&sender, body);
+                            let _ = event_tx.send(FfiEvent::Message { msg: to_ffi_message(sys) }).await;
+                        }
+                        Some(crate::models::AppEvent::Chat(m)) => {
                             // A delivery_update reuses the original message ID with
                             // sender_id = "me".  If the store already has that ID, treat
                             // it as a status update rather than a new message.
                             let is_update = if let Some(ref s) = store {
                                 s.lock().ok().map_or(false, |guard| {
-                                    // Check if this ID already exists by trying to load it.
-                                    // A single-row query is cheap; we reuse load_messages
-                                    // with limit=1 and filter by id via SQL.
                                     guard
                                         .load_messages(&m.recipient_id, 1)
                                         .ok()
@@ -422,7 +428,6 @@ impl ChatterboxClient {
                             };
 
                             if is_update {
-                                // Update the stored row's delivery status
                                 if let Some(ref s) = store {
                                     if let Ok(guard) = s.lock() {
                                         let _ = guard.update_delivery_status(
@@ -502,10 +507,12 @@ impl ChatterboxClient {
             // `timestamp * 1000` migration in `storage.rs`.  Writing seconds
             // here put mixed units in one table: freshly sent messages rendered
             // correctly while everything else rendered in the year 58536.
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64;
+            let now = Millis::from(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64
+            );
 
             eprintln!("FFI_DEBUG: send_message calling send_message_with_id (no lock held)");
             xmpp.send_message_with_id(&to_jid, &body, &msg_id)
@@ -524,6 +531,9 @@ impl ChatterboxClient {
                 timestamp: now,
                 delivery_status: DeliveryStatus::Sent,
                 encrypted: true,
+                direction: Direction::Outgoing {
+                    to: BareJid::parse(&to_jid).expect("expected valid JID"),
+                },
             };
             if let Some(ref s) = store {
                 if let Ok(guard) = s.lock() {
@@ -550,7 +560,8 @@ impl ChatterboxClient {
             };
             if let Some(ref mgr) = xmpp.omemo_manager {
                 let mut mgr_guard = mgr.lock().await;
-                mgr_guard.reset_session(&jid, device_id).await
+                let bare = BareJid::parse(&jid).expect("expected valid JID");
+                mgr_guard.reset_session(&bare, device_id).await
                     .map_err(|e| FfiError::Omemo { reason: e.to_string() })?;
             }
             Ok(())
@@ -691,7 +702,7 @@ impl ChatterboxClient {
             // answers with an empty archive.  That is why foreground catch-up
             // silently returned nothing while background refresh (using a real
             // seconds window) kept reporting new messages.
-            let start_millis = chatterbox::units::Secs(since_unix_secs).to_millis().get();
+            let start_millis = crate::units::Secs(since_unix_secs).to_millis().get();
             let start = chrono::DateTime::from_timestamp_millis(start_millis)
                 .unwrap_or_else(chrono::Utc::now);
             let opts = crate::xmpp::message_archive::MAMQueryOptions {
@@ -714,8 +725,7 @@ impl ChatterboxClient {
                 if let Ok(guard) = s.lock() {
                     for m in &msgs {
                         match guard.store_message(m) {
-                            Ok(true) => new_msgs.push(to_ffi_message(m.clone())),
-                            Ok(false) => {} // already stored — not new
+                            Ok(()) => new_msgs.push(to_ffi_message(m.clone())),
                             Err(e) => {
                                 log::warn!("Failed to store MAM message {}: {}", m.id, e);
                             }
@@ -761,7 +771,7 @@ impl ChatterboxClient {
                 Arc::clone(&state.xmpp)
             };
             xmpp
-                .mark_device_trusted(&jid, device_id)
+                .mark_device_trusted(&jid, crate::omemo::device_id::DeviceId::from(device_id))
                 .await
                 .map_err(|e| FfiError::Omemo { reason: e.to_string() })
         })
@@ -779,7 +789,7 @@ impl ChatterboxClient {
                 Arc::clone(&state.xmpp)
             };
             xmpp
-                .mark_device_untrusted(&jid, device_id)
+                .mark_device_untrusted(&jid, crate::omemo::device_id::DeviceId::from(device_id))
                 .await
                 .map_err(|e| FfiError::Omemo { reason: e.to_string() })
         })
@@ -848,15 +858,19 @@ impl ChatterboxClient {
             let mut result = Vec::new();
             for device_id in device_ids {
                 let fp = xmpp.get_device_fingerprint(&bare_jid, device_id).await;
-                let trusted = xmpp
-                    .is_device_trusted(&bare_jid, device_id)
-                    .await
-                    .unwrap_or(false);
+                let trust = match xmpp.get_omemo_manager() {
+                    Some(mgr) => mgr.lock().await
+                        .get_device_trust_level(&bare_jid, device_id)
+                        .await
+                        .unwrap_or(crate::omemo::storage::TrustLevel::Undecided),
+                    None => crate::omemo::storage::TrustLevel::Undecided,
+                };
                 if let Ok(raw) = fp {
                     result.push(FfiFingerprint {
-                        device_id,
+                        device_id: device_id.into(),
                         fingerprint: format_fingerprint(&raw),
-                        is_trusted: trusted,
+                        is_trusted: trust.is_trusted(),
+                        trust_level: trust.as_str().to_string(),
                     });
                 }
             }

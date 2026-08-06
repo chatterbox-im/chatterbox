@@ -116,9 +116,12 @@ async fn test_omemo_message_exchange() -> Result<()> {
                 content: test_message.clone(),
                 sender_id: "".to_string(),
                 recipient_id: cb_jid.to_string(),
-                timestamp: chrono::Utc::now().timestamp_millis() as u64,
+                timestamp: chatterbox::units::Millis::from(chrono::Utc::now().timestamp_millis()),
                 delivery_status: DeliveryStatus::Unknown,
                 encrypted: false,
+                direction: chatterbox::models::Direction::Outgoing {
+                    to: chatterbox::jid::BareJid::parse(cb_jid).expect("expected valid JID"),
+                },
             }
         }
     };

@@ -85,7 +85,7 @@ impl super::XMPPClient {
             "Sending carbon message to UI ({} bytes)",
             ui_message.content.len()
         );
-        if let Err(e) = self.msg_tx.send(ui_message).await {
+        if let Err(e) = self.msg_tx.send(crate::models::AppEvent::Chat(ui_message)).await {
             error!("Failed to send carbon message to UI: {}", e);
         }
         Ok(())
@@ -342,7 +342,7 @@ impl super::XMPPClient {
             let mut ui_message =
                 Message::outgoing_encrypted(msg_id, recipient_jid, "[Sent encrypted message]");
             ui_message.delivery_status = DeliveryStatus::Delivered;
-            if let Err(e) = self.msg_tx.send(ui_message).await {
+            if let Err(e) = self.msg_tx.send(crate::models::AppEvent::Chat(ui_message)).await {
                 error!("Failed to send own-carbon placeholder to UI: {}", e);
             }
             return Ok(());

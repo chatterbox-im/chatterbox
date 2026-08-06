@@ -298,7 +298,7 @@ mod tests {
             .identity_key_pair
             .public_key;
         assert_eq!(
-            &prekey_msg.identity_key, alice_identity_pub,
+            &prekey_msg.identity_key, alice_identity_pub.as_ref(),
             "identity_key should be sender's public identity key"
         );
 
@@ -1328,7 +1328,7 @@ mod tests {
             let new_spk_id = old_bundle.signed_pre_key_id + 1;
             let new_sig = X3DHProtocol::sign_pre_key(
                 old_bundle.identity_key_pair.private_key.expose_secret(),
-                &new_spk.public_key,
+                new_spk.public_key.as_ref(),
             )
             .unwrap();
             let mut history = old_bundle.signed_pre_key_history.clone();

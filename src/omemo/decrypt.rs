@@ -99,18 +99,30 @@ impl OmemoManager {
                     );
                     false
                 } else if !opk_available {
-                    // Almost certainly a retransmit whose base key we can't
-                    // match (e.g. a session persisted before establishing_base_key
-                    // was recorded), or a replay.  Either way we have a working
-                    // session — use it.  Never destroy session state because a
-                    // consumed OPK was referenced; that turns any replayed
-                    // stanza into a remote session-wipe.
-                    warn!(
-                        "PreKeyMessage from {}:{} references consumed OPK {:?} but an \
-                         initialised session exists — decrypting in-session",
-                        bare_jid, device_id, pk.pre_key_id
-                    );
-                    false
+                    // Is the establishing base key on record?  If so we know the
+                    // incoming message uses a *different* base key (not a retransmit)
+                    // and the OPK is already consumed → stale bundle, treat as
+                    // needs_x3dh so the "Missing one-time prekey" path fires.
+                    // If the base key is unknown (legacy session), fall back to
+                    // in-session decrypt to avoid wiping a working session on a replay.
+                    let base_key_on_record = self
+                        .sessions
+                        .get(&(bare_jid.clone(), device_id))
+                        .and_then(|s| s.as_session())
+                        .map(|s| s.ratchet_state.establishing_base_key.is_some())
+                        .unwrap_or(false);
+
+                    if base_key_on_record {
+                        // Different base key + consumed OPK: new session attempt with stale bundle.
+                        true
+                    } else {
+                        warn!(
+                            "PreKeyMessage from {}:{} references consumed OPK {:?} but an \
+                             initialised session exists — decrypting in-session",
+                            bare_jid, device_id, pk.pre_key_id
+                        );
+                        false
+                    }
                 } else {
                     // New base key and the referenced OPK is still available:
                     // the peer really is establishing a new session.
@@ -280,45 +292,27 @@ impl OmemoManager {
                 ));
             }
 
-            // Verify sender's identity key signature on their bundle
+            // Verify sender's identity key signature on their bundle.
+            // verify() returns VerifiedDeviceIdentity — proving the check happened.
             let sender_identity = self.get_device_identity(&bare_jid, device_id).await?;
-            match protocol::X3DHProtocol::verify_pre_key(
-                &sender_identity.identity_key,
-                &sender_identity.signed_pre_key.public_key,
-                &sender_identity.signed_pre_key.signature,
-            ) {
-                Ok(true) => debug!(
-                    "Sender's signed prekey verified for {}:{}",
+            let sender_identity = sender_identity.verify().map_err(|e| {
+                error!(
+                    "Sender's signed prekey signature invalid for {}:{}: {} — rejecting session",
+                    bare_jid, device_id, e
+                );
+                OmemoError::ProtocolError(format!(
+                    "Signed prekey signature invalid for {}:{} — possible MITM",
                     bare_jid, device_id
-                ),
-                Ok(false) => {
-                    error!(
-                        "Sender's signed prekey signature INVALID for {}:{} — rejecting session",
-                        bare_jid, device_id
-                    );
-                    return Err(OmemoError::ProtocolError(format!(
-                        "Signed prekey signature invalid for {}:{} — possible MITM",
-                        bare_jid, device_id
-                    )));
-                }
-                Err(e) => {
-                    error!(
-                        "Could not verify sender's signed prekey for {}:{}: {} — rejecting session",
-                        bare_jid, device_id, e
-                    );
-                    return Err(OmemoError::ProtocolError(format!(
-                        "Signed prekey signature verification error for {}:{}: {}",
-                        bare_jid, device_id, e
-                    )));
-                }
-            }
+                ))
+            })?;
+            debug!("Sender's signed prekey verified for {}:{}", bare_jid, device_id);
 
             // Create recipient session
             let session = OmemoSession::new_recipient(
                 bare_jid.to_string(),
                 device_id,
                 our_identity_key_pair,
-                sender_identity.identity_key,
+                sender_identity.identity_key.clone(),
                 our_signed_prekey_pair,
                 one_time_prekey_pair,
                 ephemeral_key,
@@ -407,7 +401,7 @@ impl OmemoManager {
         // Reset failure count after successful decryption
         {
             let storage_guard = self.storage.lock().await;
-            if let Err(e) = storage_guard.reset_device_failure_count(&BareJid::from_raw_lossy(&sender_str), device_id) {
+            if let Err(e) = storage_guard.reset_device_failure_count(&BareJid::parse(&sender_str).expect("expected valid JID"), device_id) {
                 warn!(
                     "Failed to reset failure count for {}:{}: {}",
                     sender_str, device_id, e
@@ -482,7 +476,7 @@ impl OmemoManager {
 
         // Store the updated session state
         if let Some(ratchet_state) = session_state_to_store {
-            self.store_session_state(&BareJid::from_raw_lossy(&sender_str), device_id, &ratchet_state)
+            self.store_session_state(&BareJid::parse(&sender_str).expect("expected valid JID"), device_id, &ratchet_state)
                 .await?;
         }
 

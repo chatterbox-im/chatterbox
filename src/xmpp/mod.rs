@@ -76,7 +76,7 @@ pub struct XMPPClient {
     pub(crate) jid: String,
     /// Channel-based stanza sender — stanzas are forwarded to the transport actor.
     pub(crate) stanza_tx: Option<transport::StanzaTx>,
-    pub(crate) msg_tx: mpsc::Sender<Message>,
+    pub(crate) msg_tx: mpsc::Sender<crate::models::AppEvent>,
     pub(crate) pending_receipts: Arc<TokioMutex<HashMap<String, PendingMessage>>>,
     pub(crate) connected: bool,
     pub(crate) omemo_manager: Option<Arc<TokioMutex<crate::omemo::OmemoManager>>>,
@@ -103,7 +103,7 @@ pub enum ClientState {
 
 // Core XMPPClient implementation
 impl XMPPClient {
-    pub fn new() -> (Self, mpsc::Receiver<Message>) {
+    pub fn new() -> (Self, mpsc::Receiver<crate::models::AppEvent>) {
         let (msg_tx, msg_rx) = mpsc::channel(100);
         let pending_receipts = Arc::new(TokioMutex::new(HashMap::new()));
         let (late_state_tx, _) = watch::channel(LateState::default());
@@ -154,11 +154,11 @@ impl XMPPClient {
                 delivery_status: new_status,
                 encrypted: false,
                 direction: crate::models::Direction::Outgoing {
-                    to: crate::jid::BareJid::from_raw_lossy(&pending.to),
+                    to: crate::jid::BareJid::parse(&pending.to).expect("expected valid JID"),
                 },
             };
 
-            match self.msg_tx.send(ui_message).await {
+            match self.msg_tx.send(crate::models::AppEvent::Chat(ui_message)).await {
                 Ok(_) => debug!("Sent message status update to UI"),
                 Err(e) => error!("Failed to send message status update to UI: {}", e),
             }
@@ -230,7 +230,7 @@ impl XMPPClient {
     }
 
     // Get a clone of the message sender channel
-    pub fn get_message_sender(&self) -> mpsc::Sender<Message> {
+    pub fn get_message_sender(&self) -> mpsc::Sender<crate::models::AppEvent> {
         self.msg_tx.clone()
     }
 

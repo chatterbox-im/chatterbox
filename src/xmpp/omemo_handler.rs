@@ -170,7 +170,7 @@ impl XMPPClient {
                             "[Sent encrypted message]",
                         );
                         message.delivery_status = DeliveryStatus::Delivered;
-                        if let Err(e) = self.msg_tx.send(message).await {
+                        if let Err(e) = self.msg_tx.send(crate::models::AppEvent::Chat(message)).await {
                             error!("Failed to send own-message placeholder to UI: {}", e);
                         }
                         return Ok(());
@@ -342,7 +342,7 @@ impl XMPPClient {
 
                         // Send to UI (capture identifiers first; send() moves `message`)
                         let logged_id = message.id.clone();
-                        if let Err(e) = self.msg_tx.send(message).await {
+                        if let Err(e) = self.msg_tx.send(crate::models::AppEvent::Chat(message)).await {
                             error!("FAILED to send decrypted message to UI: {}", e);
                         } else {
                             debug!(
@@ -400,7 +400,7 @@ impl XMPPClient {
                             format!("[Encrypted message could not be decrypted: {}. You may need to refresh the OMEMO keys or verify device identity.]", e),
                         );
 
-                        if let Err(e) = self.msg_tx.send(message).await {
+                        if let Err(e) = self.msg_tx.send(crate::models::AppEvent::Chat(message)).await {
                             error!("Failed to send error message to UI: {}", e);
                         }
                     }
@@ -416,63 +416,28 @@ impl XMPPClient {
         ))
     }
 
-    /// Process a key verification response from the user
+    /// Process a key verification response from the user.
+    /// `trusted = true` → accept; `trusted = false` → reject.
     pub async fn handle_key_verification_response(
         &self,
         contact: &str,
-        response: &str,
+        level: crate::omemo::storage::TrustLevel,
     ) -> Result<()> {
-        info!(
-            "Processing key verification response for {}: {}",
-            contact, response
-        );
+        info!("Processing key verification response for {}: level={:?}", contact, level);
 
-        match response {
-            "__KEY_ACCEPTED__" => {
-                info!("OMEMO key for {} has been accepted by user", contact);
+        let label = match level {
+            crate::omemo::storage::TrustLevel::Trusted  => "accepted and marked as trusted",
+            crate::omemo::storage::TrustLevel::Verified => "verified",
+            _                                           => "rejected",
+        };
+        let system_message = Message::system("me", format!("OMEMO key for {} has been {}", contact, label));
+        if let Err(e) = self.msg_tx.send(crate::models::AppEvent::Chat(system_message)).await {
+            error!("Failed to send key response message to UI: {}", e);
+        }
 
-                let system_message = Message::system(
-                    "me",
-                    format!(
-                        "OMEMO key for {} has been accepted and marked as trusted",
-                        contact
-                    ),
-                );
-
-                if let Err(e) = self.msg_tx.send(system_message).await {
-                    error!("Failed to send key acceptance message to UI: {}", e);
-                }
-
-                if let Err(e) = self
-                    .process_omemo_verification_response(contact, response)
-                    .await
-                {
-                    error!("Failed to process key verification in OMEMO: {}", e);
-                    return Err(anyhow!("Failed to process key verification: {}", e));
-                }
-            }
-            "__KEY_REJECTED__" => {
-                info!("OMEMO key for {} has been rejected by user", contact);
-
-                let system_message =
-                    Message::system("me", format!("OMEMO key for {} has been rejected", contact));
-
-                if let Err(e) = self.msg_tx.send(system_message).await {
-                    error!("Failed to send key rejection message to UI: {}", e);
-                }
-
-                if let Err(e) = self
-                    .process_omemo_verification_response(contact, response)
-                    .await
-                {
-                    error!("Failed to process key rejection in OMEMO: {}", e);
-                    return Err(anyhow!("Failed to process key rejection: {}", e));
-                }
-            }
-            _ => {
-                warn!("Unknown key verification response: {}", response);
-                return Err(anyhow!("Unknown key verification response: {}", response));
-            }
+        if let Err(e) = self.process_omemo_verification_response(contact, level).await {
+            error!("Failed to process key verification in OMEMO: {}", e);
+            return Err(anyhow!("Failed to process key verification: {}", e));
         }
 
         Ok(())
@@ -498,24 +463,15 @@ impl XMPPClient {
         key_fingerprint: &str,
         device_id: Option<u32>,
     ) -> Result<()> {
-        let special_message = Message::system(
-            "me",
-            format!(
-                "__OMEMO_KEY_VERIFY__:{}:{}:{}",
-                sender,
-                key_fingerprint,
-                device_id.map(|id| id.to_string()).unwrap_or_default()
-            ),
-        );
-
-        if let Err(e) = self.msg_tx.send(special_message).await {
+        let event = crate::models::AppEvent::KeyVerifyRequest {
+            sender: sender.to_string(),
+            fingerprint: key_fingerprint.to_string(),
+            device_id,
+        };
+        if let Err(e) = self.msg_tx.send(event).await {
             error!("Failed to send key verification request to UI: {}", e);
-            return Err(anyhow!(
-                "Failed to send key verification request to UI: {}",
-                e
-            ));
+            return Err(anyhow!("Failed to send key verification request to UI: {}", e));
         }
-
         Ok(())
     }
 
@@ -561,7 +517,7 @@ impl XMPPClient {
                         }
                     };
                     let storage_guard = storage.lock().await;
-                    match storage_guard.load_device_list(&BareJid::from_raw_lossy(bare_jid)) {
+                    match storage_guard.load_device_list(&BareJid::parse(bare_jid).expect("expected valid JID")) {
                         Ok(entry) if !entry.device_ids.is_empty() => Ok(entry.device_ids),
                         Ok(_) => Ok(vec![]),
                         Err(e) => Err(anyhow!("No cached device list for {}: {}", bare_jid, e)),
@@ -690,14 +646,14 @@ impl XMPPClient {
         &self,
         jid: &str,
         device_id: crate::omemo::device_id::DeviceId,
-        trusted: bool,
+        level: crate::omemo::storage::TrustLevel,
     ) -> Result<()> {
         let manager = self
             .omemo_manager
             .as_ref()
             .ok_or_else(|| anyhow!("No OMEMO manager available"))?;
         let mut guard = manager.lock().await;
-        if trusted {
+        if level.is_trusted() {
             guard
                 .trust_device_identity(jid, device_id)
                 .await
@@ -716,14 +672,14 @@ impl XMPPClient {
 pub(crate) async fn prompt_first_untrusted_key(
     omemo_manager: &mut crate::omemo::OmemoManager,
     contact: &str,
-    msg_tx: &tokio::sync::mpsc::Sender<Message>,
+    msg_tx: &tokio::sync::mpsc::Sender<crate::models::AppEvent>,
 ) -> Result<()> {
     if contact.starts_with('[') && contact.ends_with(']') {
         return Ok(());
     }
 
     let storage = crate::omemo::storage::OmemoStorage::new_default()?;
-    if let Ok(Some(_)) = storage.get_pending_device_verification(&BareJid::from_raw_lossy(contact)) {
+    if let Ok(Some(_)) = storage.get_pending_device_verification(&BareJid::parse(contact).expect("expected valid JID")) {
         return Ok(());
     }
 
@@ -791,7 +747,7 @@ pub(crate) async fn prompt_first_untrusted_key(
                 }
             };
 
-            if storage.is_device_trusted(&BareJid::from_raw_lossy(contact), device_id)? {
+            if storage.is_device_trusted(&BareJid::parse(contact).expect("expected valid JID"), device_id)? {
                 let _ = tokio::time::timeout(
                     Duration::from_secs(5),
                     omemo_manager.trust_device_identity(contact, device_id),
@@ -801,26 +757,21 @@ pub(crate) async fn prompt_first_untrusted_key(
             }
 
             // Skip devices the user has already explicitly rejected — don't re-prompt.
-            if storage.get_trust_level(&BareJid::from_raw_lossy(contact), device_id)?
+            if storage.get_trust_level(&BareJid::parse(contact).expect("expected valid JID"), device_id)?
                 == crate::omemo::storage::TrustLevel::Untrusted
             {
                 continue;
             }
 
-            let _ = storage.store_pending_device_verification(&BareJid::from_raw_lossy(contact), device_id, &fingerprint);
-            info!(
-                "Requesting verification for untrusted device {}:{} with fingerprint {}",
-                contact, device_id, fingerprint
-            );
+            let _ = storage.store_pending_device_verification(&BareJid::parse(contact).expect("expected valid JID"), device_id, &fingerprint);
+            info!("Requesting verification for untrusted device {}:{} with fingerprint {}", contact, device_id, fingerprint);
 
-            let msg = Message::system(
-                "me",
-                format!(
-                    "__OMEMO_KEY_VERIFY__:{}:{}:{}",
-                    contact, fingerprint, device_id
-                ),
-            );
-            if let Err(e) = msg_tx.send(msg).await {
+            let event = crate::models::AppEvent::KeyVerifyRequest {
+                sender: contact.to_string(),
+                fingerprint,
+                device_id: Some(device_id.get()),
+            };
+            if let Err(e) = msg_tx.send(event).await {
                 error!("Failed to send key verification request to UI: {}", e);
             }
             break;

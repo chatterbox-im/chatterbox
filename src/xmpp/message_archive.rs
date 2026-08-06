@@ -825,7 +825,7 @@ impl super::XMPPClient {
         &self,
         jid: &str,
         initial_result: MAMQueryResult,
-        message_tx: tokio::sync::mpsc::Sender<crate::models::Message>,
+        message_tx: tokio::sync::mpsc::Sender<crate::models::AppEvent>,
         max_pages: usize,
     ) -> Result<()> {
         info!("Starting background history load for {}", jid);
@@ -851,12 +851,12 @@ impl super::XMPPClient {
                     delivery_status: DeliveryStatus::Delivered,
                     encrypted: false,
                     direction: crate::models::Direction::System {
-                        about: crate::jid::BareJid::from_raw_lossy(jid),
+                        about: crate::jid::BareJid::parse(jid).expect("expected valid JID"),
                     },
                 };
 
                 // Send this notification to the UI
-                if let Err(e) = message_tx.send(notification).await {
+                if let Err(e) = message_tx.send(crate::models::AppEvent::Chat(notification)).await {
                     error!("Failed to send history loading notification: {}", e);
                 }
             }
@@ -907,19 +907,19 @@ impl super::XMPPClient {
                                 delivery_status: DeliveryStatus::Delivered,
                                 encrypted: false,
                                 direction: crate::models::Direction::System {
-                                    about: crate::jid::BareJid::from_raw_lossy(jid),
+                                    about: crate::jid::BareJid::parse(jid).expect("expected valid JID"),
                                 },
                             };
 
                             // Send this notification to the UI
-                            if let Err(e) = message_tx.send(notification).await {
+                            if let Err(e) = message_tx.send(crate::models::AppEvent::Chat(notification)).await {
                                 error!("Failed to send history loading notification: {}", e);
                             }
                         }
 
                         // Send messages to the UI
                         for message in &result.messages {
-                            if let Err(e) = message_tx.send(message.clone()).await {
+                            if let Err(e) = message_tx.send(crate::models::AppEvent::Chat(message.clone())).await {
                                 error!("Failed to send historical message to UI: {}", e);
                                 break;
                             }
@@ -945,11 +945,11 @@ impl super::XMPPClient {
                             delivery_status: DeliveryStatus::Delivered,
                             encrypted: false,
                             direction: crate::models::Direction::System {
-                                about: crate::jid::BareJid::from_raw_lossy(jid),
+                                about: crate::jid::BareJid::parse(jid).expect("expected valid JID"),
                             },
                         };
 
-                        if let Err(send_e) = message_tx.send(error_notification).await {
+                        if let Err(send_e) = message_tx.send(crate::models::AppEvent::Chat(error_notification)).await {
                             error!("Failed to send error notification: {}", send_e);
                         }
 
@@ -981,11 +981,11 @@ impl super::XMPPClient {
             delivery_status: DeliveryStatus::Delivered,
             encrypted: false,
             direction: crate::models::Direction::System {
-                about: crate::jid::BareJid::from_raw_lossy(jid),
+                about: crate::jid::BareJid::parse(jid).expect("expected valid JID"),
             },
         };
 
-        if let Err(e) = message_tx.send(completion_notification).await {
+        if let Err(e) = message_tx.send(crate::models::AppEvent::Chat(completion_notification)).await {
             error!("Failed to send history completion notification: {}", e);
         }
 

@@ -432,8 +432,9 @@ async fn test_omemo_multi_device_encryption_enhanced() -> Result<()> {
     };
 
     // Verify both clients can see each other's device IDs
-    let client1_sees_client2 = devices_from_client1.contains(&device_id2);
-    let client2_sees_client1 = devices_from_client2.contains(&device_id1);
+    use chatterbox::omemo::device_id::DeviceId;
+    let client1_sees_client2 = devices_from_client1.contains(&DeviceId::from(device_id2));
+    let client2_sees_client1 = devices_from_client2.contains(&DeviceId::from(device_id1));
 
     if client1_sees_client2 && client2_sees_client1 {
         info!(
@@ -478,7 +479,7 @@ async fn test_omemo_multi_device_encryption_enhanced() -> Result<()> {
                     "Contact {} has no OMEMO devices, using default ID 1",
                     test_contact
                 );
-                vec![1]
+                vec![DeviceId::from(1u32)]
             } else {
                 info!("Contact {} has devices: {:?}", test_contact, devices);
                 devices
@@ -486,7 +487,7 @@ async fn test_omemo_multi_device_encryption_enhanced() -> Result<()> {
         }
         Err(e) => {
             warn!("Failed to get contact devices: {}", e);
-            vec![1]
+            vec![DeviceId::from(1u32)]
         }
     };
 

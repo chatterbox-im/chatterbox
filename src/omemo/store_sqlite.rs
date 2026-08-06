@@ -462,14 +462,14 @@ impl SqliteStore {
 
     // ---------------------------------------------------------- identities --
 
-    pub fn save_identity(&self, jid: &str, identity: &DeviceIdentity, trust: &str) -> Result<()> {
+    pub fn save_identity(&self, jid: &str, identity: &DeviceIdentity, trust: crate::omemo::storage::TrustLevel) -> Result<()> {
         let blob = encode_blob(identity)?;
         let conn = self.lock()?;
         conn.execute(
             "INSERT INTO device_identities (jid, device_id, identity, trust_level)
              VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(jid, device_id) DO UPDATE SET identity = excluded.identity",
-            params![jid, identity.id, blob, trust],
+            params![jid, identity.id, blob, trust.as_str()],
         )?;
         Ok(())
     }
@@ -530,27 +530,27 @@ impl SqliteStore {
     /// Set the trust level, creating a placeholder row if the identity has not
     /// been fetched yet (the filesystem version happily wrote a `trust_level`
     /// file next to a non-existent `identity.bin`, so callers rely on this).
-    pub fn set_trust(&self, jid: &str, device_id: DeviceId, trust: &str) -> Result<()> {
+    pub fn set_trust(&self, jid: &str, device_id: DeviceId, trust: crate::omemo::storage::TrustLevel) -> Result<()> {
         let conn = self.lock()?;
         let updated = conn.execute(
             "UPDATE device_identities SET trust_level = ?3 WHERE jid = ?1 AND device_id = ?2",
-            params![jid, device_id, trust],
+            params![jid, device_id, trust.as_str()],
         )?;
         if updated == 0 {
             conn.execute(
                 "INSERT INTO device_identities (jid, device_id, identity, trust_level)
                  VALUES (?1, ?2, X'', ?3)",
-                params![jid, device_id, trust],
+                params![jid, device_id, trust.as_str()],
             )?;
         }
         Ok(())
     }
 
-    pub fn has_trust_level(&self, jid: &str, trust: &str) -> Result<bool> {
+    pub fn has_trust_level(&self, jid: &str, trust: crate::omemo::storage::TrustLevel) -> Result<bool> {
         let conn = self.lock()?;
         let n: i64 = conn.query_row(
             "SELECT COUNT(*) FROM device_identities WHERE jid = ?1 AND trust_level = ?2",
-            params![jid, trust],
+            params![jid, trust.as_str()],
             |r| r.get(0),
         )?;
         Ok(n > 0)
@@ -850,7 +850,7 @@ mod tests {
 
     fn kp() -> KeyPair {
         KeyPair {
-            public_key: vec![1u8; 32],
+            public_key: crate::omemo::keys::PublicKey::new([1u8; 32]),
             private_key: Secret::new([2u8; 32]),
         }
     }
@@ -861,9 +861,9 @@ mod tests {
             is_initiator: false,
             remote_identity_key: vec![3u8; 32],
             local_identity_key_pair: kp(),
-            root_key: Secret::new([4u8; 32]),
-            send_chain_key: Secret::new([5u8; 32]),
-            receive_chain_key: Secret::new([6u8; 32]),
+            root_key: crate::omemo::keys::RootKey::from_slice(&[4u8; 32]).unwrap(),
+            send_chain_key: crate::omemo::keys::ChainKey::from_slice(&[5u8; 32]).unwrap(),
+            receive_chain_key: crate::omemo::keys::ChainKey::from_slice(&[6u8; 32]).unwrap(),
             ratchet_key_pair: kp(),
             remote_ratchet_key: vec![7u8; 32],
             prev_remote_ratchet_key: vec![8u8; 32],

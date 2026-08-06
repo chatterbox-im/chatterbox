@@ -66,12 +66,13 @@ impl TrustLevel {
         }
     }
 
-    pub fn from_str(s: &str) -> Self {
+    pub fn from_str(s: &str) -> Result<Self, String> {
         match s {
-            "trusted" => TrustLevel::Trusted,
-            "verified" => TrustLevel::Verified,
-            "untrusted" => TrustLevel::Untrusted,
-            _ => TrustLevel::Undecided,
+            "undecided" => Ok(TrustLevel::Undecided),
+            "trusted"   => Ok(TrustLevel::Trusted),
+            "verified"  => Ok(TrustLevel::Verified),
+            "untrusted" => Ok(TrustLevel::Untrusted),
+            other       => Err(format!("unknown trust level: {:?}", other)),
         }
     }
 
@@ -234,23 +235,18 @@ impl OmemoStorage {
         &mut self,
         jid: &BareJid,
         identity: &DeviceIdentity,
-        trusted: bool,
     ) -> Result<()> {
-        let trust_level = if trusted {
-            TrustLevel::Trusted
-        } else if self.has_verified_device(jid).unwrap_or(false) {
-            // Contact has a verified device → new devices are untrusted until verified
+        let trust_level = if self.has_verified_device(jid).unwrap_or(false) {
             TrustLevel::Untrusted
         } else {
-            // No verified devices for this contact → blind trust
             TrustLevel::Undecided
         };
 
         self.store
-            .save_identity(jid.as_str(), identity, trust_level.as_str())?;
+            .save_identity(jid.as_str(), identity, trust_level)?;
         // `save_identity` preserves an existing trust level on conflict, so set
         // it explicitly for the first-insert case and for an intentional change.
-        self.store.set_trust(jid.as_str(), identity.id, trust_level.as_str())
+        self.store.set_trust(jid.as_str(), identity.id, trust_level)
     }
 
     /// Persist a freshly-fetched device identity with **identity-key pinning**.
@@ -287,7 +283,7 @@ impl OmemoStorage {
             .unwrap_or(false);
 
         // Persist the new identity.
-        self.save_device_identity(jid, identity, false)?;
+        self.save_device_identity(jid, identity)?;
 
         if key_changed {
             warn!(
@@ -334,31 +330,25 @@ impl OmemoStorage {
 
     /// Get the trust level for a device
     pub fn get_trust_level(&self, jid: &BareJid, device_id: DeviceId) -> Result<TrustLevel> {
-        Ok(self
-            .store
-            .get_trust(jid.as_str(), device_id)?
-            .map(|s| TrustLevel::from_str(&s))
-            .unwrap_or(TrustLevel::Undecided))
+        match self.store.get_trust(jid.as_str(), device_id)? {
+            None => Ok(TrustLevel::Undecided),
+            Some(s) => TrustLevel::from_str(&s)
+                .map_err(|e| anyhow::anyhow!("corrupt trust value for {}:{}: {}", jid, device_id, e)),
+        }
     }
 
     /// Set the trust level for a device
     pub fn set_trust_level(&self, jid: &BareJid, device_id: DeviceId, level: TrustLevel) -> Result<()> {
-        self.store.set_trust(jid.as_str(), device_id, level.as_str())
+        self.store.set_trust(jid.as_str(), device_id, level)
     }
 
     /// Check if any device for a contact has been manually verified
     pub fn has_verified_device(&self, jid: &BareJid) -> Result<bool> {
         self.store
-            .has_trust_level(jid.as_str(), TrustLevel::Verified.as_str())
+            .has_trust_level(jid.as_str(), TrustLevel::Verified)
     }
 
     /// Set the trust status of a device identity
-    pub fn set_device_trust(&self, jid: &BareJid, device_id: DeviceId, trusted: bool) -> Result<()> {
-        let level = if trusted { TrustLevel::Trusted } else { TrustLevel::Untrusted };
-        self.set_trust_level(jid, device_id, level)
-    }
-
-    /// Dump every stored device identity.
     pub fn dump_all_device_identities(&self) -> Result<Vec<(String, DeviceId, DeviceIdentity)>> {
         // The filesystem version reconstructed the JID with
         // `jid_name.replace('_', "@")`, which never matched the hex encoding

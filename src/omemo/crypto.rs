@@ -15,9 +15,9 @@ use log::{debug, error, trace};
 use rand::{rngs::OsRng, RngCore};
 use sha2::{Digest, Sha256, Sha512};
 use thiserror::Error;
-use x25519_dalek::{PublicKey, StaticSecret};
+use x25519_dalek::{PublicKey as DalekPublicKey, StaticSecret};
 
-use crate::omemo::keys::{AesCbcKey, AesGcmKey, CbcIv, GcmNonce, Ikm, Salt};
+use crate::omemo::keys::{AesCbcKey, AesGcmKey, CbcIv, GcmNonce, Ikm, PublicKey, Salt, Secret};
 
 /// Errors related to cryptographic operations
 #[derive(Debug, Error)]
@@ -275,7 +275,7 @@ pub fn generate_x25519_keypair() -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
     let static_secret = StaticSecret::random_from_rng(OsRng);
 
     // Derive the public key from the secret key
-    let public_key = PublicKey::from(&static_secret);
+    let public_key = DalekPublicKey::from(&static_secret);
 
     // Get the bytes
     let public_key_bytes = public_key.as_bytes().to_vec();
@@ -356,59 +356,16 @@ pub fn ensure_montgomery_form(key: &[u8]) -> Result<Vec<u8>, CryptoError> {
     }
 }
 
-/// Normalize a Curve25519 public key to 32 bytes
-/// OMEMO/Signal protocol sometimes encodes public keys with a 0x05 prefix byte
-fn normalize_curve25519_public_key(key: &[u8]) -> Result<Vec<u8>, CryptoError> {
-    match key.len() {
-        32 => {
-            trace!("Public key already 32 bytes, no normalization needed");
-            Ok(key.to_vec())
-        }
-        33 => {
-            // Check if it has the standard 0x05 prefix for Curve25519 public keys
-            if key[0] == 0x05 {
-                trace!("Normalizing 33-byte public key by removing 0x05 prefix");
-                Ok(key[1..].to_vec())
-            } else {
-                error!(
-                    "33-byte public key with unexpected prefix: 0x{:02X}",
-                    key[0]
-                );
-                Err(CryptoError::InvalidInputError(format!(
-                    "33-byte public key with unexpected prefix: 0x{:02X}",
-                    key[0]
-                )))
-            }
-        }
-        _ => {
-            error!("Invalid Curve25519 public key length: {}", key.len());
-            Err(CryptoError::InvalidInputError(format!(
-                "Invalid Curve25519 public key length: {}",
-                key.len()
-            )))
-        }
-    }
-}
-
-/// Perform a Diffie-Hellman key exchange with X25519
+/// Perform a Diffie-Hellman key exchange with X25519.
+/// Both arguments are typed: `private_key` must be a `Secret<32>` (access via
+/// `.expose_secret()` is done here), and `public_key` must be a `PublicKey`
+/// (already normalized — no 0x05-prefix stripping needed).
 pub fn x25519_diffie_hellman(
-    private_key: &[u8],
-    public_key: &[u8],
+    private_key: &Secret<32>,
+    public_key: &PublicKey,
 ) -> Result<Vec<u8>, CryptoError> {
     trace!("Performing X25519 Diffie-Hellman key exchange");
-    trace!("Using public key: {}", hex::encode(public_key));
-
-    // Validate private key length
-    if private_key.len() != 32 {
-        error!("Invalid X25519 private key length: {}", private_key.len());
-        return Err(CryptoError::InvalidInputError(format!(
-            "Invalid private key length: {}",
-            private_key.len()
-        )));
-    }
-
-    // Normalize the public key (handle 33-byte keys with 0x05 prefix)
-    let normalized_public_key = normalize_curve25519_public_key(public_key)?;
+    trace!("Using public key: {}", hex::encode(public_key.as_raw()));
 
     // Reject known low-order Curve25519 points (small-subgroup attack vectors).
     // DH against these points produces a predictable (often all-zero) shared
@@ -423,26 +380,18 @@ pub fn x25519_diffie_hellman(
         [0xee, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f],
         [0xcd, 0xeb, 0x7a, 0x7c, 0x3b, 0x41, 0xb8, 0xae, 0x16, 0x56, 0xe3, 0xfa, 0xf1, 0x9f, 0xc4, 0x6a, 0xda, 0x09, 0x8d, 0xeb, 0x9c, 0x32, 0xb1, 0xfd, 0x86, 0x62, 0x05, 0x16, 0x5f, 0x49, 0xb8, 0x80],
     ];
-    let pub_bytes: &[u8; 32] = normalized_public_key.as_slice().try_into().unwrap();
-    if LOW_ORDER_POINTS.contains(pub_bytes) {
+    if LOW_ORDER_POINTS.contains(public_key.as_raw()) {
         return Err(CryptoError::InvalidInputError(
             "Low-order Curve25519 point rejected".to_string(),
         ));
     }
 
-    // Convert to the appropriate types for x25519-dalek
-    let mut private_bytes = [0u8; 32];
-    private_bytes.copy_from_slice(private_key);
-
-    let mut public_bytes = [0u8; 32];
-    public_bytes.copy_from_slice(&normalized_public_key);
-
-    // Create the StaticSecret from bytes
-    let static_secret = StaticSecret::from(private_bytes);
-    let public = PublicKey::from(public_bytes);
+    // Create the StaticSecret from the typed private key bytes.
+    let static_secret = StaticSecret::from(*private_key.expose_secret());
+    let dalek_public = DalekPublicKey::from(*public_key.as_raw());
 
     // Compute the DH shared secret
-    let shared_secret = static_secret.diffie_hellman(&public);
+    let shared_secret = static_secret.diffie_hellman(&dalek_public);
     let shared_bytes = shared_secret.as_bytes().to_vec();
 
     // Reject an all-zero shared secret — produced by low-order points not
@@ -452,8 +401,6 @@ pub fn x25519_diffie_hellman(
             "All-zero DH shared secret rejected".to_string(),
         ));
     }
-
-    //debug!("X25519 key exchange completed successfully in {:?}", duration);
 
     Ok(shared_bytes)
 }
@@ -575,7 +522,7 @@ pub fn xeddsa_verify(
     x25519_public_key: &[u8],
     message: &[u8],
     signature: &[u8],
-) -> Result<bool, CryptoError> {
+) -> Result<(), CryptoError> {
     if x25519_public_key.len() != 32 {
         return Err(CryptoError::InvalidInputError(format!(
             "X25519 public key must be 32 bytes, got {}",
@@ -629,7 +576,7 @@ pub fn xeddsa_verify(
     let r_compressed = CompressedEdwardsY(r_bytes);
     let r_point = match r_compressed.decompress() {
         Some(point) => point,
-        None => return Ok(false),
+        None => return Err(CryptoError::InvalidInputError("XEdDSA signature verification failed".to_string())),
     };
 
     // libsignal protocol: sign bit is encoded in signature[63] high bit
@@ -651,7 +598,7 @@ pub fn xeddsa_verify(
         Some(s) => s,
         None => {
             debug!("xeddsa_verify: s is not canonical, returning false");
-            return Ok(false);
+            return Err(CryptoError::InvalidInputError("XEdDSA: non-canonical scalar".to_string()));
         }
     };
 
@@ -676,7 +623,7 @@ pub fn xeddsa_verify(
         let expected = r_point + ca;
         if sb == expected {
             debug!("xeddsa_verify: SUCCESS with sign={}", sign_bit);
-            return Ok(true);
+            return Ok(());
         }
     } else {
         debug!("xeddsa_verify: to_edwards({}) returned None", sign_bit);
@@ -695,7 +642,7 @@ pub fn xeddsa_verify(
         let ca = point * challenge;
         let expected = r_point + ca;
         if sb == expected {
-            return Ok(true);
+            return Ok(());
         }
     }
 
@@ -703,7 +650,7 @@ pub fn xeddsa_verify(
     // signer didn't use the libsignal sign-encoding convention
     let s_orig = match Scalar::from_canonical_bytes(signature[32..].try_into().unwrap()).into() {
         Some(s) => s,
-        None => return Ok(false),
+        None => return Err(CryptoError::InvalidInputError("XEdDSA signature verification failed".to_string())),
     };
     if s_orig != s {
         let sb_orig = curve25519_dalek::constants::ED25519_BASEPOINT_TABLE * &s_orig;
@@ -719,13 +666,13 @@ pub fn xeddsa_verify(
                 let ca = point * challenge;
                 let expected = r_point + ca;
                 if sb_orig == expected {
-                    return Ok(true);
+                    return Ok(());
                 }
             }
         }
     }
 
-    Ok(false)
+    Err(CryptoError::InvalidInputError("XEdDSA signature verification failed".to_string()))
 }
 
 /// Returns true if two encoded Curve25519 identity keys represent *different*
@@ -818,8 +765,8 @@ mod tests {
         };
 
         // Verify using Montgomery form of the key
-        let result = xeddsa_verify(&public_key, message, &signature).unwrap();
-        assert!(result, "XEdDSA verify should succeed with Montgomery key");
+        xeddsa_verify(&public_key, message, &signature)
+            .expect("XEdDSA verify should succeed with Montgomery key");
     }
 
     #[test]
@@ -841,11 +788,8 @@ mod tests {
             );
             x25519_dalek::PublicKey::from(&secret).as_bytes().to_vec()
         };
-        let result = xeddsa_verify(&public_key, &message, &signature).unwrap();
-        assert!(
-            result,
-            "XEdDSA verify with 0x05-prefixed SPK should succeed"
-        );
+        xeddsa_verify(&public_key, &message, &signature)
+            .expect("XEdDSA verify with 0x05-prefixed SPK should succeed");
     }
 
     #[test]
@@ -886,8 +830,12 @@ mod tests {
 
     #[test]
     fn test_dh() {
-        let (priv_a, pub_a) = generate_x25519_keypair().unwrap();
-        let (priv_b, pub_b) = generate_x25519_keypair().unwrap();
+        let (priv_a_bytes, pub_a_bytes) = generate_x25519_keypair().unwrap();
+        let (priv_b_bytes, pub_b_bytes) = generate_x25519_keypair().unwrap();
+        let priv_a = Secret::<32>::from_slice(&priv_a_bytes).unwrap();
+        let priv_b = Secret::<32>::from_slice(&priv_b_bytes).unwrap();
+        let pub_a = PublicKey::from_wire(&pub_a_bytes).unwrap();
+        let pub_b = PublicKey::from_wire(&pub_b_bytes).unwrap();
 
         let secret_a = x25519_diffie_hellman(&priv_a, &pub_b).unwrap();
         let secret_b = x25519_diffie_hellman(&priv_b, &pub_a).unwrap();
@@ -911,9 +859,10 @@ mod tests {
             [0xcd, 0xeb, 0x7a, 0x7c, 0x3b, 0x41, 0xb8, 0xae, 0x16, 0x56, 0xe3, 0xfa, 0xf1, 0x9f, 0xc4, 0x6a, 0xda, 0x09, 0x8d, 0xeb, 0x9c, 0x32, 0xb1, 0xfd, 0x86, 0x62, 0x05, 0x16, 0x5f, 0x49, 0xb8, 0x80],
         ];
 
-        let (priv_key, _) = generate_x25519_keypair().unwrap();
+        let (priv_key_bytes, _) = generate_x25519_keypair().unwrap();
+        let priv_key = Secret::<32>::from_slice(&priv_key_bytes).unwrap();
         for (i, low_order) in low_order_points.iter().enumerate() {
-            let result = x25519_diffie_hellman(&priv_key, low_order);
+            let result = x25519_diffie_hellman(&priv_key, &PublicKey::new(*low_order));
             assert!(
                 result.is_err(),
                 "low-order point {} must be rejected",
@@ -945,39 +894,41 @@ mod tests {
 
     #[test]
     fn test_normalize_curve25519_public_key() {
-        // Test 32-byte key (should remain unchanged)
-        let key_32 = vec![0x01; 32];
-        let result = normalize_curve25519_public_key(&key_32).unwrap();
-        assert_eq!(result, key_32);
+        // PublicKey::from_wire replaces the old normalize_curve25519_public_key function.
+        use crate::omemo::keys::PublicKey;
 
-        // Test 33-byte key with 0x05 prefix (should remove prefix)
-        let mut key_33 = vec![0x05];
-        key_33.extend_from_slice(&vec![0x02; 32]);
-        let result = normalize_curve25519_public_key(&key_33).unwrap();
-        assert_eq!(result, vec![0x02; 32]);
+        // 32-byte key: accepted as-is
+        let key_32 = [0x01u8; 32];
+        assert!(PublicKey::from_wire(&key_32).is_some());
 
-        // Test 33-byte key with wrong prefix (should fail)
-        let mut key_33_wrong = vec![0x04];
-        key_33_wrong.extend_from_slice(&vec![0x03; 32]);
-        let result = normalize_curve25519_public_key(&key_33_wrong);
-        assert!(result.is_err());
+        // 33-byte key with 0x05 prefix: strip prefix
+        let mut key_33 = vec![0x05u8];
+        key_33.extend_from_slice(&[0x02u8; 32]);
+        assert!(PublicKey::from_wire(&key_33).is_some());
+        assert_eq!(PublicKey::from_wire(&key_33).unwrap().as_raw(), &[0x02u8; 32]);
 
-        // Test invalid length (should fail)
-        let key_invalid = vec![0x01; 31];
-        let result = normalize_curve25519_public_key(&key_invalid);
-        assert!(result.is_err());
+        // 33-byte key with wrong prefix: rejected
+        let mut key_bad = vec![0x04u8];
+        key_bad.extend_from_slice(&[0x03u8; 32]);
+        assert!(PublicKey::from_wire(&key_bad).is_none());
+
+        // Wrong length: rejected
+        assert!(PublicKey::from_wire(&[0x01u8; 31]).is_none());
     }
 
     #[test]
     fn test_x25519_with_33_byte_public_key() {
         // Generate a test key pair
-        let (private_key, public_key_32) = generate_x25519_keypair().unwrap();
+        let (private_key_bytes, public_key_32_bytes) = generate_x25519_keypair().unwrap();
+        let private_key = Secret::<32>::from_slice(&private_key_bytes).unwrap();
+        let public_key_32 = PublicKey::from_wire(&public_key_32_bytes).unwrap();
 
         // Create a 33-byte version with 0x05 prefix
-        let mut public_key_33 = vec![0x05];
-        public_key_33.extend_from_slice(&public_key_32);
+        let mut prefixed = vec![0x05u8];
+        prefixed.extend_from_slice(&public_key_32_bytes);
+        let public_key_33 = PublicKey::from_wire(&prefixed).unwrap();
 
-        // Both should produce the same result
+        // Both should produce the same result (same normalized key)
         let result_32 = x25519_diffie_hellman(&private_key, &public_key_32).unwrap();
         let result_33 = x25519_diffie_hellman(&private_key, &public_key_33).unwrap();
 
@@ -995,14 +946,14 @@ mod tests {
         assert_eq!(signature.len(), 64);
 
         // Verify with public key
-        let valid = xeddsa_verify(&public_key, message, &signature).unwrap();
+        let valid = xeddsa_verify(&public_key, message, &signature).is_ok();
         assert!(
             valid,
             "XEdDSA signature should verify with matching public key"
         );
 
         // Verify fails with wrong message
-        let valid = xeddsa_verify(&public_key, b"wrong message", &signature).unwrap();
+        let valid = xeddsa_verify(&public_key, b"wrong message", &signature).is_ok();
         assert!(
             !valid,
             "XEdDSA signature should not verify with wrong message"
@@ -1010,7 +961,7 @@ mod tests {
 
         // Verify fails with wrong key
         let (_, other_public) = generate_x25519_keypair().unwrap();
-        let valid = xeddsa_verify(&other_public, message, &signature).unwrap();
+        let valid = xeddsa_verify(&other_public, message, &signature).is_ok();
         assert!(!valid, "XEdDSA signature should not verify with wrong key");
     }
 }

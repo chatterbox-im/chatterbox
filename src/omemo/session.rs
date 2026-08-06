@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use thiserror::Error;
 
 use crate::omemo::device_id::DeviceId;
-use crate::omemo::keys::{OneTimePreKeyId, RegistrationId, Secret, SignedPreKeyId};
+use crate::omemo::keys::{ChainKey, EphemeralPrivateKey, OneTimePreKeyId, RegistrationId, RootKey, Secret, SignedPreKeyId};
 use crate::omemo::protocol::{DoubleRatchet, DoubleRatchetError, KeyPair, RatchetState};
 
 /// Session manager errors
@@ -168,14 +168,14 @@ impl OmemoSession {
                 is_initiator: false,
                 remote_identity_key: vec![],
                 local_identity_key_pair: KeyPair {
-                    public_key: vec![],
+                    public_key: crate::omemo::keys::PublicKey::new([0u8; 32]),
                     private_key: Secret::new([0u8; 32]),
                 },
-                root_key: Secret::new([0u8; 32]),
-                send_chain_key: Secret::new([0u8; 32]),
-                receive_chain_key: Secret::new([0u8; 32]),
+                root_key: RootKey::from_slice(&[0u8; 32]).unwrap(),
+                send_chain_key: ChainKey::from_slice(&[0u8; 32]).unwrap(),
+                receive_chain_key: ChainKey::from_slice(&[0u8; 32]).unwrap(),
                 ratchet_key_pair: KeyPair {
-                    public_key: vec![],
+                    public_key: crate::omemo::keys::PublicKey::new([0u8; 32]),
                     private_key: Secret::new([0u8; 32]),
                 },
                 remote_ratchet_key: vec![],
@@ -229,7 +229,7 @@ impl OmemoSession {
         remote_identity_key: Vec<u8>,
         remote_signed_prekey: Vec<u8>,
         remote_one_time_prekey: Option<Vec<u8>>,
-        ephemeral_key: Vec<u8>,
+        ephemeral_key: EphemeralPrivateKey,
         local_device_id: DeviceId,
     ) -> Result<Self, SessionError> {
         debug!(
@@ -479,14 +479,14 @@ mod tests {
             remote_identity_key: vec![],
             local_identity_key_pair: crate::omemo::protocol::KeyPair {
                 private_key: Secret::new([0u8; 32]),
-                public_key: vec![],
+                public_key: crate::omemo::keys::PublicKey::new([0u8; 32]),
             },
-            root_key: Secret::new([0u8; 32]),
-            send_chain_key: Secret::new([0u8; 32]),
-            receive_chain_key: Secret::new([0u8; 32]),
+            root_key: RootKey::from_slice(&[0u8; 32]).unwrap(),
+            send_chain_key: ChainKey::from_slice(&[0u8; 32]).unwrap(),
+            receive_chain_key: ChainKey::from_slice(&[0u8; 32]).unwrap(),
             ratchet_key_pair: crate::omemo::protocol::KeyPair {
                 private_key: Secret::new([0u8; 32]),
-                public_key: vec![],
+                public_key: crate::omemo::keys::PublicKey::new([0u8; 32]),
             },
             remote_ratchet_key: vec![],
             prev_remote_ratchet_key: vec![],

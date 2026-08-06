@@ -19,7 +19,7 @@ use crate::models::{DeliveryStatus, Message};
 pub async fn handle_receipt(
     stanza: &Element,
     pending_receipts: &Arc<TokioMutex<std::collections::HashMap<String, PendingMessage>>>,
-    msg_tx: &tokio::sync::mpsc::Sender<Message>,
+    msg_tx: &tokio::sync::mpsc::Sender<crate::models::AppEvent>,
 ) -> Result<()> {
     // Check if this is a receipt (XEP-0184)
     if let Some(received) = stanza.get_child("received", custom_ns::RECEIPTS) {
@@ -180,7 +180,7 @@ impl super::XMPPClient {
         ui_message.delivery_status = DeliveryStatus::Sending;
 
         // Send to UI first
-        if let Err(e) = self.msg_tx.send(ui_message).await {
+        if let Err(e) = self.msg_tx.send(crate::models::AppEvent::Chat(ui_message)).await {
             error!("Failed to send message to UI: {}", e);
         }
 
@@ -239,7 +239,7 @@ impl super::XMPPClient {
 
     /// Process a received delivery receipt
     pub async fn process_receipt(
-        msg_tx: tokio::sync::mpsc::Sender<Message>,
+        msg_tx: tokio::sync::mpsc::Sender<crate::models::AppEvent>,
         pending_receipts: Arc<TokioMutex<std::collections::HashMap<String, PendingMessage>>>,
         _from: Option<String>,
         receipt_id: &str,
@@ -277,7 +277,7 @@ impl super::XMPPClient {
         pending_receipts: Arc<TokioMutex<std::collections::HashMap<String, PendingMessage>>>,
         msg_id: &str,
         new_status: DeliveryStatus,
-        msg_tx: tokio::sync::mpsc::Sender<Message>,
+        msg_tx: tokio::sync::mpsc::Sender<crate::models::AppEvent>,
     ) {
         // Update the status in our tracking map
         let pending_message;
@@ -320,7 +320,7 @@ impl super::XMPPClient {
             );
 
             // Send to UI
-            match msg_tx.send(ui_message).await {
+            match msg_tx.send(crate::models::AppEvent::Chat(ui_message)).await {
                 Ok(_) => debug!("Sent message status update to UI from background handler"),
                 Err(e) => error!(
                     "Failed to send message status update to UI from background handler: {}",

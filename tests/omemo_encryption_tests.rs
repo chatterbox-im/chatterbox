@@ -196,9 +196,12 @@ async fn test_omemo_encryption() -> Result<()> {
                 content: test_message.clone(),
                 sender_id: "".to_string(),
                 recipient_id: test_contact.to_string(),
-                timestamp: chrono::Utc::now().timestamp_millis() as u64,
+                timestamp: chatterbox::units::Millis::from(chrono::Utc::now().timestamp_millis()),
                 delivery_status: DeliveryStatus::Unknown,
                 encrypted: false,
+                direction: chatterbox::models::Direction::Outgoing {
+                    to: chatterbox::jid::BareJid::parse(test_contact).expect("expected valid JID"),
+                },
             }
         }
     };
@@ -584,7 +587,7 @@ async fn test_omemo_device_trust() -> Result<()> {
 
     // First mark as untrusted
     match client
-        .mark_device_untrusted(&credentials.username, device_id)
+        .mark_device_untrusted(&credentials.username, device_id.into())
         .await
     {
         Ok(_) => info!("Successfully marked device as untrusted"),
@@ -596,7 +599,7 @@ async fn test_omemo_device_trust() -> Result<()> {
 
     // Verify it's untrusted
     let trusted_status = match client
-        .is_device_trusted(&credentials.username, device_id)
+        .is_device_trusted(&credentials.username, device_id.into())
         .await
     {
         Ok(status) => {
@@ -621,7 +624,7 @@ async fn test_omemo_device_trust() -> Result<()> {
 
     // Mark as trusted
     match client
-        .mark_device_trusted(&credentials.username, device_id)
+        .mark_device_trusted(&credentials.username, device_id.into())
         .await
     {
         Ok(_) => info!("Successfully marked device as trusted"),
@@ -634,7 +637,7 @@ async fn test_omemo_device_trust() -> Result<()> {
 
     // Verify it's now trusted
     let trusted_status_after = match client
-        .is_device_trusted(&credentials.username, device_id)
+        .is_device_trusted(&credentials.username, device_id.into())
         .await
     {
         Ok(status) => {
@@ -695,7 +698,7 @@ async fn test_omemo_device_trust() -> Result<()> {
             if devices.is_empty() {
                 info!("Contact {} has no OMEMO devices", test_contact);
                 // Create a mock device ID for testing
-                vec![1]
+                vec![chatterbox::omemo::device_id::DeviceId::from(1u32)]
             } else {
                 info!(
                     "Contact {} has {} OMEMO devices: {:?}",
@@ -709,7 +712,7 @@ async fn test_omemo_device_trust() -> Result<()> {
         Err(e) => {
             warn!("Failed to get contact devices: {}", e);
             // Use a mock device ID for testing
-            vec![1]
+            vec![chatterbox::omemo::device_id::DeviceId::from(1u32)]
         }
     };
 
@@ -1004,11 +1007,11 @@ async fn test_omemo_stanza_positive_compliance() -> anyhow::Result<()> {
     client.initialize_client().await?;
 
     // Construct a minimal, valid OmemoMessage
-    let sender_device_id = 12345u32;
+    let sender_device_id = chatterbox::omemo::device_id::DeviceId::from(12345u32);
     let iv = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
     let ciphertext = b"hello encrypted world".to_vec();
-    let mut encrypted_keys = std::collections::HashMap::new();
-    encrypted_keys.insert(67890u32, vec![9, 8, 7, 6, 5, 4, 3, 2, 1]);
+    let mut encrypted_keys = std::collections::HashMap::<chatterbox::omemo::device_id::DeviceId, Vec<u8>>::new();
+    encrypted_keys.insert(chatterbox::omemo::device_id::DeviceId::from(67890u32), vec![9, 8, 7, 6, 5, 4, 3, 2, 1]);
     let _omemo_msg = OmemoMessage {
         sender_device_id,
         ratchet_key: vec![0; 32],

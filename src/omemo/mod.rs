@@ -343,12 +343,12 @@ impl OmemoManager {
         for (jid, device_id) in rebuild_pending {
             manager
                 .sessions
-                .insert((BareJid::from_raw_lossy(&jid), device_id), OmemoSessionState::PeerResetPending);
+                .insert((BareJid::parse(&jid).expect("expected valid JID"), device_id), OmemoSessionState::PeerResetPending);
         }
         for (jid, device_id) in prekey_pending {
             manager
                 .sessions
-                .entry((BareJid::from_raw_lossy(&jid), device_id))
+                .entry((BareJid::parse(&jid).expect("expected valid JID"), device_id))
                 .or_insert(OmemoSessionState::RecoveryPreKeySent { attempt: 0 });
         }
         for msg_id in failed_ids {
@@ -485,7 +485,7 @@ impl OmemoManager {
 
     /// Normalize a JID to bare JID (without resource) for OMEMO session storage
     pub(crate) fn normalize_jid_to_bare(jid: &str) -> BareJid {
-        BareJid::from_raw_lossy(jid)
+        BareJid::parse(jid).expect("expected valid JID")
     }
 }
 
@@ -666,16 +666,16 @@ mod tests {
 
         // prekey_ephemeral_keys and remote_prekey_ids are TTL-evicted
         manager.prekey_ephemeral_keys.insert(
-            (BareJid::from_raw_lossy("old@peer.com"), DeviceId::from(1u32)),
+            (BareJid::parse("old@peer.com").expect("expected valid JID"), DeviceId::from(1u32)),
             (vec![0xAA; 32], old_time),
         );
         manager.prekey_ephemeral_keys.insert(
-            (BareJid::from_raw_lossy("fresh@peer.com"), DeviceId::from(2u32)),
+            (BareJid::parse("fresh@peer.com").expect("expected valid JID"), DeviceId::from(2u32)),
             (vec![0xBB; 32], fresh_time),
         );
         manager
             .remote_prekey_ids
-            .insert((BareJid::from_raw_lossy("old@peer.com"), DeviceId::from(1u32)), (1, Some(2), old_time));
+            .insert((BareJid::parse("old@peer.com").expect("expected valid JID"), DeviceId::from(1u32)), (1, Some(2), old_time));
 
         assert_eq!(manager.prekey_ephemeral_keys.len(), 2);
         manager.evict_stale_entries();
@@ -683,7 +683,7 @@ mod tests {
         assert_eq!(manager.prekey_ephemeral_keys.len(), 1);
         assert!(manager
             .prekey_ephemeral_keys
-            .contains_key(&(BareJid::from_raw_lossy("fresh@peer.com"), DeviceId::from(2u32))));
+            .contains_key(&(BareJid::parse("fresh@peer.com").expect("expected valid JID"), DeviceId::from(2u32))));
         assert!(manager.remote_prekey_ids.is_empty());
 
         Ok(())
@@ -699,7 +699,7 @@ mod tests {
         let now = Instant::now();
         for i in 0..1050u32 {
             manager.prekey_ephemeral_keys.insert(
-                (BareJid::from_raw_lossy(&format!("peer{}@test.com", i)), DeviceId::from(i)),
+                (BareJid::parse(&format!("peer{}@test.com", i)).expect("expected valid JID"), DeviceId::from(i)),
                 (vec![0u8; 32], now),
             );
         }

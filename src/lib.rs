@@ -14,6 +14,7 @@ pub mod ffi;
 
 // Re-export main types for convenience
 pub use models::*;
+pub use models::AppEvent;
 pub use xmpp::XMPPClient; // Expose the XMPPClient directly
 
 #[cfg(test)]
@@ -80,7 +81,7 @@ mod tests {
             timestamp: crate::units::Millis(1650000000),
             delivery_status: DeliveryStatus::Sending,
             encrypted: false,
-            direction: crate::models::Direction::Incoming { from: crate::jid::BareJid::from_raw_lossy("sender1") },
+            direction: crate::models::Direction::Incoming { from: crate::jid::BareJid::parse("sender1@example.com").unwrap() },
         };
 
         // Verify message properties
@@ -153,7 +154,7 @@ mod tests {
             timestamp: crate::units::Millis(1650000000),
             delivery_status: DeliveryStatus::Sending,
             encrypted: false,
-            direction: crate::models::Direction::Incoming { from: crate::jid::BareJid::from_raw_lossy("sender1") },
+            direction: crate::models::Direction::Incoming { from: crate::jid::BareJid::parse("sender1@example.com").unwrap() },
         };
 
         // Test with empty content (should still be valid structurally)
@@ -165,7 +166,7 @@ mod tests {
             timestamp: crate::units::Millis(1650000000),
             delivery_status: DeliveryStatus::Sending,
             encrypted: false,
-            direction: crate::models::Direction::Incoming { from: crate::jid::BareJid::from_raw_lossy("sender1") },
+            direction: crate::models::Direction::Incoming { from: crate::jid::BareJid::parse("sender1@example.com").unwrap() },
         };
 
         // Test with very long content
@@ -178,7 +179,7 @@ mod tests {
             timestamp: crate::units::Millis(1650000000),
             delivery_status: DeliveryStatus::Sending,
             encrypted: false,
-            direction: crate::models::Direction::Incoming { from: crate::jid::BareJid::from_raw_lossy("sender1") },
+            direction: crate::models::Direction::Incoming { from: crate::jid::BareJid::parse("sender1@example.com").unwrap() },
         };
 
         // Verify all messages are structurally valid
@@ -202,7 +203,7 @@ mod tests {
             timestamp: current_timestamp,
             delivery_status: DeliveryStatus::Sending,
             encrypted: false,
-            direction: crate::models::Direction::Incoming { from: crate::jid::BareJid::from_raw_lossy("sender1") },
+            direction: crate::models::Direction::Incoming { from: crate::jid::BareJid::parse("sender1@example.com").unwrap() },
         };
 
         // Test with past timestamp
@@ -215,7 +216,7 @@ mod tests {
             timestamp: past_timestamp,
             delivery_status: DeliveryStatus::Sent,
             encrypted: false,
-            direction: crate::models::Direction::Incoming { from: crate::jid::BareJid::from_raw_lossy("sender1") },
+            direction: crate::models::Direction::Incoming { from: crate::jid::BareJid::parse("sender1@example.com").unwrap() },
         };
 
         // Verify timestamps are stored correctly

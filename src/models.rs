@@ -25,11 +25,11 @@ impl Direction {
     /// Reconstruct a Direction from the SQL storage representation.
     /// `contact_jid` is the conversation column; `sender_id`/`recipient_id` are the raw columns.
     pub fn from_sql(sender_id: &str, _recipient_id: &str, contact_jid: &str) -> Self {
-        let contact = BareJid::from_raw_lossy(contact_jid);
+        let contact = BareJid::parse(contact_jid).expect("expected valid JID");
         match sender_id {
             "me"     => Direction::Outgoing { to: contact },
             "system" => Direction::System   { about: contact },
-            _        => Direction::Incoming { from: BareJid::from_raw_lossy(sender_id) },
+            _        => Direction::Incoming { from: BareJid::parse(sender_id).expect("expected valid JID") },
         }
     }
 }
@@ -153,7 +153,7 @@ impl Message {
         content: impl Into<String>,
     ) -> Self {
         let recipient = recipient.into();
-        let direction = Direction::Outgoing { to: BareJid::from_raw_lossy(&recipient) };
+        let direction = Direction::Outgoing { to: BareJid::parse(&recipient).expect("expected valid JID") };
         Self {
             id: id.into(),
             sender_id: "me".to_string(),
@@ -173,7 +173,7 @@ impl Message {
         content: impl Into<String>,
     ) -> Self {
         let recipient = recipient.into();
-        let direction = Direction::Outgoing { to: BareJid::from_raw_lossy(&recipient) };
+        let direction = Direction::Outgoing { to: BareJid::parse(&recipient).expect("expected valid JID") };
         Self {
             id: id.into(),
             sender_id: "me".to_string(),
@@ -193,7 +193,7 @@ impl Message {
         content: impl Into<String>,
     ) -> Self {
         let sender = sender.into();
-        let direction = Direction::Incoming { from: BareJid::from_raw_lossy(&sender) };
+        let direction = Direction::Incoming { from: BareJid::parse(&sender).expect("expected valid JID") };
         Self {
             id: id.into(),
             sender_id: sender,
@@ -213,7 +213,7 @@ impl Message {
         content: impl Into<String>,
     ) -> Self {
         let sender = sender.into();
-        let direction = Direction::Incoming { from: BareJid::from_raw_lossy(&sender) };
+        let direction = Direction::Incoming { from: BareJid::parse(&sender).expect("expected valid JID") };
         Self {
             id: id.into(),
             sender_id: sender,
@@ -229,7 +229,7 @@ impl Message {
     /// System/notification message. Never encrypted.
     pub fn system(recipient: impl Into<String>, content: impl Into<String>) -> Self {
         let recipient = recipient.into();
-        let direction = Direction::System { about: BareJid::from_raw_lossy(&recipient) };
+        let direction = Direction::System { about: BareJid::parse(&recipient).expect("expected valid JID") };
         Self {
             id: Uuid::new_v4().to_string(),
             sender_id: "system".to_string(),
@@ -251,7 +251,7 @@ impl Message {
         encrypted: bool,
     ) -> Self {
         let recipient = recipient.into();
-        let direction = Direction::Outgoing { to: BareJid::from_raw_lossy(&recipient) };
+        let direction = Direction::Outgoing { to: BareJid::parse(&recipient).expect("expected valid JID") };
         Self {
             id: id.into(),
             sender_id: "me".to_string(),
@@ -276,11 +276,24 @@ pub struct PendingMessage {
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum DeliveryStatus {
-    Unknown = 0,   // Default/uncertain status
-    Sending = 1,   // Message is being sent
-    Sent = 2,      // Successfully sent to server
-    Stored = 3,    // Stored on server (offline message)
-    Delivered = 4, // Delivered to recipient's device
-    Read = 5,      // Read by recipient
-    Failed = 6,    // Failed to send
+    Unknown = 0,
+    Sending = 1,
+    Sent = 2,
+    Stored = 3,
+    Delivered = 4,
+    Read = 5,
+    Failed = 6,
+}
+
+/// Events sent from the XMPP layer to the UI event loop.
+/// Replaces the `Message`-as-RPC pattern: only `Chat` carries real messages;
+/// key-verification prompts travel as a typed variant instead of a sentinel string.
+#[derive(Debug, Clone)]
+pub enum AppEvent {
+    Chat(Message),
+    KeyVerifyRequest {
+        sender: String,
+        fingerprint: String,
+        device_id: Option<u32>,
+    },
 }

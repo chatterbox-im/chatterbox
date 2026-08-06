@@ -216,7 +216,7 @@ impl XMPPClient {
         // Create a "sent" message for the UI
         let message = Message::outgoing_encrypted(id.clone(), to, content);
 
-        if let Err(e) = self.msg_tx.send(message).await {
+        if let Err(e) = self.msg_tx.send(crate::models::AppEvent::Chat(message)).await {
             error!("Failed to send message to UI: {}", e);
         }
 

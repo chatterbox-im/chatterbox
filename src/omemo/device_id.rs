@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use crate::omemo::crypto;
-use crate::omemo::keys::Secret;
+use crate::omemo::keys::{PublicKey, Secret};
 use crate::omemo::protocol::KeyPair;
 
 // TESTING: Optional path override for tests
@@ -307,11 +307,10 @@ fn get_identity_key_file_path() -> Result<PathBuf> {
 /// According to XEP-0384, the Identity Key is a long-term key used for authentication
 /// and initial key agreement.
 pub fn generate_identity_key() -> Result<KeyPair> {
-    // generate_x25519_keypair returns (private_key, public_key)
-    let (private_key_bytes, public_key) = crypto::generate_x25519_keypair()?;
-
+    let (private_key_bytes, public_key_bytes) = crypto::generate_x25519_keypair()?;
     Ok(KeyPair {
-        public_key,
+        public_key: PublicKey::from_wire(&public_key_bytes)
+            .ok_or_else(|| anyhow!("generated x25519 public key has unexpected length"))?,
         private_key: Secret::from_slice(&private_key_bytes)
             .expect("x25519 key is always 32 bytes"),
     })
@@ -348,7 +347,8 @@ fn deserialize_key_pair(serialized: &str) -> Result<KeyPair> {
         .map_err(|e| anyhow!("Failed to decode private key: {}", e))?;
 
     Ok(KeyPair {
-        public_key,
+        public_key: PublicKey::from_wire(&public_key)
+            .ok_or_else(|| anyhow!("public key must be 32 bytes, got {}", public_key.len()))?,
         private_key: Secret::from_slice(&private_key)
             .ok_or_else(|| anyhow!("private key must be 32 bytes, got {}", private_key.len()))?,
     })
@@ -867,7 +867,7 @@ mod tests {
 
         // Verify the key has valid data
         assert!(
-            !key_pair.public_key.is_empty(),
+            !key_pair.public_key.as_ref().is_empty(),
             "Public key should not be empty"
         );
         assert!(

@@ -8,11 +8,12 @@ use notify_rust::Notification;
 use std::io;
 
 use crate::{
+    commands::UiCommand,
     credentials::{load_app_settings, load_credentials, save_app_settings, AppSettings},
     ui::ChatUI,
 };
 use chatterbox::{
-    models::{Message, PresenceEvent},
+    models::{AppEvent, Message, PresenceEvent},
     omemo::device_id::DeviceId,
     storage::MessageStore,
     xmpp::message_archive::MAMQueryOptions,
@@ -28,7 +29,7 @@ pub fn create_system_message(to: &str, content: &str) -> Message {
 /// This sets up the TUI, loads contacts/fingerprints, and enters the main event loop.
 pub async fn run_app(
     mut xmpp_client: XMPPClient,
-    mut msg_rx: tokio::sync::mpsc::Receiver<Message>,
+    mut msg_rx: tokio::sync::mpsc::Receiver<AppEvent>,
     typing_rx: tokio::sync::mpsc::Receiver<(String, TypingStatus)>,
     disable_mam: bool,
 ) -> Result<()> {
@@ -337,10 +338,10 @@ fn load_message_history_async(
             Ok(exists) => {
                 if !exists {
                     if let Err(e) = msg_tx
-                        .send(create_system_message(
+                        .send(AppEvent::Chat(create_system_message(
                             &contact_clone,
                             "No message history found",
-                        ))
+                        )))
                         .await
                     {
                         error!("Failed to send 'no history' message: {}", e);
@@ -352,10 +353,10 @@ fn load_message_history_async(
             Err(e) => {
                 error!("Failed to check for message history: {}", e);
                 if let Err(send_err) = msg_tx
-                    .send(create_system_message(
+                    .send(AppEvent::Chat(create_system_message(
                         &contact_clone,
                         &format!("History check failed: {}. Attempting full retrieval...", e),
-                    ))
+                    )))
                     .await
                 {
                     error!("Failed to send history check error message: {}", send_err);
@@ -366,10 +367,10 @@ fn load_message_history_async(
 
         if has_history {
             if let Err(e) = msg_tx
-                .send(create_system_message(
+                .send(AppEvent::Chat(create_system_message(
                     &contact_clone,
                     "Fetching message history...",
-                ))
+                )))
                 .await
             {
                 error!("Failed to send history fetching message: {}", e);
@@ -387,27 +388,27 @@ fn load_message_history_async(
             Ok(result) => {
                 if result.messages.is_empty() {
                     if let Err(e) = msg_tx
-                        .send(create_system_message(
+                        .send(AppEvent::Chat(create_system_message(
                             &contact_clone,
                             "No message history found",
-                        ))
+                        )))
                         .await
                     {
                         error!("Failed to send 'no history' message: {}", e);
                     }
                 } else {
                     if let Err(e) = msg_tx
-                        .send(create_system_message(
+                        .send(AppEvent::Chat(create_system_message(
                             &contact_clone,
                             &format!("Loaded {} historical messages", result.messages.len()),
-                        ))
+                        )))
                         .await
                     {
                         error!("Failed to send history success message: {}", e);
                     }
 
                     for message in &result.messages {
-                        if let Err(e) = msg_tx.send(message.clone()).await {
+                        if let Err(e) = msg_tx.send(AppEvent::Chat(message.clone())).await {
                             error!("Failed to send historical message to UI: {}", e);
                             break;
                         }
@@ -436,10 +437,10 @@ fn load_message_history_async(
                     contact_clone, e
                 );
                 if let Err(send_err) = msg_tx
-                    .send(create_system_message(
+                    .send(AppEvent::Chat(create_system_message(
                         &contact_clone,
                         &format!("Failed to load message history: {}", e),
-                    ))
+                    )))
                     .await
                 {
                     error!("Failed to send history error message: {}", send_err);
@@ -494,27 +495,27 @@ fn load_message_history_with_catchup(
             Ok(result) => {
                 if result.messages.is_empty() {
                     if let Err(e) = msg_tx
-                        .send(create_system_message(
+                        .send(AppEvent::Chat(create_system_message(
                             &contact_clone,
                             "No new messages on server",
-                        ))
+                        )))
                         .await
                     {
                         error!("Failed to send catchup status: {}", e);
                     }
                 } else {
                     if let Err(e) = msg_tx
-                        .send(create_system_message(
+                        .send(AppEvent::Chat(create_system_message(
                             &contact_clone,
                             &format!("Fetched {} new messages from server", result.messages.len()),
-                        ))
+                        )))
                         .await
                     {
                         error!("Failed to send catchup status: {}", e);
                     }
 
                     for message in &result.messages {
-                        if let Err(e) = msg_tx.send(message.clone()).await {
+                        if let Err(e) = msg_tx.send(AppEvent::Chat(message.clone())).await {
                             error!("Failed to send historical message to UI: {}", e);
                             break;
                         }
@@ -539,10 +540,10 @@ fn load_message_history_with_catchup(
             Err(e) => {
                 error!("MAM catch-up failed for {}: {}", contact_clone, e);
                 if let Err(send_err) = msg_tx
-                    .send(create_system_message(
+                    .send(AppEvent::Chat(create_system_message(
                         &contact_clone,
                         &format!("Server history check failed: {}", e),
-                    ))
+                    )))
                     .await
                 {
                     error!("Failed to send catchup error: {}", send_err);
@@ -557,7 +558,7 @@ async fn run_main_loop(
     chat_ui: &mut ChatUI,
     terminal: &mut crate::ui::Terminal<crate::ui::CrosstermBackend<io::Stdout>>,
     xmpp_client: &mut XMPPClient,
-    msg_rx: &mut tokio::sync::mpsc::Receiver<Message>,
+    msg_rx: &mut tokio::sync::mpsc::Receiver<AppEvent>,
     disable_mam: bool,
     mut typing_rx: tokio::sync::mpsc::Receiver<(String, TypingStatus)>,
     store: Option<&MessageStore>,
@@ -610,13 +611,13 @@ async fn run_main_loop(
                             typing_failures = 0;
                         }
 
-                        if let Some((recipient, content)) = input_result {
+                        if let Some(cmd) = input_result {
+                            let quit = matches!(cmd, UiCommand::Quit);
                             handle_user_command(
                                 chat_ui,
                                 terminal,
                                 xmpp_client,
-                                &recipient,
-                                &content,
+                                cmd,
                                 disable_mam,
                                 &mut last_state_sent,
                                 store,
@@ -624,7 +625,7 @@ async fn run_main_loop(
                             )
                             .await?;
 
-                            if recipient.is_empty() && content.is_empty() {
+                            if quit {
                                 break;
                             }
                         }
@@ -639,10 +640,10 @@ async fn run_main_loop(
             }
             message = msg_rx.recv() => {
                 match message {
-                    Some(message) => {
-                        process_incoming_message(chat_ui, message, store);
-                        while let Ok(message) = msg_rx.try_recv() {
-                            process_incoming_message(chat_ui, message, store);
+                    Some(event) => {
+                        process_incoming_message(chat_ui, event, store);
+                        while let Ok(event) = msg_rx.try_recv() {
+                            process_incoming_message(chat_ui, event, store);
                         }
                         render_needed = true;
                     }
@@ -747,41 +748,33 @@ async fn run_main_loop(
     Ok(())
 }
 
-fn process_incoming_message(chat_ui: &mut ChatUI, message: Message, store: Option<&MessageStore>) {
-    if message.sender_id == "system" && message.content.starts_with("__OMEMO_KEY_VERIFY__:") {
-        let parts: Vec<&str> = message.content.splitn(4, ':').collect();
-        if parts.len() >= 3 {
-            let contact = parts[1];
-            let fingerprint = parts[2];
-            let device_id = if parts.len() > 3 {
-                Some(parts[3])
-            } else {
-                None
-            };
-            handle_new_omemo_key(chat_ui, contact, fingerprint, device_id);
+fn process_incoming_message(chat_ui: &mut ChatUI, event: AppEvent, store: Option<&MessageStore>) {
+    match event {
+        AppEvent::KeyVerifyRequest { sender, fingerprint, device_id } => {
+            handle_new_omemo_key(chat_ui, &sender, &fingerprint, device_id.as_ref().map(|id| id.to_string()).as_deref());
         }
-        return;
-    }
-
-    chat_ui.add_message(message.clone());
-    if message.sender_id != "system" {
-        if let Some(s) = store {
-            if let Err(e) = s.store_message(&message) {
-                error!("Failed to persist message: {}", e);
+        AppEvent::Chat(message) => {
+            chat_ui.add_message(message.clone());
+            if message.sender_id != "system" {
+                if let Some(s) = store {
+                    if let Err(e) = s.store_message(&message) {
+                        error!("Failed to persist message: {}", e);
+                    }
+                }
+            }
+            if message.sender_id != "me" && message.sender_id != "system" {
+                chat_ui.message_received_from(&message.sender_id);
+                if chat_ui.os_notifications_enabled() && !chat_ui.is_terminal_focused() {
+                    notify_incoming_message(&message);
+                }
+            }
+            if !chat_ui.contacts.contains(&message.sender_id)
+                && message.sender_id != "me"
+                && message.sender_id != "system"
+            {
+                chat_ui.add_contact(&message.sender_id);
             }
         }
-    }
-    if message.sender_id != "me" && message.sender_id != "system" {
-        chat_ui.message_received_from(&message.sender_id);
-        if chat_ui.os_notifications_enabled() && !chat_ui.is_terminal_focused() {
-            notify_incoming_message(&message);
-        }
-    }
-    if !chat_ui.contacts.contains(&message.sender_id)
-        && message.sender_id != "me"
-        && message.sender_id != "system"
-    {
-        chat_ui.add_contact(&message.sender_id);
     }
 }
 
@@ -880,226 +873,165 @@ fn notify_incoming_message(message: &Message) {
     }
 }
 
-/// Dispatch a user command/message from the input handler.
+/// Dispatch a typed UI command from the input handler.
 async fn handle_user_command(
     chat_ui: &mut ChatUI,
     terminal: &mut crate::ui::Terminal<crate::ui::CrosstermBackend<io::Stdout>>,
     xmpp_client: &mut XMPPClient,
-    recipient: &str,
-    content: &str,
+    cmd: UiCommand,
     disable_mam: bool,
     last_state_sent: &mut Option<TypingStatus>,
     store: Option<&MessageStore>,
     app_settings: &mut AppSettings,
 ) -> Result<()> {
-    if let Some(plain_content) = content.strip_prefix("/plain ") {
-        warn!(
-            "⚠️ SENDING UNENCRYPTED MESSAGE to {} ({} bytes)",
-            recipient,
-            plain_content.len()
-        );
-        match xmpp_client
-            .send_message_with_receipt(recipient, plain_content)
-            .await
-        {
-            Ok(_) => {
-                chat_ui.add_message(Message::outgoing_plaintext(
-                    uuid::Uuid::new_v4().to_string(),
-                    recipient.to_string(),
-                    plain_content.to_string(),
-                ));
-            }
-            Err(e) => {
-                error!("Failed to send plaintext message: {}", e);
-            }
-        }
-        return Ok(());
-    }
+    match cmd {
+        UiCommand::Quit => {}
 
-    if content == "__SHOW_DEVICE_FINGERPRINTS__" {
-        handle_show_device_fingerprints(chat_ui, terminal, xmpp_client).await;
-        return Ok(());
-    }
-
-    if let Some(actual_recipient) = recipient.strip_prefix("__VERIFY_KEYS__:") {
-        handle_verify_keys_send(
-            chat_ui,
-            terminal,
-            xmpp_client,
-            actual_recipient,
-            content,
-            last_state_sent,
-        )
-        .await?;
-        return Ok(());
-    }
-
-    if content == "__TOGGLE_OMEMO_TRUST__" {
-        handle_toggle_omemo_trust(chat_ui, terminal, xmpp_client, recipient).await;
-        return Ok(());
-    }
-
-    if let Some(rest) = content.strip_prefix("__SET_DEVICE_TRUST__:") {
-        // Format: <jid>:<device_id>:<1_or_0>
-        // JID may contain ':', so use rsplitn from the right
-        let parts: Vec<&str> = rest.rsplitn(3, ':').collect();
-        // rsplitn gives [flag, device_id, jid]
-        if parts.len() == 3 {
-            let flag = parts[0];
-            if let Ok(device_id) = parts[1].parse::<u32>() {
-                let jid = parts[2];
-                let trusted = flag == "1";
-                if let Err(e) = xmpp_client
-                    .set_single_device_trust(jid, DeviceId::from(device_id), trusted)
-                    .await
-                {
-                    info!("MAIN: set_single_device_trust failed: {}", e);
+        UiCommand::SendPlainMessage { to, body } => {
+            warn!("⚠️ SENDING UNENCRYPTED MESSAGE to {} ({} bytes)", to, body.len());
+            match xmpp_client.send_message_with_receipt(&to, &body).await {
+                Ok(_) => {
+                    chat_ui.add_message(Message::outgoing_plaintext(
+                        uuid::Uuid::new_v4().to_string(),
+                        to,
+                        body,
+                    ));
                 }
+                Err(e) => error!("Failed to send plaintext message: {}", e),
             }
         }
-        return Ok(());
-    }
 
-    if content == "__SHOW_ADD_CONTACT__" {
-        handle_show_add_contact(chat_ui, xmpp_client).await;
-        return Ok(());
-    }
+        UiCommand::SendMessage { to, body } => {
+            handle_send_message(
+                chat_ui, terminal, xmpp_client, &to, &body, last_state_sent, store,
+            ).await?;
+        }
 
-    if content == "__ADD_CONTACT__" {
-        handle_add_contact(chat_ui, terminal, xmpp_client, recipient).await;
-        return Ok(());
-    }
+        UiCommand::ShowDeviceFingerprints => {
+            handle_show_device_fingerprints(chat_ui, terminal, xmpp_client).await;
+        }
 
-    if content == "__REMOVE_CONTACT__" || content == "__REMOVE_CONTACT_CONFIRMED__" {
-        handle_remove_contact(
-            chat_ui,
-            terminal,
-            xmpp_client,
-            recipient,
-            content,
-            disable_mam,
-        )
-        .await;
-        return Ok(());
-    }
+        UiCommand::ToggleOmemoTrust { contact } => {
+            handle_toggle_omemo_trust(chat_ui, terminal, xmpp_client, &contact).await;
+        }
 
-    if content == "__CONTACT_CHANGED__" {
-        info!("Contact changed to: {}", recipient);
-        *last_state_sent = None;
-        chat_ui.clear_messages();
-        terminal.draw(|f| chat_ui.draw(f))?;
+        UiCommand::SetDeviceTrust { jid, device_id, level } => {
+            if let Err(e) = xmpp_client
+                .set_single_device_trust(&jid, DeviceId::from(device_id), level)
+                .await
+            {
+                info!("MAIN: set_single_device_trust failed: {}", e);
+            }
+        }
 
-        let first_view = !chat_ui.history_loaded_contacts.contains(recipient);
+        UiCommand::ShowAddContact => {
+            handle_show_add_contact(chat_ui, xmpp_client).await;
+        }
 
-        // Load from local store first (instant)
-        let local_count = if let Some(s) = store {
-            match s.load_messages(recipient, 100) {
-                Ok(msgs) if !msgs.is_empty() => {
-                    let count = msgs.len();
-                    for msg in msgs {
-                        chat_ui.add_message(msg);
+        UiCommand::AddContact { jid } => {
+            handle_add_contact(chat_ui, terminal, xmpp_client, &jid).await;
+        }
+
+        UiCommand::RemoveContact { contact } => {
+            handle_remove_contact(
+                chat_ui, terminal, xmpp_client, &contact,
+                "__REMOVE_CONTACT__", disable_mam,
+            ).await;
+        }
+
+        UiCommand::RemoveContactConfirmed { contact } => {
+            handle_remove_contact(
+                chat_ui, terminal, xmpp_client, &contact,
+                "__REMOVE_CONTACT_CONFIRMED__", disable_mam,
+            ).await;
+        }
+
+        UiCommand::ContactChanged { contact } => {
+            info!("Contact changed to: {}", contact);
+            *last_state_sent = None;
+            chat_ui.clear_messages();
+            terminal.draw(|f| chat_ui.draw(f))?;
+
+            let first_view = !chat_ui.history_loaded_contacts.contains(&contact);
+
+            let local_count = if let Some(s) = store {
+                match s.load_messages(&contact, 100) {
+                    Ok(msgs) if !msgs.is_empty() => {
+                        let count = msgs.len();
+                        for msg in msgs { chat_ui.add_message(msg); }
+                        count
                     }
-                    count
+                    Ok(_) => 0,
+                    Err(e) => {
+                        error!("Failed to load local messages for {}: {}", contact, e);
+                        0
+                    }
                 }
-                Ok(_) => 0,
-                Err(e) => {
-                    error!("Failed to load local messages for {}: {}", recipient, e);
-                    0
-                }
-            }
-        } else {
-            0
-        };
+            } else { 0 };
 
-        if first_view {
+            let newest_ts = store.and_then(|s| {
+                s.newest_timestamp(&contact).ok().flatten()
+            });
+
             if local_count > 0 {
+                chat_ui.history_loaded_contacts.insert(contact.clone());
+                if first_view {
+                    load_message_history_with_catchup(
+                        chat_ui, xmpp_client, &contact, disable_mam, newest_ts,
+                    );
+                }
+            } else {
+                load_message_history_async(
+                    chat_ui, xmpp_client, &contact, disable_mam,
+                );
+            }
+            terminal.draw(|f| chat_ui.draw(f))?;
+        }
+
+        UiCommand::KeyAccepted { contact } => {
+            if let Err(e) = xmpp_client.handle_key_verification_response(&contact, chatterbox::omemo::storage::TrustLevel::Trusted).await {
+                error!("Failed to process key acceptance: {}", e);
                 chat_ui.add_message(create_system_message(
-                    recipient,
-                    &format!("Loaded {} messages from local history", local_count),
+                    &contact,
+                    &format!("Error processing key verification: {}", e),
                 ));
             }
-
-            // MAM catch-up for messages newer than what we have locally
-            let newest_ts = store.and_then(|s| s.newest_timestamp(recipient).ok().flatten());
-            load_message_history_with_catchup(
-                chat_ui,
-                xmpp_client,
-                recipient,
-                disable_mam,
-                newest_ts,
-            );
-
-            chat_ui
-                .history_loaded_contacts
-                .insert(recipient.to_string());
         }
 
-        terminal.draw(|f| chat_ui.draw(f))?;
-        return Ok(());
-    }
-
-    if content == "__KEY_ACCEPTED__" || content == "__KEY_REJECTED__" {
-        info!("Processing key verification response for {}", recipient);
-        if let Err(e) = xmpp_client
-            .handle_key_verification_response(recipient, content)
-            .await
-        {
-            error!("Failed to process key verification response: {}", e);
-            chat_ui.add_message(create_system_message(
-                recipient,
-                &format!("Error processing key verification: {}", e),
-            ));
+        UiCommand::KeyRejected { contact } => {
+            if let Err(e) = xmpp_client.handle_key_verification_response(&contact, chatterbox::omemo::storage::TrustLevel::Untrusted).await {
+                error!("Failed to process key rejection: {}", e);
+                chat_ui.add_message(create_system_message(
+                    &contact,
+                    &format!("Error processing key verification: {}", e),
+                ));
+            }
         }
-        return Ok(());
-    }
 
-    if content == "__ENABLE_CARBONS__" {
-        handle_enable_carbons(chat_ui, terminal, xmpp_client).await;
-        return Ok(());
-    }
-
-    if content == "__REFETCH_OMEMO__" {
-        handle_refetch_omemo(chat_ui, xmpp_client, recipient).await;
-        return Ok(());
-    }
-
-    if content == "__TEST_FRIEND_REQUEST__" {
-        info!("Testing friend request notification UI");
-        chat_ui.test_friend_request_notification();
-        return Ok(());
-    }
-
-    if content == "__TOGGLE_OS_NOTIFICATIONS__" {
-        app_settings.os_notifications_enabled = chat_ui.os_notifications_enabled();
-        if let Err(e) = save_app_settings(app_settings) {
-            error!("Failed to save app settings: {}", e);
-            chat_ui.add_message(create_system_message(
-                "me",
-                &format!("Failed to save notification setting: {}", e),
-            ));
+        UiCommand::EnableCarbons => {
+            handle_enable_carbons(chat_ui, terminal, xmpp_client).await;
         }
-        return Ok(());
-    }
 
-    // Quit signal
-    if recipient.is_empty() && content.is_empty() {
-        return Ok(());
-    }
+        UiCommand::RefetchOmemo { contact } => {
+            handle_refetch_omemo(chat_ui, xmpp_client, &contact).await;
+        }
 
-    // Regular message send
-    if !content.is_empty() {
-        handle_send_message(
-            chat_ui,
-            terminal,
-            xmpp_client,
-            recipient,
-            content,
-            last_state_sent,
-            store,
-        )
-        .await?;
-    }
+        UiCommand::TestFriendRequest => {
+            info!("Testing friend request notification UI");
+            chat_ui.test_friend_request_notification();
+        }
 
+        UiCommand::ToggleOsNotifications => {
+            app_settings.os_notifications_enabled = chat_ui.os_notifications_enabled();
+            if let Err(e) = save_app_settings(app_settings) {
+                error!("Failed to save app settings: {}", e);
+                chat_ui.add_message(create_system_message(
+                    "me",
+                    &format!("Failed to save notification setting: {}", e),
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1235,112 +1167,6 @@ async fn handle_show_device_fingerprints(
             ));
         }
     }
-}
-
-async fn handle_verify_keys_send(
-    chat_ui: &mut ChatUI,
-    terminal: &mut crate::ui::Terminal<crate::ui::CrosstermBackend<io::Stdout>>,
-    xmpp_client: &mut XMPPClient,
-    actual_recipient: &str,
-    content: &str,
-    last_state_sent: &mut Option<TypingStatus>,
-) -> Result<()> {
-    info!(
-        "MAIN: Processing message with __VERIFY_KEYS__ prefix. Actual recipient: {}",
-        actual_recipient
-    );
-    chat_ui.add_message(create_system_message(
-        actual_recipient,
-        "Preparing secure message...",
-    ));
-    *last_state_sent = None;
-
-    if let Err(e) = xmpp_client.send_chat_state(actual_recipient, &TypingStatus::Active) {
-        error!("Failed to send active state after message: {}", e);
-    }
-    terminal.draw(|f| chat_ui.draw(f))?;
-
-    if chat_ui.is_omemo_enabled() {
-        info!(
-            "MAIN: UI OMEMO is enabled, attempting encrypted message to: {}",
-            actual_recipient
-        );
-
-        if xmpp_client.is_omemo_enabled().await {
-            if let Err(e) = xmpp_client
-                .check_omemo_keys_for_contact(actual_recipient)
-                .await
-            {
-                error!("Error checking OMEMO keys: {}", e);
-                chat_ui.remove_last_message();
-                chat_ui.add_message(create_system_message(
-                    actual_recipient,
-                    &format!("Error checking encryption keys: {}", e),
-                ));
-                return Ok(());
-            }
-
-            match xmpp_client
-                .send_encrypted_message(actual_recipient, content)
-                .await
-            {
-                Ok(_) => {
-                    info!(
-                        "MAIN: Encrypted message sent successfully to {}",
-                        actual_recipient
-                    );
-                    chat_ui.remove_last_message();
-                }
-                Err(e) => {
-                    error!(
-                        "MAIN: Error sending encrypted message to {}: {}",
-                        actual_recipient, e
-                    );
-                    chat_ui.remove_last_message();
-                    chat_ui.add_message(create_system_message(
-                        actual_recipient,
-                        &format!("Error sending encrypted message: {}", e),
-                    ));
-                }
-            }
-        } else {
-            warn!("MAIN: OMEMO requested but not available, falling back to plaintext");
-            chat_ui.remove_last_message();
-            chat_ui.add_message(create_system_message(
-                actual_recipient,
-                "OMEMO encryption requested but not available. Message not sent. Please initialize OMEMO or disable encryption.",
-            ));
-        }
-    } else {
-        info!(
-            "MAIN: UI OMEMO is disabled, sending plaintext message to: {}",
-            actual_recipient
-        );
-        match xmpp_client
-            .send_message_with_receipt(actual_recipient, content)
-            .await
-        {
-            Ok(_) => {
-                info!(
-                    "MAIN: Plaintext message sent successfully to {}",
-                    actual_recipient
-                );
-                chat_ui.remove_last_message();
-            }
-            Err(e) => {
-                error!(
-                    "MAIN: Error sending plaintext message to {}: {}",
-                    actual_recipient, e
-                );
-                chat_ui.remove_last_message();
-                chat_ui.add_message(create_system_message(
-                    actual_recipient,
-                    &format!("Error sending message: {}", e),
-                ));
-            }
-        }
-    }
-    Ok(())
 }
 
 async fn handle_toggle_omemo_trust(
@@ -1752,7 +1578,7 @@ async fn check_pending_key_verifications(
             continue;
         }
 
-        match storage.get_pending_device_verification(&chatterbox::jid::BareJid::from_raw_lossy(&contact)) {
+        match storage.get_pending_device_verification(&chatterbox::jid::BareJid::parse(&contact).expect("expected valid JID")) {
             Ok(Some((device_id, fingerprint))) => {
                 info!(
                     "Found pending key verification for {}:{} with fingerprint {}",

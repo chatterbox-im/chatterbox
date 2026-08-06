@@ -45,6 +45,34 @@ impl Mac {
     }
 }
 
+/// Proof that a `SignalMessage`'s MAC was verified against the derived mac_key.
+/// No public constructor — only produced by `verify_and_authenticate`.
+/// The ratchet decrypt step takes this type so decryption cannot precede MAC check.
+pub(super) struct AuthenticatedSignalMessage(pub(super) SignalMessage);
+
+/// MAC verification failed.
+#[derive(Debug)]
+pub(super) struct MacFailure;
+
+/// Verify the Signal-protocol MAC and, if correct, return an authenticated wrapper.
+/// `mac_key`, `mac_input`, and `msg.mac` must all be consistent with one call
+/// site's construction of the MAC input (identity keys ‖ message bytes).
+pub(super) fn verify_and_authenticate(
+    mac_key: &[u8],
+    mac_input: &[u8],
+    msg: SignalMessage,
+) -> Result<AuthenticatedSignalMessage, MacFailure> {
+    let expected = match Mac::from_bytes(&msg.mac) {
+        Some(m) => m,
+        None => return Err(MacFailure),
+    };
+    if verify_mac(mac_key, mac_input, &expected) {
+        Ok(AuthenticatedSignalMessage(msg))
+    } else {
+        Err(MacFailure)
+    }
+}
+
 // Protobuf field tags (field_number << 3 | wire_type)
 // Wire type 0 = varint, 2 = length-delimited
 // Tag byte layout: [field_number (high 5 bits)] [wire_type (low 3 bits)]

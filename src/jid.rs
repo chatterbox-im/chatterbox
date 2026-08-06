@@ -94,15 +94,3 @@ impl TryFrom<String> for BareJid {
         BareJid::parse(&s)
     }
 }
-
-impl BareJid {
-    /// Normalize `s` to a bare JID the same way the old `normalize_jid_to_bare`
-    /// helper did: lowercase, trim, strip resource.  Accepts inputs that lack an
-    /// `@` (unlike `parse`) so that existing call sites do not panic during the
-    /// `BareJid` migration.  Prefer `parse` for all new code.
-    pub fn from_raw_lossy(s: &str) -> BareJid {
-        let s = s.trim().to_lowercase();
-        let bare = s.split('/').next().unwrap_or(&s);
-        BareJid(bare.to_string())
-    }
-}

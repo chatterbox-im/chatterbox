@@ -9,6 +9,7 @@ use std::{
 };
 
 mod app;
+mod commands;
 mod credentials;
 mod sandbox;
 mod ui;

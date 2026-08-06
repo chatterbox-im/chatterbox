@@ -26,13 +26,13 @@ impl super::OmemoManager {
             .key_bundle
             .as_ref()
             .ok_or_else(|| anyhow!("Key bundle not initialized"))?;
-        let identity_key = key_bundle.identity_key_pair.public_key.clone();
-        let signed_pre_key = key_bundle.signed_pre_key_pair.public_key.clone();
+        let identity_key = key_bundle.identity_key_pair.public_key.to_vec();
+        let signed_pre_key = key_bundle.signed_pre_key_pair.public_key.to_vec();
         let signed_pre_key_id = key_bundle.signed_pre_key_id;
         let signed_pre_key_signature = key_bundle.signed_pre_key_signature.clone();
         let mut pre_keys = Vec::new();
         for (id, key_pair) in &key_bundle.one_time_pre_key_pairs {
-            pre_keys.push((*id, key_pair.public_key.clone()));
+            pre_keys.push((*id, key_pair.public_key.to_vec()));
         }
         Ok(OmemoBundle {
             identity_key,
@@ -414,7 +414,7 @@ impl super::OmemoManager {
 
         // Add the identity key with 0x05 prefix (libsignal interop)
         let identity_key_b64 = base64::engine::general_purpose::STANDARD.encode(
-            encode_public_key_with_prefix(&bundle.identity_key_pair.public_key),
+            encode_public_key_with_prefix(bundle.identity_key_pair.public_key.as_ref()),
         );
         let identity_key_elem = Element::builder("identityKey", OMEMO_NAMESPACE)
             .append(identity_key_b64)
@@ -423,7 +423,7 @@ impl super::OmemoManager {
 
         // Add the signed pre-key with 0x05 prefix and its ID as an attribute
         let signed_prekey_b64 = base64::engine::general_purpose::STANDARD.encode(
-            encode_public_key_with_prefix(&bundle.signed_pre_key_pair.public_key),
+            encode_public_key_with_prefix(bundle.signed_pre_key_pair.public_key.as_ref()),
         );
         let signed_prekey_elem = Element::builder("signedPreKeyPublic", OMEMO_NAMESPACE)
             .attr(
@@ -448,7 +448,7 @@ impl super::OmemoManager {
         // Add each pre-key with 0x05 prefix and its ID as an attribute
         for (id, key_pair) in &bundle.one_time_pre_key_pairs {
             let prekey_b64 = base64::engine::general_purpose::STANDARD
-                .encode(encode_public_key_with_prefix(&key_pair.public_key));
+                .encode(encode_public_key_with_prefix(key_pair.public_key.as_ref()));
             let prekey_elem = Element::builder("preKeyPublic", OMEMO_NAMESPACE)
                 .attr("preKeyId".try_into().unwrap(), id.to_string())
                 .append(prekey_b64)

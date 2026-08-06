@@ -438,35 +438,17 @@ impl crate::xmpp::XMPPClient {
         key_fingerprint: &str,
         device_id: Option<DeviceId>,
     ) -> Result<()> {
-        // Log the detection of an unrecognized key
-        info!(
-            "Detected unrecognized OMEMO key from {} with fingerprint: {}",
-            sender, key_fingerprint
-        );
+        info!("Detected unrecognized OMEMO key from {} with fingerprint: {}", sender, key_fingerprint);
 
-        // Format the device ID for display
-        let device_id_str = device_id.map(|id| id.to_string());
-
-        // Create a special system message to trigger the verification UI
-        let special_message = Message::system(
-            "me",
-            format!(
-                "__OMEMO_KEY_VERIFY__:{}:{}:{}",
-                sender,
-                key_fingerprint,
-                device_id_str.as_deref().unwrap_or("")
-            ),
-        );
-
-        // Send the special message to the UI
-        if let Err(e) = self.msg_tx.send(special_message).await {
+        let event = crate::models::AppEvent::KeyVerifyRequest {
+            sender: sender.to_string(),
+            fingerprint: key_fingerprint.to_string(),
+            device_id: device_id.map(|id| id.get()),
+        };
+        if let Err(e) = self.msg_tx.send(event).await {
             error!("Failed to send key verification request to UI: {}", e);
-            return Err(anyhow!(
-                "Failed to send key verification request to UI: {}",
-                e
-            ));
+            return Err(anyhow!("Failed to send key verification request to UI: {}", e));
         }
-
         Ok(())
     }
 
@@ -474,9 +456,8 @@ impl crate::xmpp::XMPPClient {
     pub async fn process_omemo_verification_response(
         &self,
         contact: &str,
-        response: &str,
+        level: crate::omemo::storage::TrustLevel,
     ) -> Result<()> {
-        // If we don't have an OMEMO manager, can't process response
         let omemo_manager = match &self.omemo_manager {
             Some(manager) => manager.clone(),
             None => {
@@ -485,17 +466,11 @@ impl crate::xmpp::XMPPClient {
             }
         };
 
-        // Get the storage instance for database operations
         let storage = crate::omemo::storage::OmemoStorage::new_default()?;
-
-        // Parse out the device ID and fingerprint from storage
-        let device_id = match storage.get_pending_device_verification(&BareJid::from_raw_lossy(contact)) {
+        let device_id = match storage.get_pending_device_verification(&BareJid::parse(contact).expect("expected valid JID")) {
             Ok(Some((device_id, _fingerprint))) => device_id,
             Ok(None) => {
-                warn!(
-                    "No pending verification found for {}, cannot process response",
-                    contact
-                );
+                warn!("No pending verification found for {}, cannot process response", contact);
                 return Err(anyhow!("No pending verification found for {}", contact));
             }
             Err(e) => {
@@ -504,68 +479,30 @@ impl crate::xmpp::XMPPClient {
             }
         };
 
-        match response {
-            "__KEY_ACCEPTED__" => {
-                // First, mark the device as trusted in the database directly
-                if let Err(e) = storage.set_device_trust(&BareJid::from_raw_lossy(contact), device_id, true) {
-                    error!("Failed to mark device as trusted in database: {}", e);
-                }
-
-                // Mark the device as trusted in the OMEMO manager
-                let mut manager_guard = omemo_manager.lock().await;
-                if let Err(e) = manager_guard
-                    .trust_device_identity(contact, device_id)
-                    .await
-                {
-                    error!("Failed to mark device as trusted in OMEMO manager: {}", e);
-                    return Err(anyhow!("Failed to mark device as trusted: {}", e));
-                }
-
-                info!(
-                    "Successfully marked device {}:{} as trusted",
-                    contact, device_id
-                );
-
-                // Clear the pending verification since it's been processed
-                if let Err(e) = storage.remove_pending_device_verification(&BareJid::from_raw_lossy(contact), device_id) {
-                    warn!("Failed to remove pending verification: {}", e);
-                }
-
-                Ok(())
-            }
-            "__KEY_REJECTED__" => {
-                // First, mark the device as explicitly untrusted in the database directly
-                if let Err(e) = storage.set_device_trust(&BareJid::from_raw_lossy(contact), device_id, false) {
-                    error!("Failed to mark device as untrusted in database: {}", e);
-                }
-
-                // Mark the device as untrusted in the OMEMO manager
-                let manager_guard = omemo_manager.lock().await;
-                if let Err(e) = manager_guard
-                    .untrust_device_identity(contact, device_id)
-                    .await
-                {
-                    error!("Failed to mark device as untrusted in OMEMO manager: {}", e);
-                    return Err(anyhow!("Failed to mark device as untrusted: {}", e));
-                }
-
-                info!(
-                    "Successfully marked device {}:{} as untrusted",
-                    contact, device_id
-                );
-
-                // Clear the pending verification since it's been processed
-                if let Err(e) = storage.remove_pending_device_verification(&BareJid::from_raw_lossy(contact), device_id) {
-                    warn!("Failed to remove pending verification: {}", e);
-                }
-
-                Ok(())
-            }
-            _ => {
-                warn!("Unknown verification response: {}", response);
-                Err(anyhow!("Unknown verification response"))
-            }
+        if let Err(e) = storage.set_trust_level(&BareJid::parse(contact).expect("expected valid JID"), device_id, level.clone()) {
+            error!("Failed to set device trust in database: {}", e);
         }
+
+        let result = if level.is_trusted() {
+            let mut guard = omemo_manager.lock().await;
+            guard.trust_device_identity(contact, device_id).await
+                .map_err(|e| anyhow!("Failed to mark device as trusted: {}", e))
+        } else {
+            let guard = omemo_manager.lock().await;
+            guard.untrust_device_identity(contact, device_id).await
+                .map_err(|e| anyhow!("Failed to mark device as untrusted: {}", e))
+        };
+
+        if let Err(e) = &result {
+            error!("Failed to update OMEMO device trust: {}", e);
+            return result;
+        }
+
+        info!("Successfully marked device {}:{} as {}", contact, device_id, level.as_str());
+        if let Err(e) = storage.remove_pending_device_verification(&BareJid::parse(contact).expect("expected valid JID"), device_id) {
+            warn!("Failed to remove pending verification: {}", e);
+        }
+        Ok(())
     }
 
     /// Get the device ID for this OMEMO instance

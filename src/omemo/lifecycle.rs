@@ -76,7 +76,7 @@ impl OmemoManager {
 
         let signed_pre_key_signature = protocol::X3DHProtocol::sign_pre_key(
             identity_key_pair.private_key.expose_secret(),
-            &signed_pre_key_pair.public_key,
+            signed_pre_key_pair.public_key.as_ref(),
         )
         .map_err(|e| OmemoError::ProtocolError(format!("Failed to sign prekey: {}", e)))?;
 
@@ -205,11 +205,8 @@ impl OmemoManager {
             )));
         }
 
-        let bare_jid = BareJid::from_raw_lossy(if jid.contains('/') {
-            jid.split('/').next().unwrap_or(jid)
-        } else {
-            jid
-        });
+        let bare_jid = BareJid::parse(jid.split('/').next().unwrap_or(jid))
+            .expect("expected valid JID");
 
         // If not force refresh, try cached data first
         if !force_refresh {
@@ -433,10 +430,10 @@ impl OmemoManager {
 
         let identity = protocol::DeviceIdentity {
             id: self.device_id,
-            identity_key: bundle.identity_key_pair.public_key.clone(),
+            identity_key: bundle.identity_key_pair.public_key.to_vec(),
             signed_pre_key: protocol::SignedPreKeyBundle {
                 id: bundle.signed_pre_key_id,
-                public_key: bundle.signed_pre_key_pair.public_key.clone(),
+                public_key: bundle.signed_pre_key_pair.public_key.to_vec(),
                 signature: bundle.signed_pre_key_signature.clone(),
             },
             pre_keys: bundle
@@ -444,7 +441,7 @@ impl OmemoManager {
                 .iter()
                 .map(|(id, pair)| protocol::PreKeyBundle {
                     id: *id,
-                    public_key: pair.public_key.clone(),
+                    public_key: pair.public_key.to_vec(),
                 })
                 .collect(),
         };
@@ -504,7 +501,7 @@ impl OmemoManager {
 
         let signed_pre_key_signature = X3DHProtocol::sign_pre_key(
             current_bundle.identity_key_pair.private_key.expose_secret(),
-            &signed_pre_key_pair.public_key,
+            signed_pre_key_pair.public_key.as_ref(),
         )
         .map_err(|e| OmemoError::ProtocolError(format!("Failed to sign PreKey: {}", e)))?;
 
@@ -803,7 +800,7 @@ impl OmemoManager {
                 info!("Device list published successfully: {:?}", devices);
 
                 let storage_guard = self.storage.lock().await;
-                if let Err(e) = storage_guard.mark_device_list_published(&BareJid::from_raw_lossy(bare_jid)) {
+                if let Err(e) = storage_guard.mark_device_list_published(&BareJid::parse(bare_jid).expect("expected valid JID")) {
                     warn!("Failed to mark device list as published: {}", e);
                 }
 
@@ -821,7 +818,7 @@ impl OmemoManager {
 
     /// Get the device IDs for a user (public wrapper for testing)
     pub async fn get_device_ids_for_test(&self, jid: &str) -> Result<Vec<DeviceId>, OmemoError> {
-        self.get_device_ids(&BareJid::from_raw_lossy(jid)).await
+        self.get_device_ids(&BareJid::parse(jid).expect("expected valid JID")).await
     }
 
     /// Track an undecryptable message from a device
@@ -1017,7 +1014,7 @@ impl OmemoManager {
 
         let storage_guard = self.storage.lock().await;
         let trusted = storage_guard
-            .is_device_trusted(&BareJid::from_raw_lossy(sender), device_id)
+            .is_device_trusted(&BareJid::parse(sender).expect("expected valid JID"), device_id)
             .map_err(|e| OmemoError::StorageError(format!("Failed to check trust: {}", e)))?;
 
         Ok(trusted)
@@ -1104,7 +1101,7 @@ impl OmemoManager {
 
         let storage_guard = self.storage.lock().await;
         storage_guard
-            .set_trust_level(&BareJid::from_raw_lossy(sender), device_id, TrustLevel::Verified)
+            .set_trust_level(&BareJid::parse(sender).expect("expected valid JID"), device_id, TrustLevel::Verified)
             .map_err(|e| OmemoError::StorageError(format!("Failed to set verified: {}", e)))?;
 
         Ok(())
@@ -1123,7 +1120,7 @@ impl OmemoManager {
 
         let storage_guard = self.storage.lock().await;
         storage_guard
-            .set_trust_level(&BareJid::from_raw_lossy(sender), device_id, TrustLevel::Untrusted)
+            .set_trust_level(&BareJid::parse(sender).expect("expected valid JID"), device_id, TrustLevel::Untrusted)
             .map_err(|e| OmemoError::StorageError(format!("Failed to set untrust: {}", e)))?;
 
         Ok(())
@@ -1137,7 +1134,7 @@ impl OmemoManager {
     ) -> Result<TrustLevel, OmemoError> {
         let storage_guard = self.storage.lock().await;
         storage_guard
-            .get_trust_level(&BareJid::from_raw_lossy(sender), device_id)
+            .get_trust_level(&BareJid::parse(sender).expect("expected valid JID"), device_id)
             .map_err(|e| OmemoError::StorageError(format!("Failed to get trust level: {}", e)))
     }
 
@@ -1148,7 +1145,7 @@ impl OmemoManager {
         device_id: DeviceId,
     ) -> Result<String, OmemoError> {
         debug!("Getting fingerprint for device {}:{}", sender, device_id);
-        let device_identity = self.get_device_identity(&BareJid::from_raw_lossy(sender), device_id).await?;
+        let device_identity = self.get_device_identity(&BareJid::parse(sender).expect("expected valid JID"), device_id).await?;
         let raw_bytes = &device_identity.identity_key;
         let hex_dump = raw_bytes
             .iter()
@@ -1238,9 +1235,7 @@ impl OmemoManager {
             }
         };
 
-        if bundle.identity_key_pair.public_key.is_empty()
-            || bundle.signed_pre_key_pair.public_key.is_empty()
-            || bundle.signed_pre_key_signature.is_empty()
+        if bundle.signed_pre_key_signature.is_empty()
             || bundle.one_time_pre_key_pairs.is_empty()
         {
             error!("Invalid bundle data - missing required fields");
@@ -1310,10 +1305,10 @@ impl OmemoManager {
                 <signedPreKeySignature>{}</signedPreKeySignature>\
                 <prekeys>{}</prekeys>\
             </bundle>",
-            base64::engine::general_purpose::STANDARD.encode(&bundle.identity_key_pair.public_key),
+            base64::engine::general_purpose::STANDARD.encode(bundle.identity_key_pair.public_key.as_ref()),
             bundle.signed_pre_key_id,
             base64::engine::general_purpose::STANDARD
-                .encode(&bundle.signed_pre_key_pair.public_key),
+                .encode(bundle.signed_pre_key_pair.public_key.as_ref()),
             base64::engine::general_purpose::STANDARD.encode(&bundle.signed_pre_key_signature),
             bundle
                 .one_time_pre_key_pairs
@@ -1321,7 +1316,7 @@ impl OmemoManager {
                 .map(|(id, keypair)| format!(
                     "<preKeyPublic preKeyId='{}'>{}</preKeyPublic>",
                     id,
-                    base64::engine::general_purpose::STANDARD.encode(&keypair.public_key)
+                    base64::engine::general_purpose::STANDARD.encode(keypair.public_key.as_ref())
                 ))
                 .collect::<Vec<_>>()
                 .join("")
@@ -1532,7 +1527,7 @@ impl OmemoManager {
         debug!("Getting device IDs for JID: {}", jid);
 
         let storage_guard = self.storage.lock().await;
-        if let Ok(device_list) = storage_guard.load_device_list(&BareJid::from_raw_lossy(jid)) {
+        if let Ok(device_list) = storage_guard.load_device_list(&BareJid::parse(jid).expect("expected valid JID")) {
             debug!("Found device list in storage: {:?}", device_list.device_ids);
             return Ok(device_list.device_ids);
         }

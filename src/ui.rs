@@ -403,7 +403,7 @@ impl ChatUI {
     pub fn handle_terminal_event(
         &mut self,
         terminal_event: Event,
-    ) -> Result<Option<(String, String)>> {
+    ) -> Result<Option<crate::commands::UiCommand>> {
         if let Some(focused) = focus_state_from_event(&terminal_event) {
             self.terminal_focused = focused;
             return Ok(None);
@@ -431,7 +431,7 @@ impl ChatUI {
                         format!("OMEMO key for {} has been accepted", contact),
                     ));
 
-                    return Ok(Some((contact, String::from("__KEY_ACCEPTED__"))));
+                    return Ok(Some(crate::commands::UiCommand::KeyAccepted { contact }));
                 }
                 KeyCode::Char('n') | KeyCode::Char('N') => {
                     // Reject the key
@@ -444,7 +444,7 @@ impl ChatUI {
                         format!("OMEMO key for {} has been rejected", contact),
                     ));
 
-                    return Ok(Some((contact, String::from("__KEY_REJECTED__"))));
+                    return Ok(Some(crate::commands::UiCommand::KeyRejected { contact }));
                 }
                 _ => {} // Ignore other keys when popup is active
             }
@@ -465,10 +465,7 @@ impl ChatUI {
                         format!("Removing contact {}...", contact),
                     ));
 
-                    return Ok(Some((
-                        contact,
-                        String::from("__REMOVE_CONTACT_CONFIRMED__"),
-                    )));
+                    return Ok(Some(crate::commands::UiCommand::RemoveContactConfirmed { contact }));
                 }
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                     // Cancel contact removal
@@ -500,7 +497,7 @@ impl ChatUI {
                         self.contact_add_dialog = None;
 
                         // Return the new contact JID to be added
-                        return Ok(Some((contact_jid, String::from("__ADD_CONTACT__"))));
+                        return Ok(Some(crate::commands::UiCommand::AddContact { jid: contact_jid }));
                     }
                 }
                 _ => {
@@ -548,16 +545,19 @@ impl ChatUI {
                         let row = &mut dialog.contact_rows[sel];
                         let jid = dialog.contact_jid.clone().unwrap_or_default();
                         let device_id = row.0.clone();
-                        let new_trusted =
-                            !matches!(row.2, TrustLevel::Trusted | TrustLevel::Verified);
-                        row.2 = if new_trusted {
-                            TrustLevel::Trusted
-                        } else {
+                        let new_level = if matches!(row.2, TrustLevel::Trusted | TrustLevel::Verified) {
                             TrustLevel::Untrusted
+                        } else {
+                            TrustLevel::Trusted
                         };
-                        let flag = if new_trusted { "1" } else { "0" };
-                        let signal = format!("__SET_DEVICE_TRUST__:{}:{}:{}", jid, device_id, flag);
-                        return Ok(Some((String::new(), signal)));
+                        row.2 = new_level.clone();
+                        if let Ok(did) = device_id.parse::<u32>() {
+                            return Ok(Some(crate::commands::UiCommand::SetDeviceTrust {
+                                jid,
+                                device_id: did,
+                                level: new_level,
+                            }));
+                        }
                     } else {
                         // Own device row — skip "this device"
                         let own_idx = sel - n_contact;
@@ -566,17 +566,19 @@ impl ChatUI {
                             if !is_current {
                                 let jid = dialog.own_jid.clone();
                                 let device_id = row.0.clone();
-                                let new_trusted =
-                                    !matches!(row.2, TrustLevel::Trusted | TrustLevel::Verified);
-                                row.2 = if new_trusted {
-                                    TrustLevel::Trusted
-                                } else {
+                                let new_level = if matches!(row.2, TrustLevel::Trusted | TrustLevel::Verified) {
                                     TrustLevel::Untrusted
+                                } else {
+                                    TrustLevel::Trusted
                                 };
-                                let flag = if new_trusted { "1" } else { "0" };
-                                let signal =
-                                    format!("__SET_DEVICE_TRUST__:{}:{}:{}", jid, device_id, flag);
-                                return Ok(Some((String::new(), signal)));
+                                row.2 = new_level.clone();
+                                if let Ok(did) = device_id.parse::<u32>() {
+                                    return Ok(Some(crate::commands::UiCommand::SetDeviceTrust {
+                                        jid,
+                                        device_id: did,
+                                        level: new_level,
+                                    }));
+                                }
                             }
                         }
                     }
@@ -590,7 +592,7 @@ impl ChatUI {
         }
 
         match key.code {
-            KeyCode::Esc => return Ok(Some((String::new(), String::new()))), // Signal to quit
+            KeyCode::Esc => return Ok(Some(crate::commands::UiCommand::Quit)),
             KeyCode::Enter => {
                 if !self.input.value().is_empty() {
                     let message_content = self.input.value().to_string();
@@ -617,19 +619,18 @@ impl ChatUI {
                     // Add the message to UI immediately
                     self.add_message(message);
 
-                    // Check if we're about to send an encrypted message
-                    if self.omemo_enabled {
-                        info!("UI: Preparing encrypted message for {}", recipient_jid);
-                        // Instead of appending to the message content, add it as a separate flag
-                        info!("UI: Using __VERIFY_KEYS__ prefix in recipient field instead of content");
-                        return Ok(Some((
-                            format!("__VERIFY_KEYS__:{}", recipient_jid),
-                            message_content,
-                        )));
-                    } else {
-                        info!("UI: Sending unencrypted message to {}", recipient_jid);
-                        return Ok(Some((recipient_jid, message_content)));
+                    // /plain prefix bypasses OMEMO
+                    if let Some(plain_body) = message_content.strip_prefix("/plain ") {
+                        return Ok(Some(crate::commands::UiCommand::SendPlainMessage {
+                            to: recipient_jid,
+                            body: plain_body.to_string(),
+                        }));
                     }
+
+                    return Ok(Some(crate::commands::UiCommand::SendMessage {
+                        to: recipient_jid,
+                        body: message_content,
+                    }));
                 }
             }
             KeyCode::Tab => {
@@ -662,10 +663,7 @@ impl ChatUI {
                 };
 
                 self.add_message(Message::system("me", status_msg));
-                return Ok(Some((
-                    String::new(),
-                    String::from("__TOGGLE_OS_NOTIFICATIONS__"),
-                )));
+                return Ok(Some(crate::commands::UiCommand::ToggleOsNotifications));
             }
             KeyCode::Char('t') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
                 // Toggle trust for the current contact's OMEMO keys
@@ -674,17 +672,14 @@ impl ChatUI {
 
                     // Request a trust toggle operation from the main app
                     // We'll use a special message format that will be handled in main.rs
-                    return Ok(Some((
-                        current_contact,
-                        String::from("__TOGGLE_OMEMO_TRUST__"),
-                    )));
+                    return Ok(Some(crate::commands::UiCommand::ToggleOmemoTrust { contact: current_contact }));
                 }
             }
             KeyCode::Char('a') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
                 // Show add contact dialog
                 // We'll use the base domain from the current credentials
                 // The server domain will be supplied by main.rs before showing the dialog
-                return Ok(Some((String::new(), String::from("__SHOW_ADD_CONTACT__"))));
+                return Ok(Some(crate::commands::UiCommand::ShowAddContact));
             }
             KeyCode::Char('d') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
                 // Delete/remove the current contact
@@ -692,7 +687,7 @@ impl ChatUI {
                     let current_contact = self.contact.clone();
 
                     // Request contact removal from the main app
-                    return Ok(Some((current_contact, String::from("__REMOVE_CONTACT__"))));
+                    return Ok(Some(crate::commands::UiCommand::RemoveContact { contact: current_contact }));
                 }
             }
             KeyCode::Char('h') | KeyCode::Char('H')
@@ -705,21 +700,21 @@ impl ChatUI {
             KeyCode::Char('f') | KeyCode::Char('F')
                 if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
             {
-                return Ok(Some((
-                    String::new(),
-                    String::from("__SHOW_DEVICE_FINGERPRINTS__"),
-                )));
+                return Ok(Some(crate::commands::UiCommand::ShowDeviceFingerprints));
             }
             KeyCode::Char('m') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
-                return Ok(Some((String::new(), String::from("__ENABLE_CARBONS__"))));
+                return Ok(Some(crate::commands::UiCommand::EnableCarbons));
             }
-            KeyCode::Char('r') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {}
+            KeyCode::Char('r') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
+                if self.has_active_contact() {
+                    return Ok(Some(crate::commands::UiCommand::RefetchOmemo {
+                        contact: self.contact.clone(),
+                    }));
+                }
+            }
             // Add test shortcut for friend request notifications (Ctrl+N)
             KeyCode::Char('n') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
-                return Ok(Some((
-                    String::new(),
-                    String::from("__TEST_FRIEND_REQUEST__"),
-                )));
+                return Ok(Some(crate::commands::UiCommand::TestFriendRequest));
             }
             KeyCode::Char('s') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
                 self.sidebar_hidden = !self.sidebar_hidden;
@@ -737,10 +732,9 @@ impl ChatUI {
                         // Clear unread status for the newly selected contact
                         if contact_changed {
                             self.unread_contacts.remove(&self.contact);
-                            return Ok(Some((
-                                self.contact.clone(),
-                                String::from("__CONTACT_CHANGED__"),
-                            )));
+                            return Ok(Some(crate::commands::UiCommand::ContactChanged {
+                                contact: self.contact.clone(),
+                            }));
                         }
                     }
                 } else if let Tab::Messages = self.active_tab {
@@ -760,10 +754,9 @@ impl ChatUI {
                         // Clear unread status for the newly selected contact
                         if contact_changed {
                             self.unread_contacts.remove(&self.contact);
-                            return Ok(Some((
-                                self.contact.clone(),
-                                String::from("__CONTACT_CHANGED__"),
-                            )));
+                            return Ok(Some(crate::commands::UiCommand::ContactChanged {
+                                contact: self.contact.clone(),
+                            }));
                         }
                     }
                 } else if let Tab::Messages = self.active_tab {
@@ -944,7 +937,7 @@ impl ChatUI {
                 // Show messages from the active contact, or sent to the active contact, or system messages
                 sender_base == *active_contact
                     || recipient_base == *active_contact
-                    || matches!(m.direction, crate::models::Direction::System { .. })
+                    || matches!(m.direction, chatterbox::models::Direction::System { .. })
             })
             .collect();
         let filtered_owned: Vec<Message> = filtered_messages.into_iter().cloned().collect();
@@ -1260,17 +1253,17 @@ fn draw_messages(f: &mut Frame, messages: &[Message], area: Rect, ui: &ChatUI) {
             // Add encryption indicator based on whether this specific message was encrypted
             let encryption_indicator = if m.encrypted { " 🔒" } else { " ❌" };
             let prefix = match &m.direction {
-                crate::models::Direction::Outgoing { .. } =>
+                chatterbox::models::Direction::Outgoing { .. } =>
                     format!("[{}] You{}: ", timestamp, encryption_indicator),
-                crate::models::Direction::System { .. } =>
+                chatterbox::models::Direction::System { .. } =>
                     format!("[{}] System: ", timestamp),
-                crate::models::Direction::Incoming { from } =>
+                chatterbox::models::Direction::Incoming { from } =>
                     format!("[{}] {}{}: ", timestamp, from, encryption_indicator),
             };
 
             // Simplified status indicator using ticks clearly
             let status_indicator = match &m.direction {
-                crate::models::Direction::Outgoing { .. } => {
+                chatterbox::models::Direction::Outgoing { .. } => {
                     match m.delivery_status {
                         DeliveryStatus::Sending => "", // no tick yet
                         DeliveryStatus::Sent => " ✓",
@@ -1296,9 +1289,9 @@ fn draw_messages(f: &mut Frame, messages: &[Message], area: Rect, ui: &ChatUI) {
             .map(|l| l.into_owned())
             .collect();
 
-            let style = if matches!(m.direction, crate::models::Direction::System { .. }) {
+            let style = if matches!(m.direction, chatterbox::models::Direction::System { .. }) {
                 Style::default().fg(Color::Gray)
-            } else if matches!(m.direction, crate::models::Direction::Outgoing { .. }) {
+            } else if matches!(m.direction, chatterbox::models::Direction::Outgoing { .. }) {
                 match m.delivery_status {
                     DeliveryStatus::Failed => Style::default().fg(Color::Red),
                     DeliveryStatus::Delivered | DeliveryStatus::Read => {

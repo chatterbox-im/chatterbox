@@ -268,12 +268,14 @@ pub fn import_legacy_store(base: &Path, store: &SqliteStore) -> Result<()> {
                     continue;
                 };
                 let dir = device_entry.path();
-                let trust = read_text(&dir.join("trust_level")).unwrap_or_else(|| {
+                let trust_str = read_text(&dir.join("trust_level")).unwrap_or_else(|| {
                     match read_text(&dir.join("trusted")).as_deref() {
                         Some("true") => "trusted".to_string(),
                         _ => "undecided".to_string(),
                     }
                 });
+                let trust = crate::omemo::storage::TrustLevel::from_str(&trust_str)
+                    .unwrap_or(crate::omemo::storage::TrustLevel::Undecided);
                 let identity_path = dir.join("identity.bin");
                 if identity_path.exists() {
                     match fs::read(&identity_path)
@@ -281,20 +283,20 @@ pub fn import_legacy_store(base: &Path, store: &SqliteStore) -> Result<()> {
                         .and_then(|d| bincode::deserialize::<DeviceIdentity>(&d).map_err(Into::into))
                     {
                         Ok(identity) => {
-                            if let Err(e) = store.save_identity(&jid, &identity, &trust) {
+                            if let Err(e) = store.save_identity(&jid, &identity, trust) {
                                 warn!("Failed to import identity {}:{}: {}", jid, device_id, e);
                             } else {
-                                let _ = store.set_trust(&jid, device_id, &trust);
+                                let _ = store.set_trust(&jid, device_id, trust);
                                 counts[2] += 1;
                             }
                         }
                         Err(e) => {
                             warn!("Dropping undecodable identity {}:{}: {}", jid, device_id, e);
-                            let _ = store.set_trust(&jid, device_id, &trust);
+                            let _ = store.set_trust(&jid, device_id, trust);
                         }
                     }
                 } else {
-                    let _ = store.set_trust(&jid, device_id, &trust);
+                    let _ = store.set_trust(&jid, device_id, trust);
                 }
             }
         }

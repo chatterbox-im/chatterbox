@@ -24,7 +24,7 @@ impl XMPPClient {
     pub(super) async fn handle_incoming_messages(
         stanza_tx: StanzaTx,
         mut event_rx: mpsc::UnboundedReceiver<XMPPEvent>,
-        msg_tx: mpsc::Sender<Message>,
+        msg_tx: mpsc::Sender<crate::models::AppEvent>,
         pending_receipts: Arc<TokioMutex<std::collections::HashMap<String, PendingMessage>>>,
         iq_registry: Arc<TokioMutex<crate::xmpp::iq_registry::IqResponseRegistry>>,
         late_state: LateStateRx,
@@ -319,7 +319,7 @@ impl XMPPClient {
                                         content.len()
                                     );
 
-                                    if let Err(e) = msg_tx.send(message).await {
+                                    if let Err(e) = msg_tx.send(crate::models::AppEvent::Chat(message)).await {
                                         error!("Failed to send message to UI: {}", e);
                                     } else {
                                         debug!("Successfully sent message to UI channel");
@@ -445,7 +445,7 @@ impl XMPPClient {
                             warn!("Failed to re-send presence after reconnect: {}", e);
                         }
                         if let Some(ref jid) = our_bare_jid {
-                            let _ = msg_tx.send(Message::system(jid, "Reconnected.")).await;
+                            let _ = msg_tx.send(crate::models::AppEvent::Chat(Message::system(jid, "Reconnected."))).await;
                         }
                     } else if !seen_online_event {
                         info!("Connected to XMPP server as {}", bound_jid);
@@ -510,7 +510,7 @@ impl XMPPClient {
                             "Connection lost. Reconnecting...".to_string()
                         };
                         if let Some(ref jid) = our_bare_jid {
-                            let _ = msg_tx.send(Message::system(jid, &notify)).await;
+                            let _ = msg_tx.send(crate::models::AppEvent::Chat(Message::system(jid, &notify))).await;
                         }
                         if is_fatal {
                             break;
@@ -556,12 +556,12 @@ mod tests {
     fn spawn_loop() -> (
         mpsc::UnboundedSender<XMPPEvent>,
         mpsc::UnboundedReceiver<xmpp_parsers::minidom::Element>,
-        mpsc::Receiver<Message>,
+        mpsc::Receiver<crate::models::AppEvent>,
         oneshot::Receiver<Result<(), String>>,
     ) {
         let (stanza_tx, stanza_rx) = mpsc::unbounded_channel::<xmpp_parsers::minidom::Element>();
         let (event_tx, event_rx) = mpsc::unbounded_channel::<XMPPEvent>();
-        let (msg_tx, msg_rx) = mpsc::channel::<Message>(16);
+        let (msg_tx, msg_rx) = mpsc::channel::<crate::models::AppEvent>(16);
         let pending_receipts = Arc::new(TokioMutex::new(std::collections::HashMap::<
             String,
             PendingMessage,
@@ -658,10 +658,11 @@ mod tests {
             .await
             .expect("timed out waiting for reconnect UI message")
             .expect("msg channel closed");
+        let content = match msg { crate::models::AppEvent::Chat(m) => m.content, other => panic!("expected Chat event, got {:?}", other) };
         assert!(
-            msg.content.contains("Reconnecting"),
+            content.contains("Reconnecting"),
             "expected 'Reconnecting' in UI message, got: {:?}",
-            msg.content
+            content
         );
 
         // Transport reconnects
@@ -696,10 +697,11 @@ mod tests {
             .await
             .expect("timed out waiting for reconnected UI message")
             .expect("msg channel closed");
+        let content2 = match msg2 { crate::models::AppEvent::Chat(m) => m.content, other => panic!("expected Chat event, got {:?}", other) };
         assert!(
-            msg2.content.contains("Reconnected"),
+            content2.contains("Reconnected"),
             "expected 'Reconnected' in UI message, got: {:?}",
-            msg2.content
+            content2
         );
     }
 

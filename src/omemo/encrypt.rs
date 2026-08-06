@@ -179,84 +179,23 @@ impl OmemoManager {
             bare_jid, remote_device_id
         );
 
-        // Verify the signed prekey signature before using the bundle
-        let verification = protocol::X3DHProtocol::verify_pre_key(
-            &remote_identity.identity_key,
-            &remote_identity.signed_pre_key.public_key,
-            &remote_identity.signed_pre_key.signature,
-        );
-
-        let needs_refetch = matches!(&verification, Ok(false) | Err(_));
-        if needs_refetch {
-            // Cached bundle may be stale (device rotated keys). Re-fetch from server.
-            warn!("Signed prekey verification failed for {}:{} with cached bundle, re-fetching from server", bare_jid, remote_device_id);
-            match self
-                .fetch_device_identity_from_server(&bare_jid, remote_device_id)
-                .await
-            {
-                Ok(fresh_identity) => {
-                    remote_identity = fresh_identity;
-                    // Verify the fresh bundle
-                    match protocol::X3DHProtocol::verify_pre_key(
-                        &remote_identity.identity_key,
-                        &remote_identity.signed_pre_key.public_key,
-                        &remote_identity.signed_pre_key.signature,
-                    ) {
-                        Ok(true) => {
-                            info!(
-                                "Signed prekey signature verified for {}:{} after re-fetch",
-                                bare_jid, remote_device_id
-                            );
-                        }
-                        Ok(false) => {
-                            error!("Signed prekey signature INVALID for {}:{} even after re-fetch — rejecting bundle to prevent potential MITM", bare_jid, remote_device_id);
-                            return Err(OmemoError::ProtocolError(format!(
-                                "Signed prekey signature verification failed for {}:{} — bundle rejected", bare_jid, remote_device_id
-                            )));
-                        }
-                        Err(e) => {
-                            error!("Signed prekey signature verification error for {}:{} after re-fetch: {} — rejecting bundle", bare_jid, remote_device_id, e);
-                            return Err(OmemoError::ProtocolError(format!(
-                                "Signed prekey signature verification error for {}:{}: {}",
-                                bare_jid, remote_device_id, e
-                            )));
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!(
-                        "Failed to re-fetch bundle for {}:{}: {}",
-                        bare_jid, remote_device_id, e
-                    );
-                    // Return the original verification error
-                    match verification {
-                        Ok(false) => {
-                            return Err(OmemoError::ProtocolError(format!(
-                                "Signed prekey signature verification failed for {}:{}",
-                                bare_jid, remote_device_id
-                            )))
-                        }
-                        Err(e) => {
-                            return Err(OmemoError::ProtocolError(format!(
-                                "Signed prekey signature verification error for {}:{}: {}",
-                                bare_jid, remote_device_id, e
-                            )))
-                        }
-                        _ => unreachable!(),
-                    }
+        // Verify the SPK signature — returns VerifiedDeviceIdentity so subsequent
+        // X3DH creation cannot skip verification.
+        let remote_identity = match remote_identity.verify() {
+            Ok(v) => v,
+            Err(_) => {
+                // Cached bundle may be stale; re-fetch and verify the fresh one.
+                warn!("Signed prekey verification failed for {}:{} with cached bundle, re-fetching from server", bare_jid, remote_device_id);
+                match self.fetch_device_identity_from_server(&bare_jid, remote_device_id).await {
+                    Ok(fresh) => fresh.verify().map_err(|e| OmemoError::ProtocolError(
+                        format!("Signed prekey signature invalid for {}:{} even after re-fetch — possible MITM: {}", bare_jid, remote_device_id, e)
+                    ))?,
+                    Err(e) => return Err(OmemoError::ProtocolError(
+                        format!("Failed to re-fetch bundle for {}:{}: {}", bare_jid, remote_device_id, e)
+                    )),
                 }
             }
-        } else {
-            match verification {
-                Ok(true) => {
-                    debug!(
-                        "Signed prekey signature verified for {}:{}",
-                        bare_jid, remote_device_id
-                    );
-                }
-                _ => unreachable!(),
-            }
-        }
+        };
 
         // In OMEMO, when we want to SEND to a device, we always act as X3DH initiator
         // (fetch their bundle and create a session). Recipient sessions are only created
@@ -269,7 +208,7 @@ impl OmemoManager {
         let device_key = (bare_jid.clone(), remote_device_id);
         self.prekey_ephemeral_keys.insert(
             device_key.clone(),
-            (ephemeral_key_pair.public_key.clone(), Instant::now()),
+            (ephemeral_key_pair.public_key.to_vec(), Instant::now()),
         );
 
         // Store the remote device's PreKey IDs so the PreKeySignalMessage can reference them
@@ -288,13 +227,13 @@ impl OmemoManager {
             our_identity_key_pair,
             crypto::ensure_montgomery_form(&remote_identity.identity_key)
                 .map_err(|e| OmemoError::CryptoError(e))?,
-            remote_identity.signed_pre_key.public_key,
+            remote_identity.signed_pre_key.public_key.clone(),
             if remote_identity.pre_keys.is_empty() {
                 None
             } else {
                 Some(remote_identity.pre_keys[0].public_key.clone())
             },
-            ephemeral_key_pair.private_key.expose_secret().to_vec(),
+            crate::omemo::keys::EphemeralPrivateKey(ephemeral_key_pair.private_key),
             self.device_id,
         )?;
 
@@ -877,7 +816,7 @@ impl OmemoManager {
                     )) = prekey_params
                     {
                         let base_key = base_key_opt.unwrap_or_else(|| {
-                            session.ratchet_state.ratchet_key_pair.public_key.clone()
+                            session.ratchet_state.ratchet_key_pair.public_key.to_vec()
                         });
 
                         session.encrypt_key_prekey(
@@ -886,7 +825,7 @@ impl OmemoManager {
                             remote_opk_id.map(crate::omemo::keys::OneTimePreKeyId),
                             crate::omemo::keys::SignedPreKeyId(remote_spk_id),
                             &base_key,
-                            &identity_key,
+                            identity_key.as_ref(),
                         )
                     } else {
                         session.encrypt_key(&message_key)
@@ -1004,7 +943,7 @@ impl OmemoManager {
                 .unwrap()
                 .signed_pre_key_pair
                 .public_key
-                .clone(),
+                .to_vec(),
             previous_counter: 0,
             counter: 0,
             ciphertext,
