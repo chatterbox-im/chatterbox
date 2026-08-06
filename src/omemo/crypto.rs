@@ -792,14 +792,25 @@ mod tests {
             .expect("XEdDSA verify with 0x05-prefixed SPK should succeed");
     }
 
+    /// RFC 5869 §A.1 Test Case 1 — HKDF-SHA256
+    /// Verifies the extract-then-expand key derivation against a published reference.
     #[test]
-    fn test_hkdf() {
-        let salt = b"salt";
-        let ikm = b"input key material";
-        let info = b"info";
-
-        let key = hkdf_derive(Salt(salt), Ikm(ikm), info, 32).unwrap();
-        assert_eq!(key.len(), 32);
+    fn hkdf_rfc5869_test_case_1() {
+        let ikm  = &[0x0bu8; 22];
+        let salt = &[0x00u8, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
+                     0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c];
+        let info = &[0xf0u8, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9];
+        // Expected OKM from RFC 5869 Appendix A.1
+        let expected = [
+            0x3c, 0xb2, 0x5f, 0x25, 0xfa, 0xac, 0xd5, 0x7a,
+            0x90, 0x43, 0x4f, 0x64, 0xd0, 0x36, 0x2f, 0x2a,
+            0x2d, 0x2d, 0x0a, 0x90, 0xcf, 0x1a, 0x5a, 0x4c,
+            0x5d, 0xb0, 0x2d, 0x56, 0xec, 0xc4, 0xc5, 0xbf,
+            0x34, 0x00, 0x72, 0x08, 0xd5, 0xb8, 0x87, 0x18,
+            0x58, 0x65,
+        ];
+        let okm = hkdf_derive(Salt(salt), Ikm(ikm), info, 42).unwrap();
+        assert_eq!(&okm[..], &expected[..], "HKDF output must match RFC 5869 §A.1 vector");
     }
 
     #[test]
@@ -871,13 +882,21 @@ mod tests {
         }
     }
 
+    /// RFC 4231 §4.2 Test Case 1 — HMAC-SHA256
+    /// Verifies the MAC computation against a published reference.
     #[test]
-    fn test_hmac() {
-        let key = b"key";
-        let message = b"message";
-
-        let hmac = hmac_sha256(key, message).unwrap();
-        assert!(!hmac.is_empty());
+    fn hmac_sha256_rfc4231_test_case_1() {
+        let key  = &[0x0bu8; 20];
+        let data = b"Hi There";
+        // Expected HMAC from RFC 4231 Section 4.2
+        let expected = [
+            0xb0, 0x34, 0x4c, 0x61, 0xd8, 0xdb, 0x38, 0x53,
+            0x5c, 0xa8, 0xaf, 0xce, 0xaf, 0x0b, 0xf1, 0x2b,
+            0x88, 0x1d, 0xc2, 0x00, 0xc9, 0x83, 0x3d, 0xa7,
+            0x26, 0xe9, 0x37, 0x6c, 0x2e, 0x32, 0xcf, 0xf7,
+        ];
+        let mac = hmac_sha256(key, data).unwrap();
+        assert_eq!(&mac[..], &expected[..], "HMAC-SHA256 output must match RFC 4231 §4.2 vector");
     }
 
     #[test]

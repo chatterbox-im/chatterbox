@@ -166,68 +166,73 @@ mod tests {
     }
 
     /// An explicitly Untrusted device must not appear in encrypted_keys.
+    /// A second *trusted* recipient (carol) is present so encryption must succeed;
+    /// the `encrypted_keys` assertion is therefore unconditionally reached.
     #[tokio::test]
     async fn untrusted_device_excluded_from_encrypted_keys() -> Result<()> {
         let alice_jid = "alice@example.com";
-        let bob_jid = "bob@example.com";
+        let bob_jid   = "bob@example.com";
+        let carol_jid = "carol@example.com"; // trusted: forces encryption to succeed
         let alice_did = 1001u32;
-        let bob_did = 2001u32;
+        let bob_did   = 2001u32;
+        let carol_did = 3001u32;
 
         let ps = Arc::new(MockPubSub { responses: Mutex::new(HashMap::new()) });
 
         let (mut alice, _adir) = make_manager(alice_jid, alice_did, ps.clone()).await;
-        let (bob,   _bdir) = make_manager(bob_jid,   bob_did,  ps.clone()).await;
+        let (bob,  _bdir) = make_manager(bob_jid,   bob_did,  ps.clone()).await;
+        let (carol, _cdir) = make_manager(carol_jid, carol_did, ps.clone()).await;
 
-        let bob_bundle = bob.key_bundle.as_ref().unwrap();
-        ps.add_device_list(bob_jid, &[bob_did]).await;
-        ps.add_bundle(bob_jid, bob_did, bob_bundle).await;
+        ps.add_device_list(bob_jid,   &[bob_did]).await;
+        ps.add_bundle(bob_jid,   bob_did,   bob.key_bundle.as_ref().unwrap()).await;
+        ps.add_device_list(carol_jid, &[carol_did]).await;
+        ps.add_bundle(carol_jid, carol_did, carol.key_bundle.as_ref().unwrap()).await;
         ps.add_device_list(alice_jid, &[alice_did]).await;
 
-        // Mark bob's device Untrusted before encrypting.
+        // Mark bob Untrusted, leave carol at the default Undecided (= trusted).
         {
             let mut storage = alice.storage.lock().await;
             storage.set_trust_level(&bjid(bob_jid), DeviceId::from(bob_did), TrustLevel::Untrusted)?;
         }
 
-        let result = alice.encrypt_message(bob_jid, "hello").await;
-        match result {
-            Ok(msg) => {
-                assert!(
-                    !msg.encrypted_keys.contains_key(&DeviceId::from(bob_did)),
-                    "Untrusted device must be absent from encrypted_keys; \
-                     got keys for: {:?}",
-                    msg.encrypted_keys.keys().collect::<Vec<_>>()
-                );
-            }
-            Err(_) => {
-                // Acceptable: no eligible recipients → encryption error is correct.
-            }
-        }
+        // Encryption to carol is trusted → must succeed; if it returns Err the
+        // test panics here rather than silently passing.
+        let msg = alice.encrypt_message(carol_jid, "hello")
+            .await
+            .expect("encryption to carol (trusted) must succeed");
+
+        assert!(
+            !msg.encrypted_keys.contains_key(&DeviceId::from(bob_did)),
+            "Untrusted bob must be absent from encrypted_keys; got keys for: {:?}",
+            msg.encrypted_keys.keys().collect::<Vec<_>>()
+        );
         Ok(())
     }
 
-    /// Corrupt trust DB row at the encrypt site must not allow the device.
-    ///
-    /// `encrypt.rs` currently uses `.unwrap_or(Undecided)` which silently
-    /// grants access when reading trust fails.  This test fails until that
-    /// line is changed to `.unwrap_or(Untrusted)`.
+    /// A corrupt trust DB row must not grant encryption rights (fail-closed).
+    /// Carol is a second trusted recipient so encryption to carol must succeed;
+    /// the `encrypted_keys` assertion is therefore unconditionally reached.
     #[tokio::test]
     async fn corrupt_trust_at_encrypt_site_fails_safe() -> Result<()> {
         let alice_jid = "alice@example.com";
-        let bob_jid = "bob@example.com";
+        let bob_jid   = "bob@example.com";
+        let carol_jid = "carol@example.com"; // trusted: forces encryption to succeed
         let alice_did = 1002u32;
-        let bob_did = 2002u32;
+        let bob_did   = 2002u32;
+        let carol_did = 3002u32;
 
         let ps = Arc::new(MockPubSub { responses: Mutex::new(HashMap::new()) });
         let (mut alice, adir) = make_manager(alice_jid, alice_did, ps.clone()).await;
-        let (bob, _bdir)  = make_manager(bob_jid, bob_did, ps.clone()).await;
+        let (bob,  _bdir) = make_manager(bob_jid,   bob_did,  ps.clone()).await;
+        let (carol, _cdir) = make_manager(carol_jid, carol_did, ps.clone()).await;
 
-        let bob_bundle = bob.key_bundle.as_ref().unwrap();
-        ps.add_device_list(bob_jid, &[bob_did]).await;
-        ps.add_bundle(bob_jid, bob_did, bob_bundle).await;
+        ps.add_device_list(bob_jid,   &[bob_did]).await;
+        ps.add_bundle(bob_jid,   bob_did,   bob.key_bundle.as_ref().unwrap()).await;
+        ps.add_device_list(carol_jid, &[carol_did]).await;
+        ps.add_bundle(carol_jid, carol_did, carol.key_bundle.as_ref().unwrap()).await;
         ps.add_device_list(alice_jid, &[alice_did]).await;
 
-        // First set a valid Trusted level so the row exists, then corrupt it.
+        // Give bob a valid Trusted level, then corrupt it to simulate a bad row.
         {
             let mut storage = alice.storage.lock().await;
             storage.set_trust_level(&bjid(bob_jid), DeviceId::from(bob_did), TrustLevel::Trusted)?;
@@ -241,15 +246,17 @@ mod tests {
             ).unwrap();
         }
 
-        let result = alice.encrypt_message(bob_jid, "hello").await;
-        if let Ok(msg) = result {
-            assert!(
-                !msg.encrypted_keys.contains_key(&DeviceId::from(bob_did)),
-                "device with corrupt trust must be excluded (fail-closed), \
-                 but found key for device {}",
-                bob_did
-            );
-        }
+        // Encrypt to carol (trusted) → must succeed; panics here on unexpected Err.
+        let msg = alice.encrypt_message(carol_jid, "hello")
+            .await
+            .expect("encryption to carol (trusted) must succeed");
+
+        assert!(
+            !msg.encrypted_keys.contains_key(&DeviceId::from(bob_did)),
+            "device with corrupt trust must be excluded (fail-closed); \
+             got keys for: {:?}",
+            msg.encrypted_keys.keys().collect::<Vec<_>>()
+        );
         Ok(())
     }
 

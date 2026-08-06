@@ -173,6 +173,83 @@ mod req2_wire_format {
             "inner message counter mismatch"
         );
     }
+
+    /// Verify field tags independently of the serialiser by scanning the raw
+    /// protobuf bytes.  base_key=field2 (tag 0x12) and identity_key=field3
+    /// (tag 0x1a) carry distinct fill bytes so a tag swap produces a wrong
+    /// assertion regardless of how encode/decode pair up.
+    #[test]
+    fn prekey_field_2_is_base_key_field_3_is_identity_key() {
+        let inner = SignalMessage {
+            ratchet_key: vec![0x42; 32],
+            counter: 1,
+            previous_counter: 0,
+            ciphertext: vec![0xCC; 16],
+            mac: vec![],
+        };
+        let msg = PreKeySignalMessage {
+            registration_id: 1,
+            pre_key_id: Some(2),
+            signed_pre_key_id: 3,
+            base_key:      vec![0x11; 32], // unique: all 0x11
+            identity_key:  vec![0x22; 32], // unique: all 0x22
+            message: inner,
+            raw_message_bytes: vec![],
+        };
+
+        let bytes = msg.serialize(&[0u8; 32]);
+        // Skip version byte; the rest is raw protobuf.
+        let proto = &bytes[1..];
+
+        let base_key_raw = find_pb_bytes_field(proto, 0x12)
+            .expect("field 2 (BASE_KEY, tag 0x12) not found in serialized bytes");
+        assert_eq!(base_key_raw[0], 0x05,
+            "base_key (field 2) must start with 0x05 type prefix");
+        assert!(base_key_raw[1..].iter().all(|&b| b == 0x11),
+            "base_key (field 2) payload must be all 0x11, got {:02x?}", &base_key_raw[1..5]);
+
+        let id_key_raw = find_pb_bytes_field(proto, 0x1a)
+            .expect("field 3 (IDENTITY_KEY, tag 0x1a) not found in serialized bytes");
+        assert_eq!(id_key_raw[0], 0x05,
+            "identity_key (field 3) must start with 0x05 type prefix");
+        assert!(id_key_raw[1..].iter().all(|&b| b == 0x22),
+            "identity_key (field 3) payload must be all 0x22, got {:02x?}", &id_key_raw[1..5]);
+    }
+
+    /// Scan a raw protobuf byte slice for a length-delimited field with the
+    /// given tag byte and return its payload.  Returns None if not found.
+    fn find_pb_bytes_field(proto: &[u8], target: u8) -> Option<&[u8]> {
+        let mut pos = 0;
+        while pos < proto.len() {
+            let tag = proto[pos]; pos += 1;
+            let wire_type = tag & 0x07;
+            if tag == target && wire_type == 2 {
+                let (len, vlen) = decode_pb_varint(&proto[pos..])?;
+                pos += vlen;
+                return Some(&proto[pos..pos + len]);
+            }
+            // Skip unknown field
+            match wire_type {
+                0 => { while pos < proto.len() { let b = proto[pos]; pos += 1; if b & 0x80 == 0 { break; } } }
+                1 => { pos += 8; }
+                2 => { let (n, v) = decode_pb_varint(&proto[pos..])?; pos += v + n; }
+                5 => { pos += 4; }
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    fn decode_pb_varint(data: &[u8]) -> Option<(usize, usize)> {
+        let mut v = 0usize; let mut shift = 0;
+        for (i, &b) in data.iter().enumerate() {
+            v |= ((b & 0x7f) as usize) << shift;
+            if b & 0x80 == 0 { return Some((v, i + 1)); }
+            shift += 7;
+            if shift > 63 { return None; }
+        }
+        None
+    }
 }
 
 /// Requirement 3: XEdDSA signature verification (X25519 → Ed25519)
