@@ -133,14 +133,20 @@ impl MessageStore {
         )?;
 
         let rows = stmt.query_map(params![contact_jid, limit as i64], |row| {
+            let sender_id: String = row.get(1)?;
+            let recipient_id: String = row.get(2)?;
+            let direction = crate::models::Direction::from_sql(
+                &sender_id, &recipient_id, contact_jid,
+            );
             Ok(Message {
                 id: row.get(0)?,
-                sender_id: row.get(1)?,
-                recipient_id: row.get(2)?,
+                sender_id,
+                recipient_id,
                 content: row.get(3)?,
                 timestamp: crate::units::Millis(row.get::<_, i64>(4)?),
                 delivery_status: Self::status_from_i32(row.get(5)?),
                 encrypted: row.get::<_, i32>(6).unwrap_or(0) != 0,
+                direction,
             })
         })?;
 
@@ -194,22 +200,8 @@ impl MessageStore {
     }
 
     /// Determine which JID a message belongs to in the conversation index.
-    /// For outgoing messages (sender = "me"/"You"), the contact is the recipient.
-    /// For incoming messages, the contact is the sender (bare JID).
     fn contact_jid_for(msg: &Message) -> String {
-        if msg.sender_id == "me" || msg.sender_id == "You" || msg.sender_id == "system" {
-            msg.recipient_id
-                .split('/')
-                .next()
-                .unwrap_or(&msg.recipient_id)
-                .to_string()
-        } else {
-            msg.sender_id
-                .split('/')
-                .next()
-                .unwrap_or(&msg.sender_id)
-                .to_string()
-        }
+        msg.direction.conversation().to_string()
     }
 
     fn status_from_i32(val: i32) -> DeliveryStatus {
@@ -238,6 +230,7 @@ mod tests {
             timestamp: crate::units::Millis(ts),
             delivery_status: DeliveryStatus::Delivered,
             encrypted: false,
+            direction: crate::models::Direction::from_sql(sender, recipient, if sender == "me" { recipient } else { sender }),
         }
     }
 

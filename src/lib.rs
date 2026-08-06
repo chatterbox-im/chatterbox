@@ -80,6 +80,7 @@ mod tests {
             timestamp: crate::units::Millis(1650000000),
             delivery_status: DeliveryStatus::Sending,
             encrypted: false,
+            direction: crate::models::Direction::Incoming { from: crate::jid::BareJid::from_raw_lossy("sender1") },
         };
 
         // Verify message properties
@@ -99,6 +100,7 @@ mod tests {
             timestamp: msg.timestamp,
             delivery_status: DeliveryStatus::Sent,
             encrypted: false,
+            direction: msg.direction.clone(),
         };
 
         let delivered_msg = Message {
@@ -109,6 +111,7 @@ mod tests {
             timestamp: msg.timestamp,
             delivery_status: DeliveryStatus::Delivered,
             encrypted: false,
+            direction: msg.direction.clone(),
         };
 
         let read_msg = Message {
@@ -119,6 +122,7 @@ mod tests {
             timestamp: msg.timestamp,
             delivery_status: DeliveryStatus::Read,
             encrypted: false,
+            direction: msg.direction.clone(),
         };
 
         let failed_msg = Message {
@@ -129,6 +133,7 @@ mod tests {
             timestamp: msg.timestamp,
             delivery_status: DeliveryStatus::Failed,
             encrypted: false,
+            direction: msg.direction.clone(),
         };
 
         assert_eq!(sent_msg.delivery_status, DeliveryStatus::Sent);
@@ -148,6 +153,7 @@ mod tests {
             timestamp: crate::units::Millis(1650000000),
             delivery_status: DeliveryStatus::Sending,
             encrypted: false,
+            direction: crate::models::Direction::Incoming { from: crate::jid::BareJid::from_raw_lossy("sender1") },
         };
 
         // Test with empty content (should still be valid structurally)
@@ -159,6 +165,7 @@ mod tests {
             timestamp: crate::units::Millis(1650000000),
             delivery_status: DeliveryStatus::Sending,
             encrypted: false,
+            direction: crate::models::Direction::Incoming { from: crate::jid::BareJid::from_raw_lossy("sender1") },
         };
 
         // Test with very long content
@@ -171,6 +178,7 @@ mod tests {
             timestamp: crate::units::Millis(1650000000),
             delivery_status: DeliveryStatus::Sending,
             encrypted: false,
+            direction: crate::models::Direction::Incoming { from: crate::jid::BareJid::from_raw_lossy("sender1") },
         };
 
         // Verify all messages are structurally valid
@@ -194,6 +202,7 @@ mod tests {
             timestamp: current_timestamp,
             delivery_status: DeliveryStatus::Sending,
             encrypted: false,
+            direction: crate::models::Direction::Incoming { from: crate::jid::BareJid::from_raw_lossy("sender1") },
         };
 
         // Test with past timestamp
@@ -206,6 +215,7 @@ mod tests {
             timestamp: past_timestamp,
             delivery_status: DeliveryStatus::Sent,
             encrypted: false,
+            direction: crate::models::Direction::Incoming { from: crate::jid::BareJid::from_raw_lossy("sender1") },
         };
 
         // Verify timestamps are stored correctly

@@ -153,6 +153,9 @@ impl XMPPClient {
                 timestamp: pending.timestamp,
                 delivery_status: new_status,
                 encrypted: false,
+                direction: crate::models::Direction::Outgoing {
+                    to: crate::jid::BareJid::from_raw_lossy(&pending.to),
+                },
             };
 
             match self.msg_tx.send(ui_message).await {

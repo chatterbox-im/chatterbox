@@ -944,7 +944,7 @@ impl ChatUI {
                 // Show messages from the active contact, or sent to the active contact, or system messages
                 sender_base == *active_contact
                     || recipient_base == *active_contact
-                    || m.sender_id == "system"
+                    || matches!(m.direction, crate::models::Direction::System { .. })
             })
             .collect();
         let filtered_owned: Vec<Message> = filtered_messages.into_iter().cloned().collect();
@@ -1259,18 +1259,18 @@ fn draw_messages(f: &mut Frame, messages: &[Message], area: Rect, ui: &ChatUI) {
 
             // Add encryption indicator based on whether this specific message was encrypted
             let encryption_indicator = if m.encrypted { " 🔒" } else { " ❌" };
-            let prefix =
-                if m.sender_id == "me" || m.sender_id.contains("@") && m.recipient_id != "me" {
-                    format!("[{}] You{}: ", timestamp, encryption_indicator)
-                } else if m.sender_id == "system" {
-                    format!("[{}] System: ", timestamp)
-                } else {
-                    format!("[{}] {}{}: ", timestamp, m.sender_id, encryption_indicator)
-                };
+            let prefix = match &m.direction {
+                crate::models::Direction::Outgoing { .. } =>
+                    format!("[{}] You{}: ", timestamp, encryption_indicator),
+                crate::models::Direction::System { .. } =>
+                    format!("[{}] System: ", timestamp),
+                crate::models::Direction::Incoming { from } =>
+                    format!("[{}] {}{}: ", timestamp, from, encryption_indicator),
+            };
 
             // Simplified status indicator using ticks clearly
-            let status_indicator =
-                if m.sender_id == "me" || m.sender_id.contains("@") && m.recipient_id != "me" {
+            let status_indicator = match &m.direction {
+                crate::models::Direction::Outgoing { .. } => {
                     match m.delivery_status {
                         DeliveryStatus::Sending => "", // no tick yet
                         DeliveryStatus::Sent => " ✓",
@@ -1280,9 +1280,9 @@ fn draw_messages(f: &mut Frame, messages: &[Message], area: Rect, ui: &ChatUI) {
                         DeliveryStatus::Failed => " ❌",
                         DeliveryStatus::Unknown => "",
                     }
-                } else {
-                    ""
-                };
+                }
+                _ => "",
+            };
 
             let full_content = format!("{}{}{}", prefix, m.content, status_indicator);
 
@@ -1296,9 +1296,9 @@ fn draw_messages(f: &mut Frame, messages: &[Message], area: Rect, ui: &ChatUI) {
             .map(|l| l.into_owned())
             .collect();
 
-            let style = if m.sender_id == "system" {
+            let style = if matches!(m.direction, crate::models::Direction::System { .. }) {
                 Style::default().fg(Color::Gray)
-            } else if m.sender_id == "me" {
+            } else if matches!(m.direction, crate::models::Direction::Outgoing { .. }) {
                 match m.delivery_status {
                     DeliveryStatus::Failed => Style::default().fg(Color::Red),
                     DeliveryStatus::Delivered | DeliveryStatus::Read => {

@@ -354,6 +354,10 @@ impl super::XMPPClient {
                             } else {
                                 (from.clone(), "me".to_string())
                             };
+                            let direction = crate::models::Direction::from_sql(
+                                &sender_id, &recipient_id,
+                                if sender_id == "me" { &recipient_id } else { &sender_id },
+                            );
 
                             // Check for OMEMO encrypted message
                             let has_omemo_v1 =
@@ -383,6 +387,7 @@ impl super::XMPPClient {
                                                 timestamp,
                                                 delivery_status: DeliveryStatus::Delivered,
                                                 encrypted: true,
+                                                direction: direction.clone(),
                                             });
                                             return;
                                         }
@@ -400,6 +405,7 @@ impl super::XMPPClient {
                                                 timestamp,
                                                 delivery_status: DeliveryStatus::Delivered,
                                                 encrypted: true,
+                                                direction: direction.clone(),
                                             });
                                             return;
                                         }
@@ -414,6 +420,7 @@ impl super::XMPPClient {
                                         timestamp,
                                         delivery_status: DeliveryStatus::Delivered,
                                         encrypted: true,
+                                        direction: direction.clone(),
                                     });
                                     return;
                                 }
@@ -433,6 +440,7 @@ impl super::XMPPClient {
                                         timestamp,
                                         delivery_status: DeliveryStatus::Delivered,
                                         encrypted: false,
+                                        direction,
                                     });
                                 }
                             }
@@ -842,6 +850,9 @@ impl super::XMPPClient {
                     timestamp: chrono::Utc::now().timestamp_millis().into(),
                     delivery_status: DeliveryStatus::Delivered,
                     encrypted: false,
+                    direction: crate::models::Direction::System {
+                        about: crate::jid::BareJid::from_raw_lossy(jid),
+                    },
                 };
 
                 // Send this notification to the UI
@@ -895,6 +906,9 @@ impl super::XMPPClient {
                                 timestamp: chrono::Utc::now().timestamp_millis().into(),
                                 delivery_status: DeliveryStatus::Delivered,
                                 encrypted: false,
+                                direction: crate::models::Direction::System {
+                                    about: crate::jid::BareJid::from_raw_lossy(jid),
+                                },
                             };
 
                             // Send this notification to the UI
@@ -930,6 +944,9 @@ impl super::XMPPClient {
                             timestamp: chrono::Utc::now().timestamp_millis().into(),
                             delivery_status: DeliveryStatus::Delivered,
                             encrypted: false,
+                            direction: crate::models::Direction::System {
+                                about: crate::jid::BareJid::from_raw_lossy(jid),
+                            },
                         };
 
                         if let Err(send_e) = message_tx.send(error_notification).await {
@@ -963,6 +980,9 @@ impl super::XMPPClient {
             timestamp: chrono::Utc::now().timestamp_millis().into(),
             delivery_status: DeliveryStatus::Delivered,
             encrypted: false,
+            direction: crate::models::Direction::System {
+                about: crate::jid::BareJid::from_raw_lossy(jid),
+            },
         };
 
         if let Err(e) = message_tx.send(completion_notification).await {
