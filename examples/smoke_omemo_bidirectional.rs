@@ -44,8 +44,6 @@ async fn wait_for_msg(
     }
 }
 
-#[tokio::test]
-#[ignore = "requires live XMPP server with two accounts"]
 async fn test_bidirectional_omemo_exchange() -> Result<()> {
     env_logger::Builder::new()
         .filter_level(log::LevelFilter::Info)
@@ -146,4 +144,10 @@ async fn test_bidirectional_omemo_exchange() -> Result<()> {
             failures.join(", ")
         ))
     }
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    test_bidirectional_omemo_exchange().await?;
+    Ok(())
 }

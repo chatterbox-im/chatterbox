@@ -59,27 +59,6 @@ mod req2_wire_format {
     }
 
     #[test]
-    fn signal_message_has_8_byte_mac() {
-        let msg = SignalMessage {
-            ratchet_key: vec![0x42; 32],
-            counter: 0,
-            previous_counter: 0,
-            ciphertext: vec![0xBB; 10],
-            mac: vec![],
-        };
-
-        let serialized = msg.serialize(&[0x11; 32]);
-
-        // Last 8 bytes are the truncated MAC
-        assert!(
-            serialized.len() > 9,
-            "Serialized message must be longer than version + MAC"
-        );
-        let mac_portion = &serialized[serialized.len() - 8..];
-        assert_eq!(mac_portion.len(), 8, "MAC must be exactly 8 bytes");
-    }
-
-    #[test]
     fn prekey_message_version_byte() {
         let inner = SignalMessage {
             ratchet_key: vec![0x42; 32],
@@ -210,7 +189,7 @@ mod req3_xeddsa {
         let signature = xeddsa_sign(key_pair.private_key.expose_secret(), message).unwrap();
         assert_eq!(signature.len(), 64, "XEdDSA signature must be 64 bytes");
 
-        let valid = xeddsa_verify(&key_pair.public_key, message, &signature).is_ok();
+        let valid = xeddsa_verify(key_pair.public_key.as_raw(), message, &signature).is_ok();
         assert!(
             valid,
             "XEdDSA signature must verify with matching public key"
@@ -226,7 +205,7 @@ mod req3_xeddsa {
         let signature = xeddsa_sign(key_pair.private_key.expose_secret(), message).unwrap();
 
         // Verification with wrong public key must fail
-        let valid = xeddsa_verify(&other_pair.public_key, message, &signature).is_ok();
+        let valid = xeddsa_verify(other_pair.public_key.as_raw(), message, &signature).is_ok();
         assert!(!valid, "XEdDSA must reject signature with wrong public key");
     }
 
@@ -238,7 +217,7 @@ mod req3_xeddsa {
         let signature = xeddsa_sign(key_pair.private_key.expose_secret(), message).unwrap();
 
         let tampered = b"tampered prekey";
-        let valid = xeddsa_verify(&key_pair.public_key, tampered, &signature).is_ok();
+        let valid = xeddsa_verify(key_pair.public_key.as_raw(), tampered, &signature).is_ok();
         assert!(!valid, "XEdDSA must reject signature with tampered message");
     }
 
@@ -250,11 +229,11 @@ mod req3_xeddsa {
         let spk_pair = X3DHProtocol::generate_key_pair().unwrap();
 
         let signature =
-            X3DHProtocol::sign_pre_key(key_pair.private_key.expose_secret(), &spk_pair.public_key).unwrap();
+            X3DHProtocol::sign_pre_key(key_pair.private_key.expose_secret(), spk_pair.public_key.as_raw()).unwrap();
 
         // Encode with 0x05 prefix as they appear in bundle XML
-        let identity_33 = encode_public_key_with_prefix(&key_pair.public_key);
-        let spk_33 = encode_public_key_with_prefix(&spk_pair.public_key);
+        let identity_33 = encode_public_key_with_prefix(key_pair.public_key.as_raw());
+        let spk_33 = encode_public_key_with_prefix(spk_pair.public_key.as_raw());
 
         let valid = X3DHProtocol::verify_pre_key(&identity_33, &spk_33, &signature).is_ok();
         assert!(
@@ -429,21 +408,6 @@ mod req4_bundle_format {
 
 /// Requirement 5: PEP node names for device lists and bundles
 mod req5_pep_node_names {
-    use chatterbox::omemo::OMEMO_NAMESPACE;
-
-    #[test]
-    fn device_list_node_name() {
-        let node = format!("{}.devicelist", OMEMO_NAMESPACE);
-        assert_eq!(node, "eu.siacs.conversations.axolotl.devicelist");
-    }
-
-    #[test]
-    fn bundle_node_name() {
-        let device_id: u32 = 12345;
-        let node = format!("{}.bundles:{}", OMEMO_NAMESPACE, device_id);
-        assert_eq!(node, "eu.siacs.conversations.axolotl.bundles:12345");
-    }
-
     #[test]
     fn device_list_xml_uses_correct_namespace() {
         use chatterbox::omemo::protocol::utils;

@@ -1,125 +1,28 @@
-// Common test utilities for integration tests
-// This module contains shared code for all integration tests
+// Shared utilities for live-server diagnostic scripts (examples/smoke_*.rs).
 
-// Standard library imports
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 use std::sync::Once;
 
-// External crate imports
 use anyhow::Result;
 use log::{info, LevelFilter};
 use tokio::time::{timeout, Duration as TokioDuration};
 
-// Import the crate functionality
-use chatterbox::{
-    models::{Contact, ContactStatus, DeliveryStatus, Message},
-    xmpp::XMPPClient,
-};
+use chatterbox::models::Message;
 
-// Local import for credentials
 pub mod credentials;
 use credentials::Credentials;
 
-// Initialize logging once
 static INIT_LOGGER: Once = Once::new();
 
-// We don't need the TestCredentials struct anymore since we're parsing the JSON directly
-
-/// Set up the logger for the tests
+#[allow(dead_code)]
 pub fn setup_logging() {
     INIT_LOGGER.call_once(|| {
         env_logger::Builder::new()
             .filter_level(LevelFilter::Debug)
             .init();
     });
-}
-
-/// Struct for synchronous test client
-#[allow(dead_code)]
-pub struct TestClient {
-    xmpp_client: Option<XMPPClient>,
-    msg_rx: Option<tokio::sync::mpsc::Receiver<Message>>,
-    connected: bool,
-}
-
-#[allow(dead_code)]
-impl TestClient {
-    pub fn new() -> Self {
-        TestClient {
-            xmpp_client: None,
-            msg_rx: None,
-            connected: false,
-        }
-    }
-
-    pub fn connect(&mut self) -> Result<(), String> {
-        // For sync tests, we'll just simulate a successful connection
-        // In real tests, this would connect to the XMPP server
-        self.connected = true;
-        Ok(())
-    }
-
-    pub fn disconnect(&mut self) -> Result<(), String> {
-        self.connected = false;
-        Ok(())
-    }
-
-    pub fn is_connected(&self) -> bool {
-        self.connected
-    }
-
-    pub fn get_contacts(&self) -> Result<Vec<Contact>, String> {
-        // Return mock contacts for testing
-        Ok(vec![
-            Contact {
-                id: "contact1".to_string(),
-                name: "Test Contact 1".to_string(),
-                status: ContactStatus::Online,
-            },
-            Contact {
-                id: "contact2".to_string(),
-                name: "Test Contact 2".to_string(),
-                status: ContactStatus::Offline,
-            },
-        ])
-    }
-
-    pub fn send_message(&self, _recipient_id: String, _content: String) -> Result<String, String> {
-        // Return a mock message ID
-        Ok("msg123456".to_string())
-    }
-
-    pub fn check_delivery_status(&self, _message_id: &str) -> Result<DeliveryStatus, String> {
-        // Return a mock delivery status
-        Ok(DeliveryStatus::Delivered)
-    }
-
-    pub fn enable_carbons(&self) -> Result<bool, anyhow::Error> {
-        // Simulate enabling message carbons
-        if self.is_connected() {
-            Ok(true)
-        } else {
-            Err(anyhow::anyhow!("Not connected to server"))
-        }
-    }
-
-    pub fn check_carbon_received(&self, message_id: &str) -> Result<bool, anyhow::Error> {
-        // Simulate checking for carbon copies
-        if !self.is_connected() {
-            return Err(anyhow::anyhow!("Not connected to server"));
-        }
-
-        info!("Carbon copy was received for message ID: {}", message_id);
-        Ok(true)
-    }
-}
-
-/// Setup a test client
-#[allow(dead_code)]
-pub fn setup_test_client() -> TestClient {
-    TestClient::new()
 }
 
 /// Get test credentials for async tests

@@ -2,6 +2,7 @@
 // These tests verify OMEMO encryption works properly in multi-device scenarios
 
 // Import common test utilities
+#[path = "../tests/common/mod.rs"]
 mod common;
 use common::{get_test_credentials, get_test_recipient, setup_logging, wait_for_message};
 
@@ -11,8 +12,6 @@ use log::{error, info, warn};
 use tokio::time::Duration as TokioDuration;
 
 /// Test OMEMO multi-device encryption functionality
-#[tokio::test]
-#[ignore = "requires live XMPP server"]
 async fn test_omemo_multi_device_encryption() -> Result<()> {
     // Setup logging for the test
     setup_logging();
@@ -235,8 +234,6 @@ async fn test_omemo_multi_device_encryption() -> Result<()> {
 }
 
 /// Test OMEMO multi-device encryption functionality more thoroughly
-#[tokio::test]
-#[ignore = "requires live XMPP server"]
 async fn test_omemo_multi_device_encryption_enhanced() -> Result<()> {
     // Setup logging for the test
     setup_logging();
@@ -686,5 +683,12 @@ async fn test_omemo_multi_device_encryption_enhanced() -> Result<()> {
     let _ = client2.disconnect().await;
 
     info!("Enhanced OMEMO multi-device encryption test completed");
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    test_omemo_multi_device_encryption().await?;
+    test_omemo_multi_device_encryption_enhanced().await?;
     Ok(())
 }

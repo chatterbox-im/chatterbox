@@ -2,6 +2,7 @@
 // This test demonstrates sending and receiving OMEMO encrypted messages
 
 // Import common test utilities
+#[path = "../tests/common/mod.rs"]
 mod common;
 use common::{get_test_credentials, setup_logging};
 
@@ -16,8 +17,6 @@ use chatterbox::xmpp::XMPPClient;
 // Import credentials from our common module
 use common::credentials::Credentials;
 
-#[tokio::test]
-#[ignore = "requires live XMPP server"]
 async fn test_omemo_simple() -> Result<()> {
     // Setup logging
     setup_logging();
@@ -148,5 +147,11 @@ async fn test_omemo_simple() -> Result<()> {
     }
 
     info!("Simple OMEMO message test completed successfully");
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    test_omemo_simple().await?;
     Ok(())
 }

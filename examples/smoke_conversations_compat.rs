@@ -9,6 +9,7 @@
 // - OPK consumption and replenishment
 // - Message carbons to own devices
 
+#[path = "../tests/common/mod.rs"]
 mod common;
 use common::{get_test_credentials, get_test_recipient, setup_logging};
 
@@ -20,8 +21,6 @@ use chatterbox::xmpp::XMPPClient;
 use common::credentials::Credentials;
 
 /// Full round-trip: Client A sends OMEMO message → Client B receives and decrypts
-#[tokio::test]
-#[ignore = "requires live XMPP server"]
 async fn test_conversations_compat_roundtrip() -> Result<()> {
     setup_logging();
     info!("=== Conversations Compatibility Test: Full Round-Trip ===");
@@ -141,8 +140,6 @@ async fn test_conversations_compat_roundtrip() -> Result<()> {
 }
 
 /// Test that BTBV trust is automatically applied to new devices
-#[tokio::test]
-#[ignore = "requires live XMPP server"]
 async fn test_btbv_trust_auto_applied() -> Result<()> {
     setup_logging();
     info!("=== BTBV Trust Test ===");
@@ -213,4 +210,11 @@ async fn get_client_b_password() -> Result<String> {
     Err(anyhow::anyhow!(
         "Could not find clientB password in credentials"
     ))
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    test_conversations_compat_roundtrip().await?;
+    test_btbv_trust_auto_applied().await?;
+    Ok(())
 }

@@ -570,7 +570,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
     async fn test_omemo_manager_device_id() -> Result<(), anyhow::Error> {
         let storage = create_test_storage().await?;
 
@@ -582,10 +581,9 @@ mod tests {
         let device_id = manager.get_device_id();
         assert!(device_id.get() > 0, "Manager's device ID should be non-zero");
 
-        let storage_path = std::env::temp_dir().join("omemo_device_id_test.db");
-        if storage_path.exists() {
-            std::fs::remove_file(&storage_path)?;
-        }
+        // Use a TempDir so cleanup is automatic and remove_dir_all is not needed.
+        let persist_dir = tempdir()?;
+        let storage_path = persist_dir.path().to_path_buf();
 
         let storage1 = OmemoStorage::new(Some(storage_path.clone()))?;
         let manager1 = OmemoManager::new(
@@ -619,15 +617,10 @@ mod tests {
             "Device ID should persist in storage"
         );
 
-        if storage_path.exists() {
-            std::fs::remove_file(&storage_path)?;
-        }
-
         Ok(())
     }
 
     #[tokio::test]
-    #[ignore]
     async fn test_explicit_device_id() -> Result<(), anyhow::Error> {
         let storage = create_test_storage().await?;
 

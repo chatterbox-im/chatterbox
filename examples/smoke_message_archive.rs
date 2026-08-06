@@ -2,6 +2,7 @@
 // These tests verify message archiving functionality (XEP-0313: Message Archive Management)
 
 // Import common test utilities
+#[path = "../tests/common/mod.rs"]
 mod common;
 use common::{get_test_credentials, get_test_recipient, setup_logging, wait_for_message};
 
@@ -16,8 +17,6 @@ use chatterbox::models::DeliveryStatus;
 /// Test Message Archive Management (MAM) functionality
 /// This test verifies that messages are properly archived by the server
 /// and can be retrieved using XEP-0313: Message Archive Management
-#[tokio::test]
-#[ignore = "requires live XMPP server"]
 async fn test_message_archiving() -> Result<()> {
     // Setup logging for the test
     setup_logging();
@@ -209,8 +208,6 @@ async fn test_message_archiving() -> Result<()> {
 }
 
 /// Test more thorough message archiving with both plaintext and encrypted messages
-#[tokio::test]
-#[ignore = "requires live XMPP server"]
 async fn test_comprehensive_message_archiving() -> Result<()> {
     // Setup logging for the test
     setup_logging();
@@ -429,5 +426,12 @@ async fn test_comprehensive_message_archiving() -> Result<()> {
     info!("Overall Assessment: {}", overall_result);
     info!("====================================================\n");
 
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    test_message_archiving().await?;
+    test_comprehensive_message_archiving().await?;
     Ok(())
 }
