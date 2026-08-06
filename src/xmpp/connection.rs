@@ -29,9 +29,6 @@ impl XMPPClient {
             format!("{}@{}", username, server)
         };
 
-        // Store the JID we're using to connect
-        self.jid = full_jid.clone();
-
         // Parse the JID using tokio-xmpp's BareJid type
         let tokio_jid = match TokioBareJid::from_str(&full_jid) {
             Ok(jid) => {
@@ -53,13 +50,21 @@ impl XMPPClient {
             }
         };
 
-        // Create the XMPP client with a reconnecting transport.
-        // The Client (tokio-xmpp v6) handles reconnection and Stream Management
-        // (XEP-0198) internally and transparently.
         let client = XMPPAsyncClient::new(tokio_jid.clone(), password);
-        // Spawn the transport actor — it owns the Client exclusively.
-        // No mutex needed: the transport multiplexes reads/writes via channels.
         let transport_handle = super::transport::spawn_transport(client);
+        self.connect_with_transport(transport_handle, full_jid, server).await
+    }
+
+    /// Connect using an injected transport — used by tests via `FakeServer::register`.
+    /// `server_domain` is used only for service-discovery queries; pass the bare JID
+    /// domain for real connections or any string for test connections.
+    pub async fn connect_with_transport(
+        &mut self,
+        transport_handle: super::transport::TransportHandle,
+        full_jid: String,
+        server_domain: &str,
+    ) -> Result<()> {
+        self.jid = full_jid;
         self.stanza_tx = Some(transport_handle.stanza_tx.clone());
 
         // Spawn the event processing loop — lives for the entire session,
@@ -102,9 +107,9 @@ impl XMPPClient {
             }
 
             // Query server domain for supported features
-            let server_domain = self.jid.split('@').nth(1).unwrap_or(server);
+            let domain = self.jid.split('@').nth(1).unwrap_or(server_domain);
             if let Err(e) = service_discovery
-                .send_disco_info_request(server_domain)
+                .send_disco_info_request(domain)
                 .await
             {
                 warn!(
@@ -115,7 +120,7 @@ impl XMPPClient {
 
             // Query server for available items/services
             if let Err(e) = service_discovery
-                .send_disco_items_request(server_domain)
+                .send_disco_items_request(domain)
                 .await
             {
                 warn!("Failed to query server items via Service Discovery: {}", e);

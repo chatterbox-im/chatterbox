@@ -12,6 +12,7 @@ use tokio::time::{timeout, Duration as TokioDuration};
 use chatterbox::models::Message;
 
 pub mod credentials;
+pub mod fake_server;
 use credentials::Credentials;
 
 static INIT_LOGGER: Once = Once::new();
