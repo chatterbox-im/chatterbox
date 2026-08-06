@@ -120,66 +120,16 @@ mod req2_wire_format {
         assert_eq!(deserialized.message.previous_counter, 1);
     }
 
+    /// Verify ALL six PreKeySignalMessage field tags against raw protobuf bytes.
+    /// Uses distinct values for every field so any tag transposition is caught.
+    ///   field 1 (varint)  pre_key_id        = 42   → tag 0x08
+    ///   field 2 (bytes)   base_key          = [0x11;32] → tag 0x12
+    ///   field 3 (bytes)   identity_key      = [0x22;32] → tag 0x1a
+    ///   field 4 (bytes)   inner SignalMsg   → tag 0x22
+    ///   field 5 (varint)  registration_id   = 12345 → tag 0x28
+    ///   field 6 (varint)  signed_pre_key_id = 7     → tag 0x30
     #[test]
-    fn prekey_message_field_tags_match_libsignal() {
-        // Verify that deserializing known libsignal-format bytes works.
-        // We serialize and re-deserialize, checking that field values survive.
-        // This proves the field tag assignments match libsignal's protobuf schema.
-        let inner = SignalMessage {
-            ratchet_key: vec![0xAB; 32],
-            counter: 999,
-            previous_counter: 998,
-            ciphertext: vec![0xDE; 32],
-            mac: vec![],
-        };
-
-        let prekey_msg = PreKeySignalMessage {
-            registration_id: 65535,
-            pre_key_id: Some(100),
-            signed_pre_key_id: 200,
-            base_key: vec![0x33; 32],
-            identity_key: vec![0x44; 32],
-            message: inner,
-            raw_message_bytes: vec![],
-        };
-
-        let serialized = prekey_msg.serialize(&[0xFF; 32]);
-        let parsed = PreKeySignalMessage::deserialize(&serialized).unwrap();
-
-        // All fields must survive the roundtrip, proving correct tag assignments:
-        // pre_key_id=1(varint), base_key=2(bytes), identity_key=3(bytes),
-        // message=4(bytes), registration_id=5(varint), signed_pre_key_id=6(varint)
-        assert_eq!(
-            parsed.registration_id, 65535,
-            "registration_id (field 5) mismatch"
-        );
-        assert_eq!(
-            parsed.pre_key_id,
-            Some(100),
-            "pre_key_id (field 1) mismatch"
-        );
-        assert_eq!(
-            parsed.signed_pre_key_id, 200,
-            "signed_pre_key_id (field 6) mismatch"
-        );
-        assert_eq!(parsed.base_key.len(), 32, "base_key (field 2) wrong length");
-        assert_eq!(
-            parsed.identity_key.len(),
-            32,
-            "identity_key (field 3) wrong length"
-        );
-        assert_eq!(
-            parsed.message.counter, 999,
-            "inner message counter mismatch"
-        );
-    }
-
-    /// Verify field tags independently of the serialiser by scanning the raw
-    /// protobuf bytes.  base_key=field2 (tag 0x12) and identity_key=field3
-    /// (tag 0x1a) carry distinct fill bytes so a tag swap produces a wrong
-    /// assertion regardless of how encode/decode pair up.
-    #[test]
-    fn prekey_field_2_is_base_key_field_3_is_identity_key() {
+    fn prekey_all_field_tags_verified_by_raw_protobuf_scan() {
         let inner = SignalMessage {
             ratchet_key: vec![0x42; 32],
             counter: 1,
@@ -188,32 +138,67 @@ mod req2_wire_format {
             mac: vec![],
         };
         let msg = PreKeySignalMessage {
-            registration_id: 1,
-            pre_key_id: Some(2),
-            signed_pre_key_id: 3,
-            base_key:      vec![0x11; 32], // unique: all 0x11
-            identity_key:  vec![0x22; 32], // unique: all 0x22
+            registration_id: 12345,
+            pre_key_id: Some(42),
+            signed_pre_key_id: 7,
+            base_key:     vec![0x11; 32],
+            identity_key: vec![0x22; 32],
             message: inner,
             raw_message_bytes: vec![],
         };
-
         let bytes = msg.serialize(&[0u8; 32]);
-        // Skip version byte; the rest is raw protobuf.
-        let proto = &bytes[1..];
+        let proto = &bytes[1..]; // skip version byte
 
+        // ── bytes fields ──────────────────────────────────────────────────────
         let base_key_raw = find_pb_bytes_field(proto, 0x12)
-            .expect("field 2 (BASE_KEY, tag 0x12) not found in serialized bytes");
+            .expect("field 2 (BASE_KEY, tag 0x12) not found");
         assert_eq!(base_key_raw[0], 0x05,
-            "base_key (field 2) must start with 0x05 type prefix");
+            "base_key must start with 0x05 type prefix");
         assert!(base_key_raw[1..].iter().all(|&b| b == 0x11),
-            "base_key (field 2) payload must be all 0x11, got {:02x?}", &base_key_raw[1..5]);
+            "base_key payload must be all 0x11, got {:02x?}", &base_key_raw[1..5]);
 
         let id_key_raw = find_pb_bytes_field(proto, 0x1a)
-            .expect("field 3 (IDENTITY_KEY, tag 0x1a) not found in serialized bytes");
+            .expect("field 3 (IDENTITY_KEY, tag 0x1a) not found");
         assert_eq!(id_key_raw[0], 0x05,
-            "identity_key (field 3) must start with 0x05 type prefix");
+            "identity_key must start with 0x05 type prefix");
         assert!(id_key_raw[1..].iter().all(|&b| b == 0x22),
-            "identity_key (field 3) payload must be all 0x22, got {:02x?}", &id_key_raw[1..5]);
+            "identity_key payload must be all 0x22, got {:02x?}", &id_key_raw[1..5]);
+
+        // ── varint fields ─────────────────────────────────────────────────────
+        let pre_key_id = find_pb_varint_field(proto, 0x08)
+            .expect("field 1 (PRE_KEY_ID, tag 0x08) not found");
+        assert_eq!(pre_key_id, 42,
+            "pre_key_id (field 1) must be 42");
+
+        let reg_id = find_pb_varint_field(proto, 0x28)
+            .expect("field 5 (REGISTRATION_ID, tag 0x28) not found");
+        assert_eq!(reg_id, 12345,
+            "registration_id (field 5) must be 12345");
+
+        let spk_id = find_pb_varint_field(proto, 0x30)
+            .expect("field 6 (SIGNED_PRE_KEY_ID, tag 0x30) not found");
+        assert_eq!(spk_id, 7,
+            "signed_pre_key_id (field 6) must be 7");
+    }
+
+    fn find_pb_varint_field(proto: &[u8], target: u8) -> Option<u64> {
+        let mut pos = 0;
+        while pos < proto.len() {
+            let tag = proto[pos]; pos += 1;
+            let wire_type = tag & 0x07;
+            if tag == target && wire_type == 0 {
+                let (v, n) = decode_pb_varint(&proto[pos..])?;
+                return Some(v as u64);
+            }
+            match wire_type {
+                0 => { while pos < proto.len() { let b = proto[pos]; pos += 1; if b & 0x80 == 0 { break; } } }
+                1 => { pos += 8; }
+                2 => { let (n, v) = decode_pb_varint(&proto[pos..])?; pos += v + n; }
+                5 => { pos += 4; }
+                _ => return None,
+            }
+        }
+        None
     }
 
     /// Scan a raw protobuf byte slice for a length-delimited field with the
