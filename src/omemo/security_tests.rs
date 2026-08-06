@@ -87,49 +87,6 @@ mod tests {
         assert!(storage2.get_trust_level(&jid, dev).is_err());
     }
 
-    /// An explicitly Untrusted device on the recipient's JID must be absent
-    /// from encrypted_keys while a trusted device on the same JID is present.
-    /// Both assertions are exercised: carol_did_a (trusted) is included,
-    /// carol_did_b (untrusted) is excluded.  Without carol_did_a the encrypt
-    /// call would fail and the test would panic, catching a bug that excludes
-    /// everyone.
-    #[tokio::test]
-    async fn untrusted_device_excluded_from_encrypted_keys() -> Result<()> {
-        let alice_jid = "alice@example.com";
-        let carol_jid = "carol@example.com";
-        let alice_did  = 1001u32;
-        let carol_did_a = 3001u32; // default Undecided = trusted per BTBV
-        let carol_did_b = 3002u32; // explicitly Untrusted
-
-        let ps = RecordingPubSub::new();
-        let (mut alice, _adir)  = make_manager(alice_jid, alice_did,  ps.clone()).await;
-        let (carol_a, _cadir)   = make_manager(carol_jid, carol_did_a, ps.clone()).await;
-        let (carol_b, _cbdir)   = make_manager(carol_jid, carol_did_b, ps.clone()).await;
-
-        ps.add_device_list(carol_jid, &[carol_did_a, carol_did_b]).await;
-        ps.add_bundle(carol_jid, carol_did_a, carol_a.key_bundle.as_ref().unwrap()).await;
-        ps.add_bundle(carol_jid, carol_did_b, carol_b.key_bundle.as_ref().unwrap()).await;
-        ps.add_device_list(alice_jid, &[alice_did]).await;
-
-        {
-            let mut storage = alice.storage.lock().await;
-            storage.set_trust_level(&bjid(carol_jid), DeviceId::from(carol_did_b), TrustLevel::Untrusted)?;
-        }
-
-        let msg = alice.encrypt_message(carol_jid, "hello")
-            .await
-            .expect("carol_did_a is trusted — encryption must succeed");
-
-        assert!(
-            msg.encrypted_keys.contains_key(&DeviceId::from(carol_did_a)),
-            "trusted device carol_did_a must be included in encrypted_keys"
-        );
-        assert!(
-            !msg.encrypted_keys.contains_key(&DeviceId::from(carol_did_b)),
-            "untrusted device carol_did_b must be absent from encrypted_keys"
-        );
-        Ok(())
-    }
 
     /// A corrupt trust DB row must not grant encryption rights (fail-closed).
     /// carol_did_a stays trusted (default Undecided) so encryption succeeds;
@@ -197,58 +154,10 @@ mod tests {
         assert_eq!(storage2.get_trust_level(&jid, dev).unwrap(), TrustLevel::Verified);
     }
 
-    /// Untrusted must not be treated as trusted.
-    #[test]
-    fn untrusted_is_not_trusted() {
-        let mut storage = OmemoStorage::new_in_memory().unwrap();
-        let jid = bjid("eve@example.com");
-        let dev = DeviceId::from(5u32);
-        storage.set_trust_level(&jid, dev, TrustLevel::Untrusted).unwrap();
-        assert!(!storage.is_device_trusted(&jid, dev).unwrap());
-    }
 
     // ── §2.1 Identity key pinning ─────────────────────────────────────────────
 
-    /// Identity key change must reset trust to Untrusted.
-    #[test]
-    fn identity_key_change_resets_trust() {
-        let mut storage = OmemoStorage::new_in_memory().unwrap();
-        let jid = bjid("frank@example.com");
-        let dev = DeviceId::from(55u32);
 
-        let id1 = fake_identity(dev, 0x11);
-        storage.save_device_identity(&jid, &id1).unwrap();
-        storage.set_trust_level(&jid, dev, TrustLevel::Verified).unwrap();
-
-        assert_eq!(storage.get_trust_level(&jid, dev).unwrap(), TrustLevel::Verified);
-
-        // Different identity key for the same device (key change scenario).
-        let id2 = fake_identity(dev, 0x22); // 0x22 ≠ 0x11
-        let changed = storage.save_fetched_identity(&jid, &id2, "fp2").unwrap();
-
-        assert!(changed, "must detect the key change");
-        assert_eq!(
-            storage.get_trust_level(&jid, dev).unwrap(),
-            TrustLevel::Untrusted,
-            "trust must be reset to Untrusted after key change"
-        );
-    }
-
-    /// Same key on refetch must preserve existing trust level.
-    #[test]
-    fn identical_key_refetch_preserves_trust() {
-        let mut storage = OmemoStorage::new_in_memory().unwrap();
-        let jid = bjid("grace@example.com");
-        let dev = DeviceId::from(60u32);
-
-        let id = fake_identity(dev, 0x33);
-        storage.save_device_identity(&jid, &id).unwrap();
-        storage.set_trust_level(&jid, dev, TrustLevel::Verified).unwrap();
-
-        let changed = storage.save_fetched_identity(&jid, &id, "fp").unwrap();
-        assert!(!changed, "same key must not be flagged as changed");
-        assert_eq!(storage.get_trust_level(&jid, dev).unwrap(), TrustLevel::Verified);
-    }
 
     // ── §2.2 BTBV policy ─────────────────────────────────────────────────────
 

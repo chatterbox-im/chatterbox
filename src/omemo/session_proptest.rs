@@ -23,7 +23,7 @@ mod proptest_session {
 
     // ── Test harness ──────────────────────────────────────────────────────────
 
-    /// Create a manager and keep the TempDir alive.
+    /// Reload a manager from the same dir, simulating a process restart.
     async fn make_manager(
         jid: &str,
         device_id: u32,
@@ -37,17 +37,6 @@ mod proptest_session {
         OmemoManager::new(storage, jid.to_string(), None, pubsub)
             .await
             .expect("OmemoManager creation failed")
-    }
-
-    /// Simulate a restart: drop the existing manager and load a new one from
-    /// the same storage directory.
-    async fn restart(
-        jid: &str,
-        device_id: u32,
-        dir: &TempDir,
-        pubsub: Arc<dyn OmemoPubSub>,
-    ) -> OmemoManager {
-        make_manager(jid, device_id, dir, pubsub).await
     }
 
     // ── Operation model ───────────────────────────────────────────────────────
@@ -127,10 +116,10 @@ mod proptest_session {
                             }
                         }
                         Op::RestartAlice => {
-                            alice = restart(alice_jid, alice_did.get(), &alice_dir, pubsub.clone()).await;
+                            alice = make_manager(alice_jid, alice_did.get(), &alice_dir, pubsub.clone()).await;
                         }
                         Op::RestartBob => {
-                            bob = restart(bob_jid, bob_did.get(), &bob_dir, pubsub.clone()).await;
+                            bob = make_manager(bob_jid, bob_did.get(), &bob_dir, pubsub.clone()).await;
                         }
                     }
                 }

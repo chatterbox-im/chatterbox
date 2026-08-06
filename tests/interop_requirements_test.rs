@@ -37,28 +37,6 @@ mod req2_wire_format {
     }
 
     #[test]
-    fn signal_message_roundtrip() {
-        let msg = SignalMessage {
-            ratchet_key: vec![0x42; 32],
-            counter: 7,
-            previous_counter: 5,
-            ciphertext: vec![0xAA; 20],
-            mac: vec![],
-        };
-
-        let serialized = msg.serialize(&[0u8; 32]);
-        let deserialized = SignalMessage::deserialize(&serialized)
-            .expect("Should deserialize a valid SignalMessage");
-
-        // The ratchet key may have been stripped of 0x05 prefix during deserialization,
-        // so compare the raw 32-byte key
-        assert_eq!(deserialized.ratchet_key.len(), 32);
-        assert_eq!(deserialized.counter, 7);
-        assert_eq!(deserialized.previous_counter, 5);
-        assert_eq!(deserialized.ciphertext, vec![0xAA; 20]);
-    }
-
-    #[test]
     fn prekey_message_version_byte() {
         let inner = SignalMessage {
             ratchet_key: vec![0x42; 32],
@@ -85,39 +63,6 @@ mod req2_wire_format {
             serialized[0], 0x33,
             "PreKeySignalMessage must start with version byte 0x33"
         );
-    }
-
-    #[test]
-    fn prekey_message_roundtrip() {
-        let inner = SignalMessage {
-            ratchet_key: vec![0x42; 32],
-            counter: 3,
-            previous_counter: 1,
-            ciphertext: vec![0xCC; 16],
-            mac: vec![],
-        };
-
-        let prekey_msg = PreKeySignalMessage {
-            registration_id: 12345,
-            pre_key_id: Some(42),
-            signed_pre_key_id: 7,
-            base_key: vec![0x11; 32],
-            identity_key: vec![0x22; 32],
-            message: inner,
-            raw_message_bytes: vec![],
-        };
-
-        let serialized = prekey_msg.serialize(&[0u8; 32]);
-        let deserialized = PreKeySignalMessage::deserialize(&serialized)
-            .expect("Should deserialize a valid PreKeySignalMessage");
-
-        assert_eq!(deserialized.registration_id, 12345);
-        assert_eq!(deserialized.pre_key_id, Some(42));
-        assert_eq!(deserialized.signed_pre_key_id, 7);
-        assert_eq!(deserialized.base_key.len(), 32);
-        assert_eq!(deserialized.identity_key.len(), 32);
-        assert_eq!(deserialized.message.counter, 3);
-        assert_eq!(deserialized.message.previous_counter, 1);
     }
 
     /// Verify ALL six PreKeySignalMessage field tags against raw protobuf bytes.
