@@ -12,7 +12,7 @@ use log::{error, info};
 use tempfile::TempDir;
 use tokio::time::{timeout, Duration};
 
-use chatterbox::models::Message;
+use chatterbox::models::{AppEvent, Message};
 use chatterbox::xmpp::XMPPClient;
 
 fn get_env(name: &str) -> String {
@@ -21,18 +21,20 @@ fn get_env(name: &str) -> String {
 
 /// Wait for a message matching the predicate on the receiver channel
 async fn wait_for_msg(
-    rx: &mut tokio::sync::mpsc::Receiver<Message>,
+    rx: &mut tokio::sync::mpsc::Receiver<AppEvent>,
     predicate: impl Fn(&Message) -> bool,
     timeout_secs: u64,
 ) -> Result<Message> {
     match timeout(Duration::from_secs(timeout_secs), async {
-        while let Some(msg) = rx.recv().await {
-            info!(
-                "  received msg: from={} content={:?} status={:?}",
-                msg.sender_id, msg.content, msg.delivery_status
-            );
-            if predicate(&msg) {
-                return Ok(msg);
+        while let Some(event) = rx.recv().await {
+            if let AppEvent::Chat(msg) = event {
+                info!(
+                    "  received msg: from={} content={:?} status={:?}",
+                    msg.sender_id, msg.content, msg.delivery_status
+                );
+                if predicate(&msg) {
+                    return Ok(msg);
+                }
             }
         }
         Err(anyhow::anyhow!("channel closed"))

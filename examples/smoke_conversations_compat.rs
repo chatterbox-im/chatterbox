@@ -104,10 +104,12 @@ async fn test_conversations_compat_roundtrip() -> Result<()> {
     let mut received_message = false;
 
     match timeout(receive_timeout, async {
-        while let Some(msg) = cb_msg_rx.recv().await {
-            info!("Client B received message: {:?}", msg.content);
-            if msg.content.contains(&test_msg) {
-                return true;
+        while let Some(event) = cb_msg_rx.recv().await {
+            if let chatterbox::models::AppEvent::Chat(msg) = event {
+                info!("Client B received message: {:?}", msg.content);
+                if msg.content.contains(&test_msg) {
+                    return true;
+                }
             }
         }
         false

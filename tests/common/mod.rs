@@ -9,7 +9,7 @@ use anyhow::Result;
 use log::{info, LevelFilter};
 use tokio::time::{timeout, Duration as TokioDuration};
 
-use chatterbox::models::Message;
+use chatterbox::models::{AppEvent, Message};
 
 pub mod credentials;
 pub mod fake_server;
@@ -198,15 +198,17 @@ pub fn load_test_credentials_from_file<P: AsRef<Path>>(path: P) -> Result<Creden
 /// Wait for a specific message matching the predicate with timeout
 #[allow(dead_code)]
 pub async fn wait_for_message(
-    msg_rx: &mut tokio::sync::mpsc::Receiver<Message>,
+    msg_rx: &mut tokio::sync::mpsc::Receiver<AppEvent>,
     predicate: impl Fn(&Message) -> bool,
     timeout_secs: u64,
 ) -> Result<Message> {
     info!("Waiting for message...");
     match timeout(TokioDuration::from_secs(timeout_secs), async {
-        while let Some(msg) = msg_rx.recv().await {
-            if predicate(&msg) {
-                return Ok(msg);
+        while let Some(event) = msg_rx.recv().await {
+            if let AppEvent::Chat(msg) = event {
+                if predicate(&msg) {
+                    return Ok(msg);
+                }
             }
         }
         Err(anyhow::anyhow!("Message receiver closed"))
