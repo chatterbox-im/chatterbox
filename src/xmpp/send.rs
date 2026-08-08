@@ -18,7 +18,6 @@ impl XMPPClient {
 
     /// Like `send_message` but uses a specific message ID.
     pub async fn send_message_with_id(&self, recipient: &str, content: &str, msg_id: &str) -> Result<()> {
-        eprintln!("SEND_DEBUG: send_message_with_id entered recipient={} msg_id={}", recipient, msg_id);
         info!(
             "SEND_MESSAGE CALLED: recipient={}, content_starts_with={}",
             recipient,
