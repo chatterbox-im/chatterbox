@@ -622,6 +622,55 @@ impl OmemoManager {
         Ok(reset_sessions)
     }
 
+    /// Publish only the current device, removing all others and deleting their bundles.
+    /// Call this before `ensure_device_list_published` when a full reset is desired.
+    pub async fn reset_device_list(&self) -> Result<()> {
+        let bare_jid = self.local_jid.split('/').next().unwrap_or(&self.local_jid);
+
+        let device_list = match self.fetch_device_list_from_server(bare_jid).await {
+            Ok(devices) => devices,
+            Err(e) => {
+                warn!("RESET: Failed to fetch device list: {}, skipping reset", e);
+                return Ok(());
+            }
+        };
+
+        let stale_ids: Vec<_> = device_list
+            .iter()
+            .copied()
+            .filter(|&id| id != self.device_id)
+            .collect();
+
+        if stale_ids.is_empty() {
+            debug!("RESET: No stale devices to remove");
+            return Ok(());
+        }
+
+        info!(
+            "RESET: Removing {} stale device(s) from list: {:?}",
+            stale_ids.len(),
+            stale_ids
+        );
+        self.pubsub
+            .publish_device_list(&[self.device_id])
+            .await
+            .map_err(|e| anyhow!("Failed to publish clean device list: {}", e))?;
+        info!(
+            "RESET: Published clean device list with only device {}",
+            self.device_id
+        );
+
+        for stale_id in &stale_ids {
+            if let Err(e) = self.pubsub.delete_bundle(*stale_id).await {
+                warn!(
+                    "RESET: Failed to delete bundle for device {}: {}",
+                    stale_id, e
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Ensure that our device list is published to the server
     pub async fn ensure_device_list_published(&self) -> Result<()> {
         debug!("Ensuring device list is published for {}", self.local_jid);
@@ -661,53 +710,7 @@ impl OmemoManager {
             device_list
         );
 
-        // When CHATTERBOX_RESET_OMEMO_DEVICES is set (e.g. in CI), replace the
-        // entire device list with only the current device and delete the bundle
-        // nodes for every removed device.  This keeps the server-side list short
-        // so that encryption loops don't time out after many accumulated runs.
-        let reset_mode = std::env::var("CHATTERBOX_RESET_OMEMO_DEVICES")
-            .map(|v| v == "1" || v.to_lowercase() == "true")
-            .unwrap_or(false);
-
-        if reset_mode {
-            let stale_ids: Vec<_> = device_list
-                .iter()
-                .copied()
-                .filter(|&id| id != self.device_id)
-                .collect();
-            if !stale_ids.is_empty() {
-                info!(
-                    "RESET: Removing {} stale device(s) from list: {:?}",
-                    stale_ids.len(),
-                    stale_ids
-                );
-                // Publish a list containing only the current device
-                if let Err(e) = self.pubsub.publish_device_list(&[self.device_id]).await {
-                    error!("RESET: Failed to publish clean device list: {}", e);
-                    return Err(anyhow!("Failed to publish clean device list: {}", e));
-                }
-                info!(
-                    "RESET: Published clean device list with only device {}",
-                    self.device_id
-                );
-                // Best-effort: delete the bundle node for each removed device
-                for stale_id in &stale_ids {
-                    if let Err(e) = self.pubsub.delete_bundle(*stale_id).await {
-                        warn!(
-                            "RESET: Failed to delete bundle for device {}: {}",
-                            stale_id, e
-                        );
-                    }
-                }
-            } else if !device_list.contains(&self.device_id) {
-                // List was empty or already only had us; just publish current device
-                if let Err(e) = self.pubsub.publish_device_list(&[self.device_id]).await {
-                    error!("RESET: Failed to publish device list: {}", e);
-                    return Err(anyhow!("Failed to publish device list: {}", e));
-                }
-            }
-            device_list = vec![self.device_id];
-        } else if !device_list.contains(&self.device_id) {
+        if !device_list.contains(&self.device_id) {
             info!("Adding our device ID {} to device list", self.device_id);
             device_list.push(self.device_id);
 

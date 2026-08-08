@@ -54,6 +54,14 @@ impl XMPPClient {
         info!("Initializing OMEMO for {}", self.jid);
 
         // Generate and publish device list if needed
+        if std::env::var("CHATTERBOX_RESET_OMEMO_DEVICES")
+            .map(|v| v == "1" || v.to_lowercase() == "true")
+            .unwrap_or(false)
+        {
+            if let Err(e) = omemo_manager.reset_device_list().await {
+                warn!("Failed to reset device list: {}", e);
+            }
+        }
         if let Err(e) = omemo_manager.ensure_device_list_published().await {
             error!("Failed to publish device list: {}", e);
             return Err(anyhow!("Failed to publish device list: {}", e));
