@@ -388,7 +388,13 @@ impl OmemoManager {
         // cache is empty (first message to this contact this session).
         let device_discovery_timeout = Duration::from_secs(15);
         let cached_recipient_device_ids = self.cached_or_session_device_ids_for(recipient).await;
-        let force_refresh_recipient = cached_recipient_device_ids.is_empty();
+        // Force a fresh fetch when cache is empty or when no existing session covers any
+        // cached device — stale cache entries (e.g. after a remote device reset) would
+        // otherwise cause bundle-not-found failures on the first send.
+        let has_existing_session = cached_recipient_device_ids.iter().any(|&did| {
+            self.sessions.contains_key(&((*recipient).clone(), did))
+        });
+        let force_refresh_recipient = cached_recipient_device_ids.is_empty() || !has_existing_session;
         if force_refresh_recipient {
             info!("No cached device list for {}, fetching from server", recipient);
         } else {
