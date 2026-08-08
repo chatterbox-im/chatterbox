@@ -7,14 +7,12 @@
 #[cfg(test)]
 mod tests {
     use anyhow::Result;
-    use std::sync::Arc;
     use tempfile::TempDir;
 
     use crate::jid::BareJid;
     use crate::omemo::device_id::DeviceId;
     use crate::omemo::protocol::{DeviceIdentity, PreKeyBundle, SignedPreKeyBundle};
-    use crate::omemo::storage::{DeviceListEntry, OmemoStorage, TrustLevel};
-    use crate::omemo::{OmemoManager, OmemoPubSub};
+    use crate::omemo::storage::{OmemoStorage, TrustLevel};
     use crate::omemo::test_support::{RecordingPubSub, make_manager};
 
     fn bjid(s: &str) -> BareJid { BareJid::parse(s).unwrap() }
@@ -42,7 +40,7 @@ mod tests {
     #[test]
     fn malformed_trust_string_errors_not_defaults_to_undecided() {
         let dir = TempDir::new().unwrap();
-        let mut storage = OmemoStorage::new(Some(dir.path().to_path_buf())).unwrap();
+        let storage = OmemoStorage::new(Some(dir.path().to_path_buf())).unwrap();
         let jid = bjid("bob@example.com");
         let dev = DeviceId::from(42u32);
 
@@ -69,7 +67,7 @@ mod tests {
     #[test]
     fn empty_trust_string_errors() {
         let dir = TempDir::new().unwrap();
-        let mut storage = OmemoStorage::new(Some(dir.path().to_path_buf())).unwrap();
+        let storage = OmemoStorage::new(Some(dir.path().to_path_buf())).unwrap();
         let jid = bjid("carol@example.com");
         let dev = DeviceId::from(7u32);
 
@@ -111,7 +109,7 @@ mod tests {
 
         // Give carol_did_b a valid Trusted row, then corrupt the string.
         {
-            let mut storage = alice.storage.lock().await;
+            let storage = alice.storage.lock().await;
             storage.set_trust_level(&bjid(carol_jid), DeviceId::from(carol_did_b), TrustLevel::Trusted)?;
         }
         let db_path = adir.path().join("omemo.sqlite3");
@@ -144,7 +142,7 @@ mod tests {
     #[test]
     fn trust_survives_restart() {
         let dir = TempDir::new().unwrap();
-        let mut storage = OmemoStorage::new(Some(dir.path().to_path_buf())).unwrap();
+        let storage = OmemoStorage::new(Some(dir.path().to_path_buf())).unwrap();
         let jid = bjid("dave@example.com");
         let dev = DeviceId::from(77u32);
 

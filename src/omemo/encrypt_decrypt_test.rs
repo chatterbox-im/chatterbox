@@ -8,7 +8,6 @@
 
 #[cfg(test)]
 mod tests {
-    use anyhow::Result;
     use std::sync::Arc;
     use tempfile::TempDir;
 
@@ -17,7 +16,7 @@ mod tests {
 
     fn bjid(s: &str) -> BareJid { BareJid::parse(s).unwrap() }
     use crate::omemo::session::OmemoSessionState;
-    use crate::omemo::storage::{DeviceListEntry, OmemoStorage};
+    use crate::omemo::storage::DeviceListEntry;
     use crate::omemo::wire::PreKeySignalMessage;
     use crate::omemo::{OmemoManager, OmemoPubSub};
     use crate::omemo::test_support::{RecordingPubSub, make_manager};

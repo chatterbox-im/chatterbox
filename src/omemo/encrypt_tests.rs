@@ -7,13 +7,11 @@
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use crate::jid::BareJid;
     use crate::omemo::device_id::DeviceId;
     use crate::omemo::session::OmemoSessionState;
     use crate::omemo::storage::TrustLevel;
-    use crate::omemo::{OmemoError, OmemoPubSub};
+    use crate::omemo::OmemoError;
     use crate::omemo::test_support::{RecordingPubSub, make_manager, make_pair};
 
     fn bjid(s: &str) -> BareJid { BareJid::parse(s).unwrap() }
@@ -149,7 +147,7 @@ mod tests {
     async fn device_in_recovery_prekey_sent_is_present() {
         let alice_jid = "alice@example.com";
         let bob_jid   = "bob@example.com";
-        let (mut alice, _ad, bob, _bd, ps) =
+        let (mut alice, _ad, _bob, _bd, _ps) =
             make_pair(alice_jid, 1, bob_jid, 2).await;
 
         // Simulate a recovery state for bob's device.

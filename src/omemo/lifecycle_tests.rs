@@ -2,8 +2,6 @@
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use crate::jid::BareJid;
     use crate::omemo::device_id::DeviceId;
     use crate::omemo::session::OmemoSessionState;
@@ -101,7 +99,7 @@ mod tests {
     async fn prekey_built_against_rotated_spk_still_decrypts() {
         let alice_jid = "alice@example.com";
         let bob_jid   = "bob@example.com";
-        let (mut alice, _ad, mut bob, _bd, ps) =
+        let (mut alice, _ad, mut bob, _bd, _ps) =
             make_pair(alice_jid, 10, bob_jid, 20).await;
 
         let msg = alice.encrypt_message(bob_jid, "in flight").await.unwrap();

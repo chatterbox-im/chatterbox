@@ -11,7 +11,6 @@
 /// inline.
 #[cfg(test)]
 mod proptest_session {
-    use anyhow::Result;
     use proptest::prelude::*;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -70,10 +69,10 @@ mod proptest_session {
 
     // ── Property test ─────────────────────────────────────────────────────────
 
-    /// Core invariant: after any sequence of sends and restarts, Alice and Bob
-    /// must be able to decrypt each other's messages.  After a crash or failure
-    /// the next successful send re-establishes the session, so we allow one
-    /// "recovery send" on each side before declaring convergence achieved.
+    // Core invariant: after any sequence of sends and restarts, Alice and Bob
+    // must be able to decrypt each other's messages.  After a crash or failure
+    // the next successful send re-establishes the session, so we allow one
+    // "recovery send" on each side before declaring convergence achieved.
     proptest! {
         #![proptest_config(ProptestConfig {
             cases: 64,
