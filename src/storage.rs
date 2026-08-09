@@ -100,12 +100,12 @@ impl MessageStore {
         Ok(())
     }
 
-    /// Persist a message. Duplicate IDs are silently ignored (idempotent).
-    pub fn store_message(&self, msg: &Message) -> Result<()> {
+    /// Persist a message. Returns `true` if the row was inserted, `false` if the id already existed.
+    pub fn store_message(&self, msg: &Message) -> Result<bool> {
         let contact_jid = Self::contact_jid_for(msg);
         let status = msg.delivery_status as i32;
 
-        self.conn.execute(
+        let changed = self.conn.execute(
             "INSERT OR IGNORE INTO messages (id, contact_jid, sender_id, recipient_id, content, timestamp, delivery_status, encrypted)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
@@ -119,7 +119,7 @@ impl MessageStore {
                 msg.encrypted as i32,
             ],
         )?;
-        Ok(())
+        Ok(changed > 0)
     }
 
     /// Load the most recent `limit` messages for a contact, ordered oldest-first.
@@ -272,6 +272,30 @@ mod tests {
 
         let ts_none = store.newest_timestamp("unknown@example.com").unwrap();
         assert_eq!(ts_none, None);
+    }
+
+    #[test]
+    fn cross_path_identity_dedup() {
+        // Regression guard: the same logical message arriving via direct delivery,
+        // carbon, and MAM must produce exactly one row and one UI bubble.
+        let store = MessageStore::open_in_memory().unwrap();
+        let msg = make_msg("stable-id", "alice@example.com", "me@example.com", "Hello", 1000);
+
+        assert!(store.store_message(&msg).unwrap(), "first path: newly inserted");
+        assert!(!store.store_message(&msg).unwrap(), "second path: duplicate id → false");
+        assert!(!store.store_message(&msg).unwrap(), "third path: still false");
+
+        let rows = store.load_messages("alice@example.com", 10).unwrap();
+        assert_eq!(rows.len(), 1, "exactly one row must survive all three paths");
+    }
+
+    #[test]
+    fn store_message_returns_true_for_new_id() {
+        let store = MessageStore::open_in_memory().unwrap();
+        let m1 = make_msg("id-a", "alice@example.com", "me@example.com", "Hi", 1000);
+        let m2 = make_msg("id-b", "alice@example.com", "me@example.com", "Hey", 1001);
+        assert!(store.store_message(&m1).unwrap());
+        assert!(store.store_message(&m2).unwrap());
     }
 
     #[test]

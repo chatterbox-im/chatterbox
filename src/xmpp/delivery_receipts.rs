@@ -105,7 +105,7 @@ impl super::XMPPClient {
 
         // Continue with regular message creation
         let mut message = XMPPMessage::new(None);
-        message.id = Some(xmpp_parsers::message::Id(msg_id));
+        message.id = Some(xmpp_parsers::message::Id(msg_id.clone()));
 
         // Parse the string into a Jid
         let jid = match recipient_str.parse::<xmpp_parsers::jid::Jid>() {
@@ -132,6 +132,15 @@ impl super::XMPPClient {
         // This ensures the message will be available in history later
         let store_hint = Element::builder("store", custom_ns::HINTS).build();
         message.payloads.push(store_hint);
+
+        // XEP-0359: stable sender-authored id for cross-path dedup.
+        let mut origin_id = Element::builder("origin-id", super::custom_ns::SID).build();
+        origin_id.set_attr(
+            xmpp_parsers::minidom::rxml::Namespace::NONE,
+            "id".try_into().unwrap(),
+            &msg_id,
+        );
+        message.payloads.push(origin_id);
 
         message
     }

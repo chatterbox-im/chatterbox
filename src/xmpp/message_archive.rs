@@ -343,16 +343,19 @@ impl super::XMPPClient {
                             chrono::Utc::now().timestamp_millis().into()
                         };
 
-                        let message_id = message_stanza
-                            .attr("id")
-                            .map(|s| s.to_string())
+                        let message_id = super::canonical_msg_id(message_stanza)
                             .unwrap_or_else(|| Uuid::new_v4().to_string());
 
                         if let (Some(from), Some(to)) = (from.clone(), to.clone()) {
-                            let (sender_id, recipient_id) = if from.contains(&self.jid) {
+                            // Compare bare JIDs: archived `from` is bare, self.jid may carry a resource.
+                            let self_bare = self.jid.split('/').next().unwrap_or(&self.jid).to_lowercase();
+                            let from_bare = from.split('/').next().unwrap_or(&from).to_lowercase();
+                            let is_self = from_bare == self_bare;
+
+                            let (sender_id, recipient_id) = if is_self {
                                 ("me".to_string(), to)
                             } else {
-                                (from.clone(), "me".to_string())
+                                (from_bare.clone(), "me".to_string())
                             };
                             let direction = crate::models::Direction::from_sql(
                                 &sender_id, &recipient_id,
@@ -1045,5 +1048,28 @@ mod tests {
         };
         assert!(result.messages.is_empty());
         assert!(result.complete);
+    }
+
+    // Regression guard for the old `from.contains(&self.jid)` bug.
+    fn mam_is_self(from: &str, self_jid: &str) -> bool {
+        let self_bare = self_jid.split('/').next().unwrap_or(self_jid).to_lowercase();
+        let from_bare = from.split('/').next().unwrap_or(from).to_lowercase();
+        from_bare == self_bare
+    }
+
+    #[test]
+    fn mam_bare_from_matches_full_self_jid() {
+        assert!(mam_is_self("alice@server.example", "alice@server.example/phone"));
+    }
+
+    #[test]
+    fn mam_different_user_is_not_self() {
+        assert!(!mam_is_self("bob@server.example", "alice@server.example/phone"));
+    }
+
+    #[test]
+    fn old_contains_bug_would_have_misclassified() {
+        // from.contains(&full_jid) is false when `from` is bare and `full_jid` has /resource.
+        assert!(!("alice@server.example".contains("alice@server.example/phone")));
     }
 }

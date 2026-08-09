@@ -117,6 +117,15 @@ impl XMPPClient {
         let request_element = Element::builder("request", custom_ns::RECEIPTS).build();
         message_element.append_child(request_element);
 
+        // XEP-0359: sender-authored stable id so carbons/MAM always correlate to the same message.
+        let mut origin_id = Element::builder("origin-id", custom_ns::SID).build();
+        origin_id.set_attr(
+            xmpp_parsers::minidom::rxml::Namespace::NONE,
+            "id".try_into().unwrap(),
+            &id,
+        );
+        message_element.append_child(origin_id);
+
         // Add chat state
         let active_element = Element::builder("active", custom_ns::CHATSTATES).build();
         message_element.append_child(active_element);

@@ -53,6 +53,47 @@ pub mod custom_ns {
     pub const CARBONS: &str = "urn:xmpp:carbons:2";
     pub const FORWARD: &str = "urn:xmpp:forward:0";
     pub const HINTS: &str = "urn:xmpp:hints";
+    pub const SID: &str = "urn:xmpp:sid:0"; // XEP-0359
+}
+
+/// Stable message identity: XEP-0359 <origin-id> takes precedence over the wire `id` attribute.
+pub fn canonical_msg_id(element: &xmpp_parsers::minidom::Element) -> Option<String> {
+    element
+        .get_child("origin-id", custom_ns::SID)
+        .and_then(|e| e.attr("id"))
+        .or_else(|| element.attr("id"))
+        .map(|s| s.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(xml: &str) -> xmpp_parsers::minidom::Element {
+        xml.parse().unwrap()
+    }
+
+    #[test]
+    fn canonical_id_prefers_origin_id_over_wire_id() {
+        let elem = parse(
+            "<message id='wire' xmlns='jabber:client'>\
+             <origin-id xmlns='urn:xmpp:sid:0' id='stable'/>\
+             </message>",
+        );
+        assert_eq!(canonical_msg_id(&elem), Some("stable".to_string()));
+    }
+
+    #[test]
+    fn canonical_id_falls_back_to_wire_id() {
+        let elem = parse("<message id='wire' xmlns='jabber:client'/>");
+        assert_eq!(canonical_msg_id(&elem), Some("wire".to_string()));
+    }
+
+    #[test]
+    fn canonical_id_none_when_both_absent() {
+        let elem = parse("<message xmlns='jabber:client'/>");
+        assert_eq!(canonical_msg_id(&elem), None);
+    }
 }
 
 // XEP namespaces (core and extensions)

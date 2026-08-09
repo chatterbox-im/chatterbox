@@ -411,23 +411,22 @@ impl ChatterboxClient {
                             let _ = event_tx.send(FfiEvent::Message { msg: to_ffi_message(sys) }).await;
                         }
                         Some(crate::models::AppEvent::Chat(m)) => {
-                            // A delivery_update reuses the original message ID with
-                            // sender_id = "me".  If the store already has that ID, treat
-                            // it as a status update rather than a new message.
-                            let is_update = if let Some(ref s) = store {
-                                s.lock().ok().map_or(false, |guard| {
-                                    guard
-                                        .load_messages(&m.recipient_id, 1)
-                                        .ok()
-                                        .map_or(false, |msgs| {
-                                            msgs.iter().any(|existing| existing.id == m.id)
-                                        })
+                            // Try to store; INSERT OR IGNORE returns false when the id already exists.
+                            let newly_inserted = if let Some(ref s) = store {
+                                s.lock().ok().map_or(true, |guard| {
+                                    guard.store_message(&m).unwrap_or(true)
                                 })
                             } else {
-                                false
+                                true
                             };
 
-                            if is_update {
+                            // Empty content is a delivery-status update from our own-device path;
+                            // never emit it as a new bubble regardless of whether the id is new.
+                            if newly_inserted && !m.content.is_empty() {
+                                let _ = event_tx
+                                    .send(FfiEvent::Message { msg: to_ffi_message(m) })
+                                    .await;
+                            } else {
                                 if let Some(ref s) = store {
                                     if let Ok(guard) = s.lock() {
                                         let _ = guard.update_delivery_status(
@@ -439,15 +438,6 @@ impl ChatterboxClient {
                                 let status = format!("{:?}", m.delivery_status).to_lowercase();
                                 let _ = event_tx
                                     .send(FfiEvent::StatusUpdate { msg_id: m.id, status })
-                                    .await;
-                            } else {
-                                if let Some(ref s) = store {
-                                    if let Ok(guard) = s.lock() {
-                                        let _ = guard.store_message(&m);
-                                    }
-                                }
-                                let _ = event_tx
-                                    .send(FfiEvent::Message { msg: to_ffi_message(m) })
                                     .await;
                             }
                         }
@@ -725,7 +715,8 @@ impl ChatterboxClient {
                 if let Ok(guard) = s.lock() {
                     for m in &msgs {
                         match guard.store_message(m) {
-                            Ok(()) => new_msgs.push(to_ffi_message(m.clone())),
+                            Ok(true) => new_msgs.push(to_ffi_message(m.clone())),
+                            Ok(false) => {} // already stored on a prior fetch
                             Err(e) => {
                                 log::warn!("Failed to store MAM message {}: {}", m.id, e);
                             }

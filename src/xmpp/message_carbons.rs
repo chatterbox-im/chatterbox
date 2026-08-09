@@ -199,12 +199,13 @@ impl super::XMPPClient {
                                 from,
                                 body
                             );
+                            let can_id = super::canonical_msg_id(message);
                             return self
                                 .send_carbon_to_ui(
                                     from,
                                     to,
                                     is_sent,
-                                    message.attr("id"),
+                                    can_id.as_deref(),
                                     body,
                                     false,
                                 )
@@ -228,7 +229,8 @@ impl super::XMPPClient {
             body_text
         );
 
-        self.send_carbon_to_ui(from, to, is_sent, message.attr("id"), body_text, false)
+        let can_id = super::canonical_msg_id(message);
+        self.send_carbon_to_ui(from, to, is_sent, can_id.as_deref(), body_text, false)
             .await
     }
 
@@ -334,16 +336,13 @@ impl super::XMPPClient {
                 "Skipping decryption of our own sent carbon (device {})",
                 sender_device_id
             );
-            let msg_id = message
-                .attr("id")
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-            let recipient_jid = to.split('/').next().unwrap_or(to).to_string();
-            let mut ui_message =
-                Message::outgoing_encrypted(msg_id, recipient_jid, "[Sent encrypted message]");
-            ui_message.delivery_status = DeliveryStatus::Delivered;
-            if let Err(e) = self.msg_tx.send(crate::models::AppEvent::Chat(ui_message)).await {
-                error!("Failed to send own-carbon placeholder to UI: {}", e);
+            // Update the delivery status on the already-displayed local echo using the
+            // canonical id (origin-id preferred). Don't emit a new bubble.
+            if let Some(id) = super::canonical_msg_id(message) {
+                let recipient_jid = to.split('/').next().unwrap_or(to).to_string();
+                let mut upd = Message::outgoing_encrypted(id, recipient_jid, "");
+                upd.delivery_status = DeliveryStatus::Delivered;
+                let _ = self.msg_tx.send(crate::models::AppEvent::Chat(upd)).await;
             }
             return Ok(());
         }
@@ -353,12 +352,13 @@ impl super::XMPPClient {
                 "No key found for our device ID {} in carbon message",
                 own_device_id
             );
+            let can_id = super::canonical_msg_id(message);
             return self
                 .send_carbon_to_ui(
                     from,
                     to,
                     is_sent,
-                    message.attr("id"),
+                    can_id.as_deref(),
                     "[Message from another device - not encrypted for this device]",
                     true,
                 )
@@ -431,8 +431,9 @@ impl super::XMPPClient {
                     "Skipping carbon decryption for already-decrypted message {} from {}:{}",
                     msg_id, sender_jid, sender_device_id
                 );
+                let can_id = super::canonical_msg_id(message);
                 return self
-                    .send_carbon_to_ui(from, to, is_sent, message.attr("id"), "", true)
+                    .send_carbon_to_ui(from, to, is_sent, can_id.as_deref(), "", true)
                     .await;
             }
             // If the direct-delivery handler already failed for this message ID,
@@ -490,12 +491,13 @@ impl super::XMPPClient {
                     error!("Failed to decrypt OMEMO carbon message: {}", e);
                     // Don't propagate — a decryption failure on a carbon should not
                     // crash the event loop.  Show a placeholder instead.
+                    let can_id = super::canonical_msg_id(message);
                     return self
                         .send_carbon_to_ui(
                             from,
                             to,
                             is_sent,
-                            message.attr("id"),
+                            can_id.as_deref(),
                             "[Encrypted message could not be decrypted]",
                             true,
                         )
@@ -506,11 +508,12 @@ impl super::XMPPClient {
 
         debug!("Successfully decrypted OMEMO carbon message");
 
+        let can_id = super::canonical_msg_id(message);
         self.send_carbon_to_ui(
             from,
             to,
             is_sent,
-            message.attr("id"),
+            can_id.as_deref(),
             decrypted_content,
             true,
         )

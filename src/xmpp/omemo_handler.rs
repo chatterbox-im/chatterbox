@@ -120,7 +120,10 @@ impl XMPPClient {
     ) -> Result<()> {
         // Extract important attributes
         let from = element.attr("from").unwrap_or("unknown@server.example");
-        let id = element.attr("id").unwrap_or("unknown");
+        let wire_id = element.attr("id").unwrap_or("unknown");
+        // Prefer origin-id for storage/UI dedup; wire id for receipts and session dedup.
+        let msg_id = super::canonical_msg_id(element)
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
         // Look for OMEMO encrypted element - check empty namespace first (most common)
         let encrypted = element
@@ -169,17 +172,12 @@ impl XMPPClient {
                             "Skipping decryption of our own sent message (device {})",
                             sender_device_id
                         );
-                        // Use the "to" attribute as recipient (this is who we sent to)
-                        let to = element.attr("to").unwrap_or("unknown");
-                        let recipient_jid = to.split('/').next().unwrap_or(to).to_string();
-                        let mut message = Message::outgoing_encrypted(
-                            id.to_string(),
-                            recipient_jid,
-                            "[Sent encrypted message]",
-                        );
-                        message.delivery_status = DeliveryStatus::Delivered;
-                        if let Err(e) = self.msg_tx.send(crate::models::AppEvent::Chat(message)).await {
-                            error!("Failed to send own-message placeholder to UI: {}", e);
+                        // Update status on the local echo; bail if `to` is absent to avoid BareJid::parse("") panic.
+                        if let Some(to_raw) = element.attr("to") {
+                            let recipient_jid = to_raw.split('/').next().unwrap_or(to_raw).to_string();
+                            let mut upd = Message::outgoing_encrypted(msg_id.clone(), recipient_jid, "");
+                            upd.delivery_status = DeliveryStatus::Delivered;
+                            let _ = self.msg_tx.send(crate::models::AppEvent::Chat(upd)).await;
                         }
                         return Ok(());
                     }
@@ -336,14 +334,14 @@ impl XMPPClient {
                         // Record this message ID so that a duplicate delivery (e.g. a
                         // message-carbon copy of a direct stanza) skips re-decryption
                         // and avoids double-advancing the ratchet.
-                        omemo_manager_guard.mark_message_decrypted(id);
+                        omemo_manager_guard.mark_message_decrypted(wire_id);
 
                         // Strip resource from sender JID to get bare JID
                         let sender_bare_jid = from.split('/').next().unwrap_or(from).to_string();
 
                         // Create a message for the UI
                         let message = Message::incoming_encrypted(
-                            id.to_string(),
+                            msg_id,
                             sender_bare_jid.clone(),
                             plaintext.clone(),
                         );
@@ -373,7 +371,7 @@ impl XMPPClient {
                                         "received",
                                         custom_ns::RECEIPTS,
                                     )
-                                    .attr("id".try_into().unwrap(), id)
+                                    .attr("id".try_into().unwrap(), wire_id)
                                     .build(),
                                 )
                                 .build();
@@ -389,12 +387,12 @@ impl XMPPClient {
                             "Failed to decrypt message from {} (device {}): {}",
                             from, sender_device_id, e
                         );
-                        error!("Message ID: {}, Decryption failure details: {:?}", id, e);
+                        error!("Message ID: {}, Decryption failure details: {:?}", wire_id, e);
 
                         // Mark this message ID as failed so the carbon copy of the
                         // same message is not also counted as a separate failure
                         // (which would prematurely reset the OMEMO session).
-                        omemo_manager_guard.mark_message_failed(id);
+                        omemo_manager_guard.mark_message_failed(wire_id);
 
                         debug!("OMEMO message structure - Sender device: {}, IV length: {}, Payload length: {}, Number of keys: {}", 
                             omemo_message.sender_device_id,
@@ -403,7 +401,7 @@ impl XMPPClient {
                             omemo_message.encrypted_keys.len());
 
                         let message = Message::incoming_encrypted(
-                            id.to_string(),
+                            msg_id,
                             from.to_string(),
                             format!("[Encrypted message could not be decrypted: {}. You may need to refresh the OMEMO keys or verify device identity.]", e),
                         );
