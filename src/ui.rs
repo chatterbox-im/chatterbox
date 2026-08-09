@@ -230,14 +230,16 @@ impl ChatUI {
                 existing.timestamp = message.timestamp;
             }
         } else {
-            // Also check for matching content from the same sender within a recent timeframe
-            // This helps deduplicate messages that might have different IDs but are the same message
-            let recent_threshold = Millis(chrono::Utc::now().timestamp_millis() - 10_000); // Within last 10 seconds
+            // Content-based fallback: if same sender/recipient/content and timestamps are
+            // within 60 seconds of each other, treat as the same message (handles duplicate
+            // SQLite rows that have different IDs, e.g. from wire-id vs carbon-UUID mismatch).
+            let delta_ms: i64 = 60_000;
             if let Some(idx) = self.messages.iter().position(|m| {
                 m.sender_id == message.sender_id
                     && m.recipient_id == message.recipient_id
                     && m.content == message.content
-                    && m.timestamp > recent_threshold
+                    && !m.content.is_empty()
+                    && (m.timestamp.0 - message.timestamp.0).abs() < delta_ms
             }) {
                 // It's likely the same message with a different ID, update status
                 let existing = &mut self.messages[idx];
@@ -285,8 +287,11 @@ impl ChatUI {
     }
 
     pub fn set_active_contact(&mut self, contact: &str) {
-        // Always store the base JID as the active contact
         self.contact = Self::get_base_jid(contact);
+        // Keep the sidebar highlight in sync with the active contact.
+        if let Some(idx) = self.contacts.iter().position(|c| c == &self.contact) {
+            self.current_contact_index = idx;
+        }
     }
 
     pub fn has_active_contact(&self) -> bool {
@@ -472,7 +477,7 @@ impl ChatUI {
                     self.contact_remove_dialog = None;
 
                     // Add system message about cancellation
-                    self.add_message(Message::system("me", "Contact removal cancelled"));
+                    self.add_message(Message::system(self.contact.clone(), "Contact removal cancelled"));
 
                     return Ok(None);
                 }

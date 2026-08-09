@@ -436,7 +436,7 @@ impl XMPPClient {
             crate::omemo::storage::TrustLevel::Verified => "verified",
             _                                           => "rejected",
         };
-        let system_message = Message::system("me", format!("OMEMO key for {} has been {}", contact, label));
+        let system_message = Message::system(contact, format!("OMEMO key for {} has been {}", contact, label));
         if let Err(e) = self.msg_tx.send(crate::models::AppEvent::Chat(system_message)).await {
             error!("Failed to send key response message to UI: {}", e);
         }

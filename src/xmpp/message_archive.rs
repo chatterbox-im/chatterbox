@@ -394,7 +394,7 @@ impl super::XMPPClient {
                                             });
                                             return;
                                         }
-                                        Ok(None) => {}
+                                        Ok(None) => return, // own-device or no key — skip body fallback too
                                         Err(e) => {
                                             warn!("Failed to decrypt archived message: {}", e);
                                             archived_messages.push(Message {

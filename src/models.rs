@@ -229,7 +229,9 @@ impl Message {
     /// System/notification message. Never encrypted.
     pub fn system(recipient: impl Into<String>, content: impl Into<String>) -> Self {
         let recipient = recipient.into();
-        let direction = Direction::System { about: BareJid::parse(&recipient).expect("expected valid JID") };
+        let about = BareJid::try_from(recipient.clone())
+            .unwrap_or_else(|_| BareJid::try_from("system@localhost").unwrap());
+        let direction = Direction::System { about };
         Self {
             id: Uuid::new_v4().to_string(),
             sender_id: "system".to_string(),
