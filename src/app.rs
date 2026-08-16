@@ -100,6 +100,8 @@ pub async fn run_app(
     terminal.draw(|f| chat_ui.draw(f))?;
 
     // Start message history loading in background if we have an active contact
+    chat_ui.begin_history_loading();
+    terminal.draw(|f| chat_ui.draw(f))?;
     start_initial_history_load(&mut chat_ui, &xmpp_client, disable_mam, store.as_ref()).await;
 
     // Check for pending OMEMO key verifications
@@ -207,12 +209,14 @@ async fn start_initial_history_load(
     store: Option<&MessageStore>,
 ) {
     if !chat_ui.has_active_contact() {
+        chat_ui.finish_local_history_loading();
         return;
     }
 
     let active_contact = chat_ui.get_active_contact();
 
     if disable_mam {
+        chat_ui.finish_local_history_loading();
         chat_ui.add_message(create_system_message(
             &active_contact,
             "Message history disabled (--disable-mam flag)",
@@ -243,6 +247,8 @@ async fn start_initial_history_load(
     } else {
         None
     };
+
+    chat_ui.finish_local_history_loading();
 
     // MAM catch-up for messages newer than what we have locally
     load_message_history_with_catchup(
@@ -529,6 +535,93 @@ fn load_message_history_with_catchup(
     });
 }
 
+/// Fetch one older page when the user reaches the top of the loaded history.
+fn load_older_message_history(
+    chat_ui: &mut ChatUI,
+    xmpp_client: &XMPPClient,
+    contact: &str,
+    store: Option<&MessageStore>,
+) {
+    let Some((oldest_id, oldest_timestamp)) = chat_ui.oldest_message_cursor(contact) else {
+        chat_ui.finish_older_history_load(contact, false);
+        return;
+    };
+
+    // The local store may contain messages older than the initial window. Load
+    // them now so they are available if the server archive is exhausted.
+    let local_older = store
+        .and_then(|s| s.load_messages_before(contact, oldest_timestamp, 50).ok())
+        .unwrap_or_default();
+
+    let client_clone = xmpp_client.clone();
+    let contact_clone = contact.to_string();
+    let msg_tx = xmpp_client.get_message_sender();
+    let end_time = chrono::DateTime::from_timestamp_millis(oldest_timestamp)
+        .unwrap_or_else(|| chrono::Utc::now());
+
+    tokio::spawn(async move {
+        let options = MAMQueryOptions::new()
+            .with_jid(&contact_clone)
+            .with_end(end_time)
+            .with_before(&oldest_id)
+            .with_limit(50);
+
+        match client_clone.get_message_history_with_pagination(options).await {
+            Ok(result) => {
+                let server_has_older = !result.complete && !result.messages.is_empty();
+                let use_local_fallback = result.complete || result.messages.is_empty();
+                let mut messages = result.messages;
+                if use_local_fallback && !local_older.is_empty() {
+                    messages.extend(local_older.clone());
+                    messages.sort_by_key(|message| message.timestamp);
+                }
+                let has_older = server_has_older || local_older.len() == 50;
+
+                if messages.is_empty() {
+                    let _ = msg_tx
+                        .send(AppEvent::Toast("No older messages on server".to_string()))
+                        .await;
+                } else {
+                    let _ = msg_tx
+                        .send(AppEvent::Toast(format!(
+                            "Loaded {} older messages",
+                            messages.len()
+                        )))
+                        .await;
+                }
+
+                if let Err(e) = msg_tx
+                    .send(AppEvent::HistoryPage {
+                        contact: contact_clone,
+                        messages,
+                        has_older,
+                    })
+                    .await
+                {
+                    error!("Failed to send older history page: {}", e);
+                }
+            }
+            Err(e) => {
+                error!("Failed to load older message history: {}", e);
+                let has_older = local_older.len() == 50;
+                let _ = msg_tx
+                    .send(AppEvent::Toast(format!(
+                        "Server history unavailable; checking local history ({})",
+                        e
+                    )))
+                    .await;
+                let _ = msg_tx
+                    .send(AppEvent::HistoryPage {
+                        contact: contact_clone,
+                        messages: local_older,
+                        has_older,
+                    })
+                    .await;
+            }
+        }
+    });
+}
+
 /// Run the main event loop
 async fn run_main_loop(
     chat_ui: &mut ChatUI,
@@ -554,18 +647,22 @@ async fn run_main_loop(
     let mut cleanup_tick = tokio::time::interval(std::time::Duration::from_secs(1));
     let mut connection_tick = tokio::time::interval(std::time::Duration::from_secs(5));
     let mut typing_tick = tokio::time::interval(std::time::Duration::from_secs(1));
+    let mut history_loading_tick = tokio::time::interval(std::time::Duration::from_millis(150));
+    let mut render_tick = tokio::time::interval(std::time::Duration::from_millis(16));
     let mut render_needed = true;
     let mut terminal_events_closed = false;
     let mut presence_closed = false;
     let mut friend_req_closed = false;
     let mut typing_closed = false;
+    let mut last_render = std::time::Instant::now() - std::time::Duration::from_secs(1);
 
     check_active_contact_omemo_keys(chat_ui, xmpp_client, &mut verified_contacts);
 
     loop {
-        if render_needed {
+        if render_needed && last_render.elapsed() >= std::time::Duration::from_millis(16) {
             terminal.draw(|f| chat_ui.draw(f))?;
             render_needed = false;
+            last_render = std::time::Instant::now();
         }
 
         tokio::select! {
@@ -719,6 +816,13 @@ async fn run_main_loop(
                     &mut typing_failures,
                 );
             }
+            _ = history_loading_tick.tick() => {
+                if chat_ui.is_history_loading() {
+                    chat_ui.advance_history_loading_animation();
+                    render_needed = true;
+                }
+            }
+            _ = render_tick.tick() => {}
         }
     }
 
@@ -728,6 +832,19 @@ async fn run_main_loop(
 fn process_incoming_message(chat_ui: &mut ChatUI, event: AppEvent, store: Option<&MessageStore>) {
     match event {
         AppEvent::Toast(message) => chat_ui.show_toast(message),
+        AppEvent::HistoryPage {
+            contact,
+            messages,
+            has_older,
+        } => {
+            if chat_ui.get_active_contact() == contact {
+                chat_ui.finish_older_history_load(&contact, has_older);
+                for message in messages {
+                    process_incoming_message(chat_ui, AppEvent::Chat(message), store);
+                }
+                chat_ui.keep_scroll_at_top();
+            }
+        }
         AppEvent::KeyVerifyRequest { sender, fingerprint, device_id } => {
             handle_new_omemo_key(chat_ui, &sender, &fingerprint, device_id.as_ref().map(|id| id.to_string()).as_deref());
         }
@@ -928,6 +1045,7 @@ async fn handle_user_command(
             info!("Contact changed to: {}", contact);
             *last_state_sent = None;
             chat_ui.clear_messages();
+            chat_ui.begin_history_loading();
             terminal.draw(|f| chat_ui.draw(f))?;
 
             let first_view = !chat_ui.history_loaded_contacts.contains(&contact);
@@ -963,7 +1081,12 @@ async fn handle_user_command(
                     chat_ui, xmpp_client, &contact, disable_mam,
                 );
             }
+            chat_ui.finish_local_history_loading();
             terminal.draw(|f| chat_ui.draw(f))?;
+        }
+
+        UiCommand::LoadOlderHistory { contact } => {
+            load_older_message_history(chat_ui, xmpp_client, &contact, store);
         }
 
         UiCommand::KeyAccepted { contact } => {

@@ -295,6 +295,11 @@ pub enum DeliveryStatus {
 pub enum AppEvent {
     Chat(Message),
     Toast(String),
+    HistoryPage {
+        contact: String,
+        messages: Vec<Message>,
+        has_older: bool,
+    },
     KeyVerifyRequest {
         sender: String,
         fingerprint: String,

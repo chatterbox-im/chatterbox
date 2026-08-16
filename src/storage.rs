@@ -155,6 +155,49 @@ impl MessageStore {
         Ok(messages)
     }
 
+    /// Load messages older than a timestamp, ordered oldest-first.
+    pub fn load_messages_before(
+        &self,
+        contact_jid: &str,
+        before_timestamp: i64,
+        limit: usize,
+    ) -> Result<Vec<Message>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, sender_id, recipient_id, content, timestamp, delivery_status, encrypted
+             FROM messages
+             WHERE contact_jid = ?1 AND timestamp < ?2
+             ORDER BY timestamp DESC
+             LIMIT ?3",
+        )?;
+
+        let rows = stmt.query_map(
+            params![contact_jid, before_timestamp, limit as i64],
+            |row| {
+                let sender_id: String = row.get(1)?;
+                let recipient_id: String = row.get(2)?;
+                let direction = crate::models::Direction::from_sql(
+                    &sender_id,
+                    &recipient_id,
+                    contact_jid,
+                );
+                Ok(Message {
+                    id: row.get(0)?,
+                    sender_id,
+                    recipient_id,
+                    content: row.get(3)?,
+                    timestamp: crate::units::Millis(row.get::<_, i64>(4)?),
+                    delivery_status: Self::status_from_i32(row.get(5)?),
+                    encrypted: row.get::<_, i32>(6).unwrap_or(0) != 0,
+                    direction,
+                })
+            },
+        )?;
+
+        let mut messages: Vec<Message> = rows.filter_map(|r| r.ok()).collect();
+        messages.reverse();
+        Ok(messages)
+    }
+
     /// Get the timestamp of the newest stored message for a contact.
     /// Used to determine where to start a MAM catch-up query.
     pub fn newest_timestamp(&self, contact_jid: &str) -> Result<Option<u64>> {

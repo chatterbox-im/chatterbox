@@ -21,6 +21,7 @@ pub struct MAMQueryOptions {
     pub end: Option<chrono::DateTime<chrono::Utc>>,
     pub limit: Option<usize>,
     pub after: Option<String>, // RSM pagination token for continuing a query
+    pub before: Option<String>, // RSM pagination token for loading the previous page
 }
 
 // Result structure with information about pagination
@@ -41,6 +42,7 @@ impl MAMQueryOptions {
             end: None,
             limit: Some(50), // Default limit
             after: None,
+            before: None,
         }
     }
 
@@ -66,6 +68,11 @@ impl MAMQueryOptions {
 
     pub fn with_after(mut self, after: &str) -> Self {
         self.after = Some(after.to_string());
+        self
+    }
+
+    pub fn with_before(mut self, before: &str) -> Self {
+        self.before = Some(before.to_string());
         self
     }
 }
@@ -191,6 +198,14 @@ impl super::XMPPClient {
                     .build();
             after_element.append_text_node(after);
             set.append_child(after_element);
+        }
+
+        if let Some(before) = &options.before {
+            let mut before_element =
+                xmpp_parsers::minidom::Element::builder("before", "http://jabber.org/protocol/rsm")
+                    .build();
+            before_element.append_text_node(before);
+            set.append_child(before_element);
         }
 
         query = query.append(set);

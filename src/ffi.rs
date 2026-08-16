@@ -442,6 +442,7 @@ impl ChatterboxClient {
                             }
                         }
                         Some(crate::models::AppEvent::Toast(_)) => {}
+                        Some(crate::models::AppEvent::HistoryPage { .. }) => {}
                         None => {
                             let _ = event_tx
                                 .send(FfiEvent::Disconnected {

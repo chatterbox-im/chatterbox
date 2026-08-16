@@ -36,6 +36,8 @@ pub enum UiCommand {
     RemoveContactConfirmed { contact: String },
     /// User navigated to a different contact in the sidebar.
     ContactChanged { contact: String },
+    /// User reached the top of a conversation and requested older history.
+    LoadOlderHistory { contact: String },
     /// User pressed Ctrl-P — toggle OS notifications.
     ToggleOsNotifications,
     /// User pressed Ctrl-M — enable XEP-0280 message carbons.

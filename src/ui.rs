@@ -1,7 +1,9 @@
 use anyhow::Result;
-use chatterbox::units::Millis;
 use crossterm::{
-    event::{self, DisableFocusChange, EnableFocusChange, Event, KeyCode, KeyEventKind},
+    event::{
+        self, DisableFocusChange, DisableMouseCapture, EnableFocusChange, EnableMouseCapture,
+        Event, KeyCode, KeyEventKind, MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -10,11 +12,12 @@ use log::info; // Add the log import
 use ratatui::{
     prelude::*,
     widgets::{
-        Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState,
+        Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table, TableState,
     },
     Frame,
 };
 use std::{
+    cell::Cell as StdCell,
     collections::{HashMap, HashSet},
     io,
     sync::{
@@ -117,7 +120,12 @@ pub struct ChatUI {
     resources: HashMap<String, Vec<String>>, // Map of base JID -> resource JIDs
     connection_status: bool,                 // Track XMPP server connection status
     sidebar_hidden: bool,                    // Whether the contacts sidebar is hidden
-    message_scroll_offset: Option<usize>, // None = auto-scroll to bottom, Some(n) = n lines scrolled up from bottom
+    message_scroll_offset: StdCell<Option<usize>>, // None = auto-scroll to bottom, Some(n) = n lines scrolled up from bottom
+    max_message_scroll: StdCell<usize>,
+    keep_scroll_at_top: StdCell<bool>,
+    older_history_loading: bool,
+    history_loading_frame: StdCell<usize>,
+    has_older_history: bool,
     unread_contacts: HashSet<String>,     // Contacts with unread messages
     pub history_loaded_contacts: HashSet<String>, // Contacts whose history has been loaded
 }
@@ -199,7 +207,12 @@ impl ChatUI {
             resources: HashMap::new(),               // Initialize resources map
             connection_status: false,                // Initialize connection status to disconnected
             sidebar_hidden: false,                   // Sidebar visible by default
-            message_scroll_offset: None,             // Auto-scroll to bottom by default
+            message_scroll_offset: StdCell::new(None), // Auto-scroll to bottom by default
+            max_message_scroll: StdCell::new(0),
+            keep_scroll_at_top: StdCell::new(false),
+            older_history_loading: false,
+            history_loading_frame: StdCell::new(0),
+            has_older_history: true,
             unread_contacts: HashSet::new(),         // No unread messages initially
             history_loaded_contacts: HashSet::new(), // No history loaded yet
         }
@@ -418,6 +431,18 @@ impl ChatUI {
     ) -> Result<Option<crate::commands::UiCommand>> {
         if let Some(focused) = focus_state_from_event(&terminal_event) {
             self.terminal_focused = focused;
+            return Ok(None);
+        }
+
+        if let Event::Mouse(mouse) = terminal_event {
+            if matches!(self.active_tab, Tab::Messages) {
+                if matches!(mouse.kind, MouseEventKind::ScrollUp) {
+                    self.scroll_messages_up(3);
+                    return Ok(self.request_older_history_if_at_top());
+                } else if matches!(mouse.kind, MouseEventKind::ScrollDown) {
+                    self.scroll_messages_down(3);
+                }
+            }
             return Ok(None);
         }
 
@@ -750,8 +775,8 @@ impl ChatUI {
                         }
                     }
                 } else if let Tab::Messages = self.active_tab {
-                    let current = self.message_scroll_offset.unwrap_or(0);
-                    self.message_scroll_offset = Some(current + 3);
+                    self.scroll_messages_up(3);
+                    return Ok(self.request_older_history_if_at_top());
                 }
             }
             KeyCode::Down => {
@@ -772,35 +797,27 @@ impl ChatUI {
                         }
                     }
                 } else if let Tab::Messages = self.active_tab {
-                    if let Some(offset) = self.message_scroll_offset {
-                        if offset <= 3 {
-                            self.message_scroll_offset = None;
-                        } else {
-                            self.message_scroll_offset = Some(offset - 3);
-                        }
-                    }
+                    self.scroll_messages_down(3);
                 }
             }
             KeyCode::PageUp => {
                 // Scroll messages up (Fn+Up on Mac)
-                let current = self.message_scroll_offset.unwrap_or(0);
-                self.message_scroll_offset = Some(current + 10);
+                if let Tab::Messages = self.active_tab {
+                    self.scroll_messages_up(10);
+                    if let Some(command) = self.request_older_history_if_at_top() {
+                        return Ok(Some(command));
+                    }
+                }
             }
             KeyCode::PageDown => {
                 // Scroll messages down (Fn+Down on Mac)
-                if let Some(offset) = self.message_scroll_offset {
-                    if offset <= 10 {
-                        // Back to auto-scroll mode
-                        self.message_scroll_offset = None;
-                    } else {
-                        self.message_scroll_offset = Some(offset - 10);
-                    }
+                if let Tab::Messages = self.active_tab {
+                    self.scroll_messages_down(10);
                 }
-                // If already None (auto-scroll), do nothing
             }
             KeyCode::End => {
                 // Jump back to latest messages
-                self.message_scroll_offset = None;
+                self.message_scroll_offset.set(None);
             }
             _ => {
                 if let Tab::Messages = self.active_tab {
@@ -864,6 +881,38 @@ impl ChatUI {
             }
         }
         Ok(None)
+    }
+
+    fn scroll_messages_up(&mut self, lines: usize) {
+        let current = self.message_scroll_offset.get().unwrap_or(0);
+        let max_offset = self.max_message_scroll.get();
+        if max_offset > 0 {
+            self.message_scroll_offset
+                .set(Some(current.saturating_add(lines).min(max_offset)));
+        }
+    }
+
+    fn request_older_history_if_at_top(&mut self) -> Option<crate::commands::UiCommand> {
+        let at_top = !self.messages.is_empty()
+            && self.message_scroll_offset.get().unwrap_or(0) >= self.max_message_scroll.get();
+        if at_top && !self.older_history_loading && self.has_older_history {
+            self.older_history_loading = true;
+            self.history_loading_frame.set(0);
+            return Some(crate::commands::UiCommand::LoadOlderHistory {
+                contact: self.contact.clone(),
+            });
+        }
+        None
+    }
+
+    fn scroll_messages_down(&mut self, lines: usize) {
+        if let Some(offset) = self.message_scroll_offset.get() {
+            if offset <= lines {
+                self.message_scroll_offset.set(None);
+            } else {
+                self.message_scroll_offset.set(Some(offset - lines));
+            }
+        }
     }
 
     pub fn draw(&self, frame: &mut Frame) {
@@ -1070,7 +1119,59 @@ impl ChatUI {
 
     pub fn clear_messages(&mut self) {
         self.messages.clear();
-        self.message_scroll_offset = None;
+        self.message_scroll_offset.set(None);
+        self.max_message_scroll.set(0);
+        self.keep_scroll_at_top.set(false);
+        self.older_history_loading = false;
+        self.history_loading_frame.set(0);
+        self.has_older_history = true;
+    }
+
+    pub fn oldest_message_cursor(&self, contact: &str) -> Option<(String, i64)> {
+        let contact = Self::get_base_jid(contact);
+        self.messages
+            .iter()
+            .filter(|message| {
+                !matches!(
+                    message.direction,
+                    chatterbox::models::Direction::System { .. }
+                )
+                    && (Self::get_base_jid(&message.sender_id) == contact
+                        || Self::get_base_jid(&message.recipient_id) == contact)
+            })
+            .min_by_key(|message| message.timestamp.get())
+            .map(|message| (message.id.clone(), message.timestamp.get()))
+    }
+
+    pub fn finish_older_history_load(&mut self, contact: &str, has_older: bool) {
+        if Self::get_base_jid(&self.contact) == Self::get_base_jid(contact) {
+            self.older_history_loading = false;
+            self.history_loading_frame.set(0);
+            self.has_older_history = has_older;
+        }
+    }
+
+    pub fn keep_scroll_at_top(&self) {
+        self.keep_scroll_at_top.set(true);
+    }
+
+    pub fn is_history_loading(&self) -> bool {
+        self.older_history_loading
+    }
+
+    pub fn begin_history_loading(&mut self) {
+        self.older_history_loading = true;
+        self.history_loading_frame.set(0);
+    }
+
+    pub fn finish_local_history_loading(&mut self) {
+        self.older_history_loading = false;
+        self.history_loading_frame.set(0);
+    }
+
+    pub fn advance_history_loading_animation(&self) {
+        self.history_loading_frame
+            .set((self.history_loading_frame.get() + 1) % 8);
     }
 
     pub fn update_contact_status(&mut self, contact_id: &str, status: ContactStatus) {
@@ -1275,7 +1376,7 @@ fn draw_messages(f: &mut Frame, messages: &[Message], area: Rect, ui: &ChatUI) {
 
     let wrap_width = area.width.saturating_sub(2) as usize; // Account for borders
 
-    let messages_with_status: Vec<ListItem> = messages
+    let message_lines: Vec<Line<'static>> = messages
         .iter()
         .flat_map(|m| {
             let datetime = chrono::DateTime::from_timestamp_millis(m.timestamp.get())
@@ -1345,9 +1446,9 @@ fn draw_messages(f: &mut Frame, messages: &[Message], area: Rect, ui: &ChatUI) {
 
             wrapped_lines.into_iter().map(move |line| {
                 if line.contains("http://") || line.contains("https://") {
-                    ListItem::new(Text::from(spans_for_line(&line, style)))
+                    spans_for_line(&line, style)
                 } else {
-                    ListItem::new(Text::from(line)).style(style)
+                    Line::from(line).style(style)
                 }
             })
         })
@@ -1355,32 +1456,47 @@ fn draw_messages(f: &mut Frame, messages: &[Message], area: Rect, ui: &ChatUI) {
 
     // Add connection status icon to the title
     let connection_icon = if ui.is_connected() { "🔌 " } else { "❌ " };
-    let scroll_indicator = if ui.message_scroll_offset.is_some() {
+    let scroll_indicator = if ui.message_scroll_offset.get().is_some() {
         " [scrolled - Fn+End to jump to latest]"
     } else {
         ""
     };
     let title = format!("{}Messages{}", connection_icon, scroll_indicator);
+    let loading_indicator = if ui.older_history_loading {
+        const BAR: [&str; 8] = [
+            "[>       ]",
+            "[=>      ]",
+            "[==>     ]",
+            "[===>    ]",
+            "[ ===>   ]",
+            "[  ===>  ]",
+            "[   ===> ]",
+            "[    ===>]",
+        ];
+        format!(" {} Loading history", BAR[ui.history_loading_frame.get()])
+    } else {
+        String::new()
+    };
+    let title = format!("{}{}", title, loading_indicator);
 
-    // Create a ListState to control the scroll position
-    let mut list_state = ListState::default();
+    // Scroll by rendered terminal lines, rather than message indices. This
+    // keeps long wrapped messages and short messages equally scrollable.
+    let viewport_height = chunks[0].height.saturating_sub(2) as usize;
+    let max_scroll = message_lines.len().saturating_sub(viewport_height);
+    ui.max_message_scroll.set(max_scroll);
+    let scroll_from_bottom = if ui.keep_scroll_at_top.get() {
+        ui.message_scroll_offset.set(Some(max_scroll));
+        ui.keep_scroll_at_top.set(false);
+        max_scroll
+    } else {
+        ui.message_scroll_offset.get().unwrap_or(0).min(max_scroll)
+    };
+    let scroll_from_top = max_scroll.saturating_sub(scroll_from_bottom);
 
-    // Set the selected item based on scroll offset
-    if !messages_with_status.is_empty() {
-        let last = messages_with_status.len() - 1;
-        let selected = match ui.message_scroll_offset {
-            None => last, // Auto-scroll to bottom
-            Some(lines_from_bottom) => last.saturating_sub(lines_from_bottom),
-        };
-        list_state.select(Some(selected));
-    }
-
-    let messages_list = List::new(messages_with_status)
+    let messages_widget = Paragraph::new(Text::from(message_lines))
         .block(Block::default().borders(Borders::ALL).title(title))
-        .highlight_style(Style::default()); // Use default style to make selection invisible
-
-    // Render the widget with state to allow scrolling to the selected (last) message
-    f.render_stateful_widget(messages_list, chunks[0], &mut list_state);
+        .scroll((scroll_from_top.min(u16::MAX as usize) as u16, 0));
+    f.render_widget(messages_widget, chunks[0]);
 
     // Typing indicator row (chunks[1]) ----------------------------------------
     let typing_text = {
@@ -1999,11 +2115,14 @@ fn draw_toasts(f: &mut Frame, toasts: &[Toast], area: Rect) {
 pub fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableFocusChange)?;
-    // Alternate scroll mode: the terminal converts scroll-wheel events into
-    // Up/Down arrow key sequences without consuming mouse button events, so
-    // normal text selection still works.
-    io::Write::write_all(&mut stdout, b"\x1b[?1007h")?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableFocusChange,
+        EnableMouseCapture
+    )?;
+    // Crossterm mouse capture reports trackpad scrolling as
+    // MouseEvent::ScrollUp/ScrollDown events above.
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
     Ok(terminal)
@@ -2011,11 +2130,10 @@ pub fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
 
 pub fn restore_terminal(mut terminal: Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
     disable_raw_mode()?;
-    let _ = io::Write::write_all(terminal.backend_mut(), b"\x1b[?1007l");
-    let _ = io::Write::flush(terminal.backend_mut());
     execute!(
         terminal.backend_mut(),
         DisableFocusChange,
+        DisableMouseCapture,
         LeaveAlternateScreen
     )?;
     terminal.show_cursor()?;
