@@ -441,6 +441,7 @@ impl ChatterboxClient {
                                     .await;
                             }
                         }
+                        Some(crate::models::AppEvent::Toast(_)) => {}
                         None => {
                             let _ = event_tx
                                 .send(FfiEvent::Disconnected {

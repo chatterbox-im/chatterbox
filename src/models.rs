@@ -288,11 +288,13 @@ pub enum DeliveryStatus {
 }
 
 /// Events sent from the XMPP layer to the UI event loop.
-/// Replaces the `Message`-as-RPC pattern: only `Chat` carries real messages;
-/// key-verification prompts travel as a typed variant instead of a sentinel string.
+/// Replaces the `Message`-as-RPC pattern: `Chat` carries real messages,
+/// transient UI status uses `Toast`, and key-verification prompts travel as a
+/// typed variant instead of a sentinel string.
 #[derive(Debug, Clone)]
 pub enum AppEvent {
     Chat(Message),
+    Toast(String),
     KeyVerifyRequest {
         sender: String,
         fingerprint: String,

@@ -113,6 +113,7 @@ pub struct ChatUI {
     help_dialog: Option<HelpDialog>,           // Add this field for help popup
     device_fingerprints_dialog: Option<DeviceFingerprintsDialog>, // Add this field for device fingerprints popup
     friend_request_notification: Option<FriendRequestNotification>, // Add this field for friend request notifications
+    toasts: Vec<Toast>,
     resources: HashMap<String, Vec<String>>, // Map of base JID -> resource JIDs
     connection_status: bool,                 // Track XMPP server connection status
     sidebar_hidden: bool,                    // Whether the contacts sidebar is hidden
@@ -164,6 +165,11 @@ struct FriendRequestNotification {
     timestamp: chrono::DateTime<chrono::Utc>, // When the notification was created (for auto-dismiss)
 }
 
+struct Toast {
+    message: String,
+    timestamp: chrono::DateTime<chrono::Utc>,
+}
+
 enum Tab {
     Messages,
     Contacts,
@@ -189,6 +195,7 @@ impl ChatUI {
             help_dialog: None,                       // Initialize to None
             device_fingerprints_dialog: None,        // Initialize to None
             friend_request_notification: None,       // Initialize to None
+            toasts: Vec::new(),
             resources: HashMap::new(),               // Initialize resources map
             connection_status: false,                // Initialize connection status to disconnected
             sidebar_hidden: false,                   // Sidebar visible by default
@@ -1050,6 +1057,11 @@ impl ChatUI {
             // This could spam the logs, so it's commented out, but useful for debugging
             // log::debug!("UI: No friend request notification active during this render");
         }
+
+        // Toasts are deliberately rendered as passive overlays. They do not
+        // change focus or participate in input handling, so the user can keep
+        // typing while one is visible.
+        draw_toasts(frame, &self.toasts, chunks[1]);
     }
 
     pub fn remove_last_message(&mut self) {
@@ -1179,6 +1191,25 @@ impl ChatUI {
             // debug!("UI: No friend request notification to clean");
         }
         false
+    }
+
+    pub fn show_toast(&mut self, message: impl Into<String>) {
+        self.toasts.push(Toast {
+            message: message.into(),
+            timestamp: chrono::Utc::now(),
+        });
+        // Keep a burst of background updates from covering the whole corner.
+        if self.toasts.len() > 3 {
+            self.toasts.remove(0);
+        }
+    }
+
+    pub fn clean_toasts(&mut self, timeout_secs: i64) -> bool {
+        let before = self.toasts.len();
+        let now = chrono::Utc::now();
+        self.toasts
+            .retain(|toast| (now - toast.timestamp).num_seconds() <= timeout_secs);
+        before != self.toasts.len()
     }
 
     /// Test the friend request notification UI by artificially triggering a notification
@@ -1926,6 +1957,43 @@ fn draw_friend_request_notification(
     .style(Style::default().fg(Color::Green));
 
     f.render_widget(content_list, inner_area);
+}
+
+fn draw_toasts(f: &mut Frame, toasts: &[Toast], area: Rect) {
+    if toasts.is_empty() || area.width < 12 || area.height < 5 {
+        return;
+    }
+
+    let width = 44.min(area.width.saturating_sub(2));
+    let right = area.x + area.width;
+    let mut y = area.y + 1;
+
+    // Draw newest first, stacked downward from the top-right corner.
+    for toast in toasts.iter().rev() {
+        let lines = wrap(&toast.message, Options::new(width.saturating_sub(4) as usize));
+        let height = (lines.len() as u16 + 2).min(area.height.saturating_sub(1));
+        if height < 3 || y + height > area.y + area.height {
+            break;
+        }
+
+        let toast_area = Rect::new(right - width, y, width, height);
+        let text = lines
+            .into_iter()
+            .map(|line| Line::from(line.into_owned()))
+            .collect::<Vec<_>>();
+        let widget = Paragraph::new(text)
+            .block(
+                Block::default()
+                    .title("Status")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Cyan)),
+            )
+            .style(Style::default().fg(Color::Gray));
+
+        f.render_widget(Clear, toast_area);
+        f.render_widget(widget, toast_area);
+        y += height + 1;
+    }
 }
 
 pub fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {

@@ -228,10 +228,7 @@ async fn start_initial_history_load(
                 for msg in &msgs {
                     chat_ui.add_message(msg.clone());
                 }
-                chat_ui.add_message(create_system_message(
-                    &active_contact,
-                    &format!("Loaded {} messages from local history", count),
-                ));
+                chat_ui.show_toast(format!("Loaded {} messages from local history", count));
                 s.newest_timestamp(&active_contact).ok().flatten()
             }
             Ok(_) => None,
@@ -324,10 +321,7 @@ fn load_message_history_async(
         return;
     }
 
-    chat_ui.add_message(create_system_message(
-        contact,
-        "Checking for message history in background...",
-    ));
+    chat_ui.show_toast("Checking for message history in background...");
 
     let client_clone = xmpp_client.clone();
     let contact_clone = contact.to_string();
@@ -338,10 +332,7 @@ fn load_message_history_async(
             Ok(exists) => {
                 if !exists {
                     if let Err(e) = msg_tx
-                        .send(AppEvent::Chat(create_system_message(
-                            &contact_clone,
-                            "No message history found",
-                        )))
+                        .send(AppEvent::Toast("No message history found".to_string()))
                         .await
                     {
                         error!("Failed to send 'no history' message: {}", e);
@@ -353,9 +344,9 @@ fn load_message_history_async(
             Err(e) => {
                 error!("Failed to check for message history: {}", e);
                 if let Err(send_err) = msg_tx
-                    .send(AppEvent::Chat(create_system_message(
-                        &contact_clone,
-                        &format!("History check failed: {}. Attempting full retrieval...", e),
+                    .send(AppEvent::Toast(format!(
+                        "History check failed: {}. Attempting full retrieval...",
+                        e
                     )))
                     .await
                 {
@@ -367,10 +358,7 @@ fn load_message_history_async(
 
         if has_history {
             if let Err(e) = msg_tx
-                .send(AppEvent::Chat(create_system_message(
-                    &contact_clone,
-                    "Fetching message history...",
-                )))
+                .send(AppEvent::Toast("Fetching message history...".to_string()))
                 .await
             {
                 error!("Failed to send history fetching message: {}", e);
@@ -388,19 +376,16 @@ fn load_message_history_async(
             Ok(result) => {
                 if result.messages.is_empty() {
                     if let Err(e) = msg_tx
-                        .send(AppEvent::Chat(create_system_message(
-                            &contact_clone,
-                            "No message history found",
-                        )))
+                        .send(AppEvent::Toast("No message history found".to_string()))
                         .await
                     {
                         error!("Failed to send 'no history' message: {}", e);
                     }
                 } else {
                     if let Err(e) = msg_tx
-                        .send(AppEvent::Chat(create_system_message(
-                            &contact_clone,
-                            &format!("Loaded {} historical messages", result.messages.len()),
+                        .send(AppEvent::Toast(format!(
+                            "Loaded {} historical messages",
+                            result.messages.len()
                         )))
                         .await
                     {
@@ -437,10 +422,7 @@ fn load_message_history_async(
                     contact_clone, e
                 );
                 if let Err(send_err) = msg_tx
-                    .send(AppEvent::Chat(create_system_message(
-                        &contact_clone,
-                        &format!("Failed to load message history: {}", e),
-                    )))
+                    .send(AppEvent::Toast(format!("Failed to load message history: {}", e)))
                     .await
                 {
                     error!("Failed to send history error message: {}", send_err);
@@ -471,10 +453,7 @@ fn load_message_history_with_catchup(
     let contact_clone = contact.to_string();
     let msg_tx = xmpp_client.get_message_sender();
 
-    chat_ui.add_message(create_system_message(
-        contact,
-        "Checking server for new messages...",
-    ));
+    chat_ui.show_toast("Checking server for new messages...");
 
     tokio::spawn(async move {
         let mut options = MAMQueryOptions::new()
@@ -495,19 +474,16 @@ fn load_message_history_with_catchup(
             Ok(result) => {
                 if result.messages.is_empty() {
                     if let Err(e) = msg_tx
-                        .send(AppEvent::Chat(create_system_message(
-                            &contact_clone,
-                            "No new messages on server",
-                        )))
+                        .send(AppEvent::Toast("No new messages on server".to_string()))
                         .await
                     {
                         error!("Failed to send catchup status: {}", e);
                     }
                 } else {
                     if let Err(e) = msg_tx
-                        .send(AppEvent::Chat(create_system_message(
-                            &contact_clone,
-                            &format!("Fetched {} new messages from server", result.messages.len()),
+                        .send(AppEvent::Toast(format!(
+                            "Fetched {} new messages from server",
+                            result.messages.len()
                         )))
                         .await
                     {
@@ -724,7 +700,8 @@ async fn run_main_loop(
             _ = cleanup_tick.tick() => {
                 let typing_changed = chat_ui.clean_typing_states(30);
                 let friend_request_changed = chat_ui.clean_friend_request_notifications(5);
-                render_needed |= typing_changed || friend_request_changed;
+                let toast_changed = chat_ui.clean_toasts(5);
+                render_needed |= typing_changed || friend_request_changed || toast_changed;
             }
             _ = connection_tick.tick() => {
                 let connected = xmpp_client.is_client_accessible();
@@ -750,6 +727,7 @@ async fn run_main_loop(
 
 fn process_incoming_message(chat_ui: &mut ChatUI, event: AppEvent, store: Option<&MessageStore>) {
     match event {
+        AppEvent::Toast(message) => chat_ui.show_toast(message),
         AppEvent::KeyVerifyRequest { sender, fingerprint, device_id } => {
             handle_new_omemo_key(chat_ui, &sender, &fingerprint, device_id.as_ref().map(|id| id.to_string()).as_deref());
         }
