@@ -44,6 +44,4 @@ pub enum UiCommand {
     EnableCarbons,
     /// Re-fetch OMEMO device list for the active contact.
     RefetchOmemo { contact: String },
-    /// Developer shortcut: show the friend-request notification test.
-    TestFriendRequest,
 }

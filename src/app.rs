@@ -1105,11 +1105,6 @@ async fn handle_user_command(
             handle_refetch_omemo(chat_ui, xmpp_client, &contact).await;
         }
 
-        UiCommand::TestFriendRequest => {
-            info!("Testing friend request notification UI");
-            chat_ui.test_friend_request_notification();
-        }
-
         UiCommand::ToggleOsNotifications => {
             app_settings.os_notifications_enabled = chat_ui.os_notifications_enabled();
             if let Err(e) = save_app_settings(app_settings) {

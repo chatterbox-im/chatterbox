@@ -689,8 +689,9 @@ impl ChatUI {
 
                 self.add_message(Message::system("me", status_msg));
             }
-            KeyCode::Char('p') | KeyCode::Char('P')
-                if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
+            KeyCode::Char('n') | KeyCode::Char('N')
+                if key.modifiers.contains(event::KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(event::KeyModifiers::SHIFT) =>
             {
                 self.os_notifications_enabled = !self.os_notifications_enabled;
                 let status_msg = if self.os_notifications_enabled {
@@ -748,10 +749,6 @@ impl ChatUI {
                         contact: self.contact.clone(),
                     }));
                 }
-            }
-            // Add test shortcut for friend request notifications (Ctrl+N)
-            KeyCode::Char('n') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
-                return Ok(Some(crate::commands::UiCommand::TestFriendRequest));
             }
             KeyCode::Char('s') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
                 self.sidebar_hidden = !self.sidebar_hidden;
@@ -1047,7 +1044,7 @@ impl ChatUI {
             ),
             Span::styled(omemo_status_text, omemo_status_style),
             Span::styled(
-                "] | Ctrl+P notifications [",
+                "] | Ctrl+N notifications [",
                 Style::default().fg(Color::Gray),
             ),
             Span::styled(notification_status_text, notification_status_style),
@@ -1313,23 +1310,6 @@ impl ChatUI {
         before != self.toasts.len()
     }
 
-    /// Test the friend request notification UI by artificially triggering a notification
-    ///
-    /// This is a helper method for testing the UI notification system
-    pub fn test_friend_request_notification(&mut self) {
-        // Show a test notification
-        info!("TEST: Artificially showing friend request notification for test@example.com");
-        self.show_friend_request_notification("test@example.com");
-
-        // Also add the test contact to the contacts list
-        self.add_contact("test@example.com");
-
-        // Add a system message to confirm test was triggered
-        self.add_message(Message::system(
-            "me",
-            "TEST: Friend request notification triggered manually",
-        ));
-    }
 }
 
 /// Splits a text line into ratatui spans, styling any URLs with cyan + underline
@@ -1773,7 +1753,7 @@ fn draw_help_dialog(f: &mut Frame, area: Rect) {
             "Ctrl+R",
             "Force OMEMO device list re-fetch for active contact",
         ),
-        ("Ctrl+P", "Toggle OS notifications"),
+        ("Ctrl+N", "Toggle OS notifications"),
         ("", ""),
         ("Press any key to close this dialog", ""),
     ];
