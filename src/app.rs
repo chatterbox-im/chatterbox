@@ -93,10 +93,10 @@ pub async fn run_app(
         }
     }
 
-    // Show OMEMO fingerprints for each contact as system messages
+    // Refresh OMEMO device lists without adding diagnostic data to the chat.
     show_omemo_fingerprints(&mut chat_ui, &xmpp_client).await;
 
-    // Draw UI again with contact list and fingerprints
+    // Draw UI again with the contact list
     terminal.draw(|f| chat_ui.draw(f))?;
 
     // Start message history loading in background if we have an active contact
@@ -169,33 +169,21 @@ async fn show_omemo_fingerprints(chat_ui: &mut ChatUI, xmpp_client: &XMPPClient)
                     .await
                 {
                     Ok(fingerprint) => {
-                        let msg = create_system_message(
-                            &contact,
-                            &format!(
-                                "OMEMO device {} of {} has fingerprint: {}",
-                                device_id, bare_jid, fingerprint
-                            ),
+                        debug!(
+                            "Loaded OMEMO fingerprint for {} device {}: {}",
+                            bare_jid, device_id, fingerprint
                         );
-                        chat_ui.add_message(msg);
                     }
                     Err(e) => {
-                        let msg = create_system_message(
-                            &contact,
-                            &format!(
-                                "Could not retrieve fingerprint for OMEMO device {}: {}",
-                                device_id, e
-                            ),
+                        warn!(
+                            "Could not retrieve fingerprint for OMEMO device {}: {}",
+                            device_id, e
                         );
-                        chat_ui.add_message(msg);
                     }
                 }
             }
         } else {
-            let msg = create_system_message(
-                &contact,
-                &format!("No OMEMO devices found for {}", bare_jid),
-            );
-            chat_ui.add_message(msg);
+            debug!("No OMEMO devices found for {}", bare_jid);
         }
     }
 }
