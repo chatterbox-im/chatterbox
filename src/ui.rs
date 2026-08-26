@@ -1,9 +1,6 @@
 use anyhow::Result;
 use crossterm::{
-    event::{
-        self, DisableFocusChange, DisableMouseCapture, EnableFocusChange, EnableMouseCapture,
-        Event, KeyCode, KeyEventKind, MouseEventKind,
-    },
+    event::{self, DisableFocusChange, EnableFocusChange, Event, KeyCode, KeyEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -431,18 +428,6 @@ impl ChatUI {
     ) -> Result<Option<crate::commands::UiCommand>> {
         if let Some(focused) = focus_state_from_event(&terminal_event) {
             self.terminal_focused = focused;
-            return Ok(None);
-        }
-
-        if let Event::Mouse(mouse) = terminal_event {
-            if matches!(self.active_tab, Tab::Messages) {
-                if matches!(mouse.kind, MouseEventKind::ScrollUp) {
-                    self.scroll_messages_up(3);
-                    return Ok(self.request_older_history_if_at_top());
-                } else if matches!(mouse.kind, MouseEventKind::ScrollDown) {
-                    self.scroll_messages_down(3);
-                }
-            }
             return Ok(None);
         }
 
@@ -992,10 +977,12 @@ impl ChatUI {
                 }
                 let sender_base = Self::get_base_jid(&m.sender_id);
                 let recipient_base = Self::get_base_jid(&m.recipient_id);
-                // Show messages from the active contact, or sent to the active contact, or system messages
+                // Show conversation messages, contact-specific system messages,
+                // and global system messages addressed to "me".
                 sender_base == *active_contact
                     || recipient_base == *active_contact
-                    || matches!(m.direction, chatterbox::models::Direction::System { .. })
+                    || (matches!(m.direction, chatterbox::models::Direction::System { .. })
+                        && (recipient_base == *active_contact || recipient_base == "me"))
             })
             .collect();
         let filtered_owned: Vec<Message> = filtered_messages.into_iter().cloned().collect();
@@ -2095,14 +2082,12 @@ fn draw_toasts(f: &mut Frame, toasts: &[Toast], area: Rect) {
 pub fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(
-        stdout,
-        EnterAlternateScreen,
-        EnableFocusChange,
-        EnableMouseCapture
-    )?;
-    // Crossterm mouse capture reports trackpad scrolling as
-    // MouseEvent::ScrollUp/ScrollDown events above.
+    execute!(stdout, EnterAlternateScreen, EnableFocusChange)?;
+    // Alternate scroll mode: the terminal converts scroll-wheel events into
+    // Up/Down arrow key sequences without consuming mouse button events, so
+    // normal text selection still works.
+    io::Write::write_all(&mut stdout, b"\x1b[?1007h")?;
+    io::Write::flush(&mut stdout)?;
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
     Ok(terminal)
@@ -2110,10 +2095,11 @@ pub fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
 
 pub fn restore_terminal(mut terminal: Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
     disable_raw_mode()?;
+    let _ = io::Write::write_all(terminal.backend_mut(), b"\x1b[?1007l");
+    let _ = io::Write::flush(terminal.backend_mut());
     execute!(
         terminal.backend_mut(),
         DisableFocusChange,
-        DisableMouseCapture,
         LeaveAlternateScreen
     )?;
     terminal.show_cursor()?;

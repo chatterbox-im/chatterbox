@@ -865,6 +865,21 @@ fn process_presence_event(chat_ui: &mut ChatUI, event: PresenceEvent) -> bool {
     if let Some((contact_id, status)) = event.to_contact_status() {
         let changed = chat_ui.get_contact_status(&contact_id) != status;
         chat_ui.update_contact_status(&contact_id, status);
+        if changed {
+            let bare_contact = contact_id.split('/').next().unwrap_or(&contact_id);
+            let status_message = match chat_ui.get_contact_status(&contact_id) {
+                chatterbox::models::ContactStatus::Online => {
+                    Some(format!("{} is now online", bare_contact))
+                }
+                chatterbox::models::ContactStatus::Offline => {
+                    Some(format!("{} went offline", bare_contact))
+                }
+                chatterbox::models::ContactStatus::Away => None,
+            };
+            if let Some(message) = status_message {
+                chat_ui.add_message(create_system_message(bare_contact, &message));
+            }
+        }
         changed
     } else {
         false
