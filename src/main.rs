@@ -15,6 +15,41 @@ mod sandbox;
 mod ui;
 mod utils;
 
+/// Checks whether the Linux kernel supports Landlock sandboxing.
+/// Tries multiple detection methods: sysfs, /proc/config.gz, and kernel version.
+#[cfg(target_os = "linux")]
+fn landlock_supported() -> bool {
+    // Method 1: Check /proc/sys/kernel/landlock (sysfs) — most reliable.
+    if let Ok(content) = std::fs::read_to_string("/proc/sys/kernel/landlock") {
+        if content.trim().parse::<u32>().is_ok() {
+            return true;
+        }
+    }
+
+    // Method 2: Check /proc/config.gz for CONFIG_LANDLOCK=y
+    if let Ok(content) = std::fs::read_to_string("/proc/config.gz") {
+        if content.contains("CONFIG_LANDLOCK=y") || content.contains("CONFIG_LANDLOCK=full") {
+            return true;
+        }
+    }
+
+    // Method 3: Parse kernel version from /proc/version as a fallback.
+    if let Ok(version_content) = std::fs::read_to_string("/proc/version") {
+        if let Some(pos) = version_content.find("Linux ") {
+            let kernel_str = &version_content[pos + 6..];
+            if let Some((major, minor)) = kernel_str.split_once('.') {
+                if let (Ok(major), Ok(minor)) = (major.parse::<usize>(), minor.parse::<usize>()) {
+                    if major > 5 || (major == 5 && minor >= 13) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    false
+}
+
 use crate::credentials::{load_credentials, save_credentials, Credentials};
 use chatterbox::xmpp::XMPPClient;
 
@@ -28,9 +63,15 @@ use chatterbox::xmpp::XMPPClient;
     Optional parameters:\n\
     --omemo-dir <PATH>     Override the directory for OMEMO device_id, identity_key, and multi-device info files\n\
     --disable-mam          Disable Message Archive Management (MAM) - no historical messages will be loaded\n\
+    --no-sandbox           Disable the startup filesystem sandbox (same as CHATTERBOX_NO_SANDBOX=1)\n\
     Use -h or --help to see all options."
 )]
-struct Args {
+struct Args {    #[arg(
+        long,
+        help = "Disable the startup filesystem sandbox (same as CHATTERBOX_NO_SANDBOX=1)"
+    )]
+    no_sandbox: bool,
+
     /// Directory for OMEMO device_id, identity_key, and multi-device info files
     #[arg(
         long,
@@ -102,7 +143,33 @@ fn main() -> Result<()> {
         });
         allow_dirs.sort();
         allow_dirs.dedup();
-        sandbox::install_and_reexec(&allow_dirs);
+
+        // On Linux, check if the kernel supports Landlock before attempting to sandbox.
+        // If not supported, exit with a clear message rather than failing silently.
+        let sandbox_disabled = args.no_sandbox || std::env::var_os("CHATTERBOX_NO_SANDBOX").is_some();
+
+        #[cfg(target_os = "linux")]
+        {
+            if sandbox_disabled {
+                // User explicitly disabled sandbox — skip entirely.
+                sandbox::install_and_reexec(&allow_dirs, false);
+            } else if !landlock_supported() {
+                eprintln!("chatterbox: ERROR — Linux kernel does not support Landlock sandboxing.");
+                eprintln!("  Required: CONFIG_LANDLOCK=y and kernel >= 5.13.");
+                eprintln!("  This can happen in containers (Docker, WSL) or minimal kernels.");
+                eprintln!("  Workaround: use --no-sandbox to run without filesystem isolation,");
+                eprintln!("  or set CHATTERBOX_NO_SANDBOX=1.");
+                std::process::exit(1);
+            } else {
+                // Landlock available — install sandbox.
+                sandbox::install_and_reexec(&allow_dirs, true);
+            }
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            sandbox::install_and_reexec(&allow_dirs, sandbox_disabled);
+        }
     }
 
     // Sandbox is installed (still single-threaded). Now start the async runtime

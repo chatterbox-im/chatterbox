@@ -1,10 +1,10 @@
 //! Startup filesystem sandbox (best-effort).
-//!
+
 //! Confines the process so it can only touch its own data directories, system
 //! libraries, and the network. Everything else in the user's home — documents,
 //! `~/.ssh`, other apps' data under `~/Library/Application Support` — becomes
 //! unreadable.
-//!
+
 //! Platforms:
 //! - **macOS**: a hand-written Seatbelt profile applied via `sandbox-exec`,
 //!   which re-execs the process inside a confined child (same pattern as Linux).
@@ -15,7 +15,7 @@
 //!   trust evaluation (`securityd`/`trustd`) keep working.
 //! - **Linux**: `birdcage` (Landlock + seccomp). birdcage has no in-process
 //!   lock, so we re-exec a confined copy of ourselves as the sandboxee.
-//!
+
 //! Set `CHATTERBOX_NO_SANDBOX=1` to disable (e.g. to diagnose a denial via
 //! `log show --last 2m --predicate 'sender == "Sandbox"' | grep deny`).
 
@@ -30,8 +30,8 @@ const DISABLE_VAR: &str = "CHATTERBOX_NO_SANDBOX";
 /// On macOS and Linux this re-execs a sandboxed child and, on success, exits
 /// with the child's status (so it does not return). On unsupported platforms, or
 /// on any setup failure, it warns and returns so the app still runs (fail-open).
-pub fn install_and_reexec(allow_dirs: &[PathBuf]) {
-    if std::env::var_os(DISABLE_VAR).is_some() {
+pub fn install_and_reexec(allow_dirs: &[PathBuf], disabled: bool) {
+    if disabled || std::env::var_os(DISABLE_VAR).is_some() {
         eprintln!("chatterbox: sandbox disabled via {DISABLE_VAR}");
         return;
     }
