@@ -24,6 +24,15 @@ This currently implements the following XMPP Extension Protocols:
 - OMEMO Encryption 0.3
 
 
+## Out of Scope
+
+The following features are intentionally not implemented:
+
+- XEP-0045 / XEP-0367: Multi-user chat (group chat) and OMEMO in MUC
+- XEP-0363: HTTP File Upload (file/image transfer) — text messages only
+- XEP-0077: In-band registration — an existing XMPP account is required
+
+
 ## Setup Instructions
 
 Run the following command to build the project:
