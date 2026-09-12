@@ -679,20 +679,20 @@ impl OmemoManager {
             if let crate::omemo::protocol::DoubleRatchetError::CryptoError(ref crypto_error) =
                 ratchet_error
             {
-                if let crate::omemo::crypto::CryptoError::AesGcmError(ref aes_error) = crypto_error
-                {
-                    if aes_error.contains("aead::Error") {
-                        warn!("AEAD decryption failure from {}:{} - triggering immediate session reset", sender_jid, device_id);
+                if let crate::omemo::crypto::CryptoError::AesGcmError(_) = crypto_error {
+                    warn!(
+                        "Authenticated decryption failure from {}:{} - triggering immediate session reset",
+                        sender_jid, device_id
+                    );
 
-                        if let Err(reset_err) = self
-                            .handle_aead_decryption_failure(&sender_jid, device_id)
-                            .await
-                        {
-                            error!("Failed to handle AEAD decryption failure: {}", reset_err);
-                        }
-
-                        return Err(OmemoError::SessionError(session_error));
+                    if let Err(reset_err) = self
+                        .handle_aead_decryption_failure(&sender_jid, device_id)
+                        .await
+                    {
+                        error!("Failed to handle AEAD decryption failure: {}", reset_err);
                     }
+
+                    return Err(OmemoError::SessionError(session_error));
                 }
             }
         }

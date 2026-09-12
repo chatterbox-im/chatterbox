@@ -13,6 +13,7 @@ mod tests {
 
     use crate::jid::BareJid;
     use crate::omemo::device_id::DeviceId;
+    use crate::omemo::keys::ChainKey;
 
     fn bjid(s: &str) -> BareJid { BareJid::parse(s).unwrap() }
     use crate::omemo::session::OmemoSessionState;
@@ -24,6 +25,16 @@ mod tests {
     /// Alias to ease test readability — test_support::make_manager creates a fresh dir.
     async fn create_manager(jid: &str, device_id: u32, pubsub: Arc<dyn OmemoPubSub>) -> (OmemoManager, TempDir) {
         make_manager(jid, device_id, pubsub).await
+    }
+
+    fn desynchronize_receive_chain(manager: &mut OmemoManager, jid: &str, device_id: u32) {
+        manager
+            .sessions
+            .get_mut(&(bjid(jid), DeviceId::from(device_id)))
+            .and_then(|state| state.as_session_mut())
+            .expect("active session should exist")
+            .ratchet_state
+            .receive_chain_key = ChainKey::from_slice(&[0xA5; 32]).unwrap();
     }
 
     /// Test that the first message to a new device uses PreKey format
@@ -138,13 +149,20 @@ mod tests {
 
         let (mut alice, _alice_dir) =
             create_manager(alice_jid, alice_device_id, pubsub.clone()).await;
-        let (alice_second, _alice_second_dir) =
+        let (mut alice_second, _alice_second_dir) =
             create_manager(alice_jid, alice_second_device_id, pubsub.clone()).await;
         let (bob, _bob_dir) = create_manager(bob_jid, bob_device_id, pubsub.clone()).await;
 
         pubsub.add_device_list(bob_jid, &[bob_device_id]).await;
         pubsub
             .add_bundle(bob_jid, bob_device_id, bob.key_bundle.as_ref().unwrap())
+            .await;
+        pubsub
+            .add_bundle(
+                alice_jid,
+                alice_device_id,
+                alice.key_bundle.as_ref().unwrap(),
+            )
             .await;
         pubsub
             .add_bundle(
@@ -184,6 +202,12 @@ mod tests {
             !omemo_msg.encrypted_keys.contains_key(&DeviceId::from(alice_device_id)),
             "Current sender device should not receive its own message key"
         );
+
+        let decrypted = alice_second
+            .decrypt_message(alice_jid, DeviceId::from(alice_device_id), &omemo_msg)
+            .await
+            .expect("Second owned device should decrypt the sent carbon");
+        assert_eq!(decrypted, "Hello Bob from Alice device 1");
     }
 
     /// Test full round-trip: Alice encrypts → Bob decrypts successfully.
@@ -492,11 +516,11 @@ mod tests {
         assert_eq!(dec2, "post-recovery from Alice");
     }
 
-    /// After 3 consecutive decryption failures from the same device, the session
+    /// After 3 consecutive non-authentication failures from the same device, the session
     /// must be reset: deleted from memory and storage, failure count cleared,
     /// and the device flagged for session rebuild.
     #[tokio::test]
-    async fn test_three_mac_failures_reset_session() {
+    async fn test_three_non_authentication_failures_reset_session() {
         let _ = env_logger::builder().is_test(true).try_init();
 
         let alice_jid = "alice@example.com";
@@ -535,17 +559,15 @@ mod tests {
             "session must exist before failure simulation"
         );
 
-        // Simulate 3 consecutive MAC failures by calling handle_decryption_failure
-        // directly (this is the code path triggered by every MAC failure in the wild).
+        // Simulate 3 consecutive malformed-message failures. Authentication failures
+        // take the immediate recovery path tested below.
         for _ in 0..3 {
             bob.handle_decryption_failure(
                 alice_jid.to_string(),
                 alice_device_id,
                 crate::omemo::session::SessionError::DoubleRatchetError(
-                    crate::omemo::protocol::DoubleRatchetError::CryptoError(
-                        crate::omemo::crypto::CryptoError::AesGcmError(
-                            "MAC verification failed".to_string(),
-                        ),
+                    crate::omemo::protocol::DoubleRatchetError::InvalidMessageFormatError(
+                        "malformed signal message".to_string(),
                     ),
                 ),
             )
@@ -606,21 +628,22 @@ mod tests {
             .await
             .unwrap();
 
-        // Simulate an AEAD failure: this is the path triggered by
-        // "aead::Error" in the error string.
-        bob.handle_decryption_failure(
-            alice_jid.to_string(),
-            alice_device_id,
-            crate::omemo::session::SessionError::DoubleRatchetError(
-                crate::omemo::protocol::DoubleRatchetError::CryptoError(
-                    crate::omemo::crypto::CryptoError::AesGcmError(
-                        "aead::Error".to_string(), // triggers handle_aead_decryption_failure
-                    ),
-                ),
-            ),
-        )
-        .await
-        .ok();
+        let failing_message = alice.encrypt_message(bob_jid, "will fail").await.unwrap();
+        desynchronize_receive_chain(&mut bob, alice_jid, alice_device_id);
+
+        let error = bob
+            .decrypt_message(
+                alice_jid,
+                DeviceId::from(alice_device_id),
+                &failing_message,
+            )
+            .await
+            .expect_err("desynchronized receive chain must fail authentication");
+        assert!(
+            error.to_string().contains("MAC verification failed"),
+            "expected the production MAC failure, got: {}",
+            error
+        );
 
         // After an AEAD failure the session must be in RecoveryPreKeySent, NOT absent.
         assert!(
@@ -735,18 +758,18 @@ mod tests {
             .await
             .unwrap();
 
-        // Trigger an AEAD failure — Bob's session is wiped and RecoveryPreKeySent is set
-        bob.handle_decryption_failure(
-            alice_jid.to_string(),
-            alice_device_id,
-            crate::omemo::session::SessionError::DoubleRatchetError(
-                crate::omemo::protocol::DoubleRatchetError::CryptoError(
-                    crate::omemo::crypto::CryptoError::AesGcmError("aead::Error".to_string()),
-                ),
-            ),
-        )
-        .await
-        .ok();
+        // Desynchronize Bob's receiving chain and exercise the production decrypt path.
+        let failing_message = alice.encrypt_message(bob_jid, "will fail").await.unwrap();
+        desynchronize_receive_chain(&mut bob, alice_jid, alice_device_id);
+        let error = bob
+            .decrypt_message(
+                alice_jid,
+                DeviceId::from(alice_device_id),
+                &failing_message,
+            )
+            .await
+            .expect_err("desynchronized receive chain must fail authentication");
+        assert!(error.to_string().contains("MAC verification failed"));
 
         assert!(
             matches!(
