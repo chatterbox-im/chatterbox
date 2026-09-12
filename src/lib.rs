@@ -1,3 +1,11 @@
+// Enforce zero hand-written unsafe. When the `ffi` feature is on, uniffi's
+// proc macros expand `unsafe extern "C"` scaffolding into this crate, but
+// rustc does not apply local lint levels inside external proc-macro
+// expansions, so no allow is needed: forbid/deny governs all hand-written
+// code in every configuration.
+#![cfg_attr(not(feature = "ffi"), forbid(unsafe_code))]
+#![cfg_attr(feature = "ffi", deny(unsafe_code))]
+
 // Re-export needed modules for testing
 pub mod jid;
 pub mod models;

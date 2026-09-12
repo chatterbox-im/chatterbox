@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 // Interoperability Requirements Tests
 //
 // Verifies the 7 requirements from INTEROPERABILITY.md that a client must

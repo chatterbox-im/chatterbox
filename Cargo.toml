@@ -41,6 +41,7 @@ dirs = "5.0"
 base64 = "0.21"
 rand = "0.8.5"
 lazy_static = "1.4.0"
+rustix = { version = "0.38", features = ["fs"] }
 # OMEMO-related dependencies
 x25519-dalek = { version = "2.0.0", features = ["static_secrets"] }          # For Diffie-Hellman key exchange
 curve25519-dalek = { version = "4", features = ["digest"] }  # For XEdDSA (Montgomery<->Edwards conversion)

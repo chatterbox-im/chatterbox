@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! In-process XMPP server for integration tests.
 //!
 //! `FakeServer` provides a full XMPP session environment with no network I/O.

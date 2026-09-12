@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! Tier-3 integration tests: two in-process clients + FakeServer.
 //!
 //! These tests cover full client lifecycles without a real XMPP server.

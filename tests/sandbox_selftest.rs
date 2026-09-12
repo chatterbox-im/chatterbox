@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! Verifies the startup sandbox actually denies reads outside its allow-list.
 //!
 //! The sandbox is process-global and irreversible, so it can't be exercised

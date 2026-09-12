@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! E2E bidirectional OMEMO test against a real XMPP server.
 //!
 //! Marked `#[ignore]` so it only runs when explicitly requested:

@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 // Shared utilities for live-server diagnostic scripts (examples/smoke_*.rs).
 
 use std::fs::File;
