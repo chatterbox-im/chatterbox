@@ -7,21 +7,30 @@ implementing XMPP and OMEMO. It is proudly made with Rust.
 
 ## Project Stats
 
-- Total lines of Rust code: 31970 lines
+- Total lines of Rust code: 32199 lines
   - OMEMO implementation: 15589 lines
   - XMPP integration: 9788 lines
-  - UI and app logic: 6593 lines
-  - Unsafe Rust: 0 lines
+  - UI and app logic: 6822 lines
+  - Unsafe Rust: 5 lines
 
 ## Implemented XEPs
 
 This currently implements the following XMPP Extension Protocols:
 
-- XEP-0184: Message Delivery Receipts (delivery status tracking)
-- XEP-0313: Message Archive Management (message history)
+- XEP-0030: Service Discovery (feature and identity discovery)
 - XEP-0085: Chat State Notifications (typing indicators)
+- XEP-0115: Entity Capabilities (compact feature advertisement)
+- XEP-0184: Message Delivery Receipts (delivery status tracking)
+- XEP-0198: Stream Management (resumable connections / reconnection)
 - XEP-0280: Message Carbons (sync messages across devices)
-- OMEMO Encryption 0.3
+- XEP-0313: Message Archive Management (message history)
+- XEP-0319: Last User Interaction in Presence (idle timestamps)
+- XEP-0334: Message Processing Hints (store / no-store hints)
+- XEP-0359: Unique and Stable Stanza IDs (sender-authored origin-id)
+- XEP-0380: Explicit Message Encryption (EME indicator on encrypted messages)
+- XEP-0384: OMEMO Encryption (end-to-end encryption)
+
+The implementation also relies on two standard building blocks: XEP-0202 (Delayed Delivery) and XEP-0297 (Message Forwarding, used by Message Carbons).
 
 
 ## Out of Scope
