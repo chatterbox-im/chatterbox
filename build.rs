@@ -41,7 +41,13 @@ fn count_unsafe_lines() -> u32 {
                     walk(&path)
                 } else if path.extension().and_then(|x| x.to_str()) == Some("rs") {
                     std::fs::read_to_string(&path)
-                        .map(|s| s.lines().filter(|l| l.contains("unsafe")).count() as u32)
+                        .map(|s| {
+                            s.lines()
+                                .filter(|l| {
+                                    l.contains("unsafe") && !l.contains("forbid(unsafe_code)")
+                                })
+                                .count() as u32
+                        })
                         .unwrap_or(0)
                 } else {
                     0
