@@ -554,8 +554,11 @@ impl OmemoManager {
                             .max()
                             .unwrap_or(0)
                             .max(opk_id);
-                        let to_generate =
-                            self.prekey_rotation_config.min_one_time_prekeys - remaining;
+                        let target = self
+                            .prekey_rotation_config
+                            .target_one_time_prekeys
+                            .max(self.prekey_rotation_config.min_one_time_prekeys);
+                        let to_generate = target.saturating_sub(remaining);
                         for i in 1..=to_generate {
                             if let Ok(key_pair) = protocol::X3DHProtocol::generate_key_pair() {
                                 bundle.one_time_pre_key_pairs.insert(max_id + i, key_pair);

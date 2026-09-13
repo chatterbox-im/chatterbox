@@ -9,6 +9,49 @@ mod tests {
 
     fn bjid(s: &str) -> BareJid { BareJid::parse(s).unwrap() }
 
+    #[tokio::test]
+    async fn fresh_bundle_contains_target_opk_count() {
+        let ps = RecordingPubSub::new();
+        let (mgr, _d) = make_manager("alice@example.com", 100, ps).await;
+
+        assert_eq!(
+            mgr.key_bundle
+                .as_ref()
+                .unwrap()
+                .one_time_pre_key_pairs
+                .len(),
+            crate::omemo::OPK_TARGET_COUNT as usize
+        );
+    }
+
+    #[tokio::test]
+    async fn low_opk_pool_refills_to_target() {
+        let ps = RecordingPubSub::new();
+        let (mut mgr, _d) = make_manager("alice@example.com", 101, ps).await;
+        let bundle = mgr.key_bundle.as_mut().unwrap();
+        bundle
+            .one_time_pre_key_pairs
+            .retain(|id, _| (77..=100).contains(id));
+        let retained_ids: std::collections::HashSet<u32> =
+            bundle.one_time_pre_key_pairs.keys().copied().collect();
+
+        mgr.prekey_rotation_config.check_interval = 0;
+        mgr.prekey_rotation_config.last_rotation = 0;
+        mgr.check_and_rotate_prekeys().await.unwrap();
+
+        let replenished = &mgr.key_bundle.as_ref().unwrap().one_time_pre_key_pairs;
+        assert_eq!(
+            replenished.len(),
+            crate::omemo::OPK_TARGET_COUNT as usize
+        );
+        assert!(retained_ids.iter().all(|id| replenished.contains_key(id)));
+        assert_eq!(
+            replenished.keys().copied().max(),
+            Some(176),
+            "new OPK IDs must continue above the active maximum"
+        );
+    }
+
     // ── SPK rotation ──────────────────────────────────────────────────────────
 
     #[tokio::test]

@@ -7,14 +7,42 @@
 
 #[cfg(test)]
 mod tests {
+    use rand::{rngs::StdRng, SeedableRng};
+
     use crate::jid::BareJid;
     use crate::omemo::device_id::DeviceId;
+    use crate::omemo::encrypt::select_random_prekey;
+    use crate::omemo::protocol::PreKeyBundle;
     use crate::omemo::session::OmemoSessionState;
     use crate::omemo::storage::TrustLevel;
     use crate::omemo::OmemoError;
     use crate::omemo::test_support::{RecordingPubSub, make_manager, make_pair};
 
     fn bjid(s: &str) -> BareJid { BareJid::parse(s).unwrap() }
+
+    #[test]
+    fn random_prekey_selection_is_not_fixed_to_first_entry() {
+        let prekeys: Vec<PreKeyBundle> = (1u32..=8)
+            .map(|id| PreKeyBundle {
+                id,
+                public_key: vec![id as u8; 32],
+            })
+            .collect();
+        let mut rng = StdRng::seed_from_u64(0xC0FFEE);
+        let mut selected_ids = std::collections::HashSet::new();
+
+        for _ in 0..64 {
+            let selected = select_random_prekey(&prekeys, &mut rng).unwrap();
+            assert_eq!(selected.public_key, vec![selected.id as u8; 32]);
+            selected_ids.insert(selected.id);
+        }
+
+        assert!(
+            selected_ids.len() > 1,
+            "selection must not always use the first published OPK"
+        );
+        assert!(select_random_prekey(&[], &mut rng).is_none());
+    }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 

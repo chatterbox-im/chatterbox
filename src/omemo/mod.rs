@@ -49,6 +49,9 @@ mod security_tests;
 pub(crate) mod test_support;
 pub mod wire;
 
+pub(crate) const OPK_MIN_COUNT: u32 = 25;
+pub(crate) const OPK_TARGET_COUNT: u32 = 100;
+
 /// The OMEMO namespace used in XMPP stanzas
 pub const OMEMO_NAMESPACE: &str = "eu.siacs.conversations.axolotl";
 
@@ -196,6 +199,9 @@ pub struct PreKeyRotationConfig {
     /// Number of one-time PreKeys to maintain
     pub min_one_time_prekeys: u32,
 
+    /// Number of one-time PreKeys to generate when replenishing
+    pub target_one_time_prekeys: u32,
+
     /// How often to check for PreKey rotation (in seconds)
     pub check_interval: u64,
 
@@ -207,7 +213,8 @@ impl Default for PreKeyRotationConfig {
     fn default() -> Self {
         Self {
             max_signed_prekey_age: 7 * 24 * 60 * 60, // 7 days
-            min_one_time_prekeys: 20,
+            min_one_time_prekeys: OPK_MIN_COUNT,
+            target_one_time_prekeys: OPK_TARGET_COUNT,
             check_interval: 24 * 60 * 60, // 1 day
             last_rotation: 0,
         }

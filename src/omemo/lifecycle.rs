@@ -81,7 +81,10 @@ impl OmemoManager {
         .map_err(|e| OmemoError::ProtocolError(format!("Failed to sign prekey: {}", e)))?;
 
         let mut one_time_pre_key_pairs = std::collections::HashMap::new();
-        let num_prekeys = 20;
+        let num_prekeys = self
+            .prekey_rotation_config
+            .target_one_time_prekeys
+            .max(self.prekey_rotation_config.min_one_time_prekeys);
 
         for i in 1..=num_prekeys {
             let pair = protocol::X3DHProtocol::generate_key_pair().map_err(|e| {
@@ -507,8 +510,11 @@ impl OmemoManager {
 
         if remaining_one_time_prekeys < self.prekey_rotation_config.min_one_time_prekeys {
             info!("Generating additional one-time PreKeys");
-            let to_generate =
-                self.prekey_rotation_config.min_one_time_prekeys - remaining_one_time_prekeys;
+            let target = self
+                .prekey_rotation_config
+                .target_one_time_prekeys
+                .max(self.prekey_rotation_config.min_one_time_prekeys);
+            let to_generate = target.saturating_sub(remaining_one_time_prekeys);
 
             let mut max_id = 0;
             for id in one_time_pre_key_pairs.keys() {

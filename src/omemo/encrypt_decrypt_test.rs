@@ -61,7 +61,8 @@ mod tests {
 
         // Record Bob's key IDs for later assertion
         let bob_signed_pre_key_id = bob_bundle.signed_pre_key_id;
-        let bob_one_time_pre_key_id = bob_bundle.one_time_pre_key_pairs.keys().next().copied();
+        let bob_one_time_pre_key_ids: std::collections::HashSet<u32> =
+            bob_bundle.one_time_pre_key_pairs.keys().copied().collect();
 
         // Configure mock: Bob has one device, and his bundle is available
         pubsub.add_device_list(bob_jid, &[bob_device_id]).await;
@@ -110,8 +111,11 @@ mod tests {
 
         // Verify: pre_key_id is BOB's (recipient's) one-time pre-key ID
         assert_eq!(
-            prekey_msg.pre_key_id, bob_one_time_pre_key_id,
-            "pre_key_id should be recipient's one-time pre-key ID"
+            prekey_msg
+                .pre_key_id
+                .map(|id| bob_one_time_pre_key_ids.contains(&id)),
+            Some(true),
+            "pre_key_id should be one of the recipient's published one-time pre-key IDs"
         );
 
         // Verify: identity_key is Alice's (sender's) public identity key
@@ -131,6 +135,97 @@ mod tests {
             !prekey_msg.base_key.is_empty(),
             "base_key (ephemeral) should be non-empty"
         );
+    }
+
+    #[tokio::test]
+    async fn concurrent_initiators_with_distinct_opks_both_establish_sessions() {
+        let alice_jid = "alice@example.com";
+        let bob_jid = "bob@example.com";
+        let alice_device_1 = 1051;
+        let alice_device_2 = 1052;
+        let bob_device = 2051;
+        let pubsub = RecordingPubSub::new();
+
+        let (mut alice1, _alice1_dir) =
+            create_manager(alice_jid, alice_device_1, pubsub.clone()).await;
+        let (mut alice2, _alice2_dir) =
+            create_manager(alice_jid, alice_device_2, pubsub.clone()).await;
+        let (mut bob, _bob_dir) =
+            create_manager(bob_jid, bob_device, pubsub.clone()).await;
+
+        pubsub.add_device_list(alice_jid, &[]).await;
+        pubsub.add_device_list(bob_jid, &[bob_device]).await;
+        pubsub
+            .add_bundle(
+                alice_jid,
+                alice_device_1,
+                alice1.key_bundle.as_ref().unwrap(),
+            )
+            .await;
+        pubsub
+            .add_bundle(
+                alice_jid,
+                alice_device_2,
+                alice2.key_bundle.as_ref().unwrap(),
+            )
+            .await;
+
+        let mut opk_ids: Vec<u32> = bob
+            .key_bundle
+            .as_ref()
+            .unwrap()
+            .one_time_pre_key_pairs
+            .keys()
+            .copied()
+            .collect();
+        opk_ids.sort_unstable();
+        let first_opk = opk_ids[0];
+        let second_opk = opk_ids[1];
+
+        let mut first_snapshot = bob.key_bundle.as_ref().unwrap().clone();
+        first_snapshot
+            .one_time_pre_key_pairs
+            .retain(|id, _| *id == first_opk);
+        pubsub
+            .add_bundle(bob_jid, bob_device, &first_snapshot)
+            .await;
+        let first = alice1.encrypt_message(bob_jid, "first device").await.unwrap();
+
+        let mut second_snapshot = bob.key_bundle.as_ref().unwrap().clone();
+        second_snapshot
+            .one_time_pre_key_pairs
+            .retain(|id, _| *id == second_opk);
+        pubsub
+            .add_bundle(bob_jid, bob_device, &second_snapshot)
+            .await;
+        let second = alice2.encrypt_message(bob_jid, "second device").await.unwrap();
+
+        assert_eq!(
+            bob.decrypt_message(alice_jid, DeviceId::from(alice_device_1), &first)
+                .await
+                .unwrap(),
+            "first device"
+        );
+        assert_eq!(
+            bob.decrypt_message(alice_jid, DeviceId::from(alice_device_2), &second)
+                .await
+                .unwrap(),
+            "second device"
+        );
+
+        let remaining = &bob
+            .key_bundle
+            .as_ref()
+            .unwrap()
+            .one_time_pre_key_pairs;
+        assert!(!remaining.contains_key(&first_opk));
+        assert!(!remaining.contains_key(&second_opk));
+        assert!(bob
+            .sessions
+            .contains_key(&(bjid(alice_jid), DeviceId::from(alice_device_1))));
+        assert!(bob
+            .sessions
+            .contains_key(&(bjid(alice_jid), DeviceId::from(alice_device_2))));
     }
 
     /// Test that sent messages remain decryptable by another owned device when
@@ -513,8 +608,9 @@ mod tests {
             create_manager(alice_jid, alice_device_id, pubsub.clone()).await;
         let (mut bob, _bob_dir) = create_manager(bob_jid, bob_device_id, pubsub.clone()).await;
 
-        // Serve both bundles; RecordingPubSub holds the snapshot and won't remove
-        // OPKs when Bob consumes them.
+        let mut stale_bob_bundle = bob.key_bundle.as_ref().unwrap().clone();
+
+        // Serve both bundles.
         pubsub.add_device_list(bob_jid, &[bob_device_id]).await;
         pubsub.add_device_list(alice_jid, &[alice_device_id]).await;
         pubsub
@@ -533,9 +629,25 @@ mod tests {
             .encrypt_message(bob_jid, "first message")
             .await
             .expect("first encryption should succeed");
+        let consumed_opk = PreKeySignalMessage::deserialize(
+            msg1.encrypted_keys
+                .get(&DeviceId::from(bob_device_id))
+                .unwrap(),
+        )
+        .and_then(|message| message.pre_key_id)
+        .expect("first message should reference an OPK");
         bob.decrypt_message(alice_jid, DeviceId::from(alice_device_id), &msg1)
             .await
             .expect("first decryption should succeed");
+
+        // Re-publish the stale snapshot with only the consumed key so the
+        // second initiator selection is deterministic under random selection.
+        stale_bob_bundle
+            .one_time_pre_key_pairs
+            .retain(|id, _| *id == consumed_opk);
+        pubsub
+            .add_bundle(bob_jid, bob_device_id, &stale_bob_bundle)
+            .await;
 
         // The OPK Bob used is now consumed.  Force Alice to rebuild her session
         // (simulating a fresh connect where she has a stale cached bundle) so
@@ -622,6 +734,7 @@ mod tests {
         let (mut alice, _alice_dir) =
             create_manager(alice_jid, alice_device_id, pubsub.clone()).await;
         let (mut bob, _bob_dir) = create_manager(bob_jid, bob_device_id, pubsub.clone()).await;
+        let mut stale_bob_bundle = bob.key_bundle.as_ref().unwrap().clone();
 
         pubsub.add_device_list(bob_jid, &[bob_device_id]).await;
         pubsub.add_device_list(alice_jid, &[alice_device_id]).await;
@@ -641,9 +754,23 @@ mod tests {
             .encrypt_message(bob_jid, "initial message")
             .await
             .unwrap();
+        let consumed_opk = PreKeySignalMessage::deserialize(
+            msg1.encrypted_keys
+                .get(&DeviceId::from(bob_device_id))
+                .unwrap(),
+        )
+        .and_then(|message| message.pre_key_id)
+        .expect("initial message should reference an OPK");
         bob.decrypt_message(alice_jid, DeviceId::from(alice_device_id), &msg1)
             .await
             .unwrap();
+
+        stale_bob_bundle
+            .one_time_pre_key_pairs
+            .retain(|id, _| *id == consumed_opk);
+        pubsub
+            .add_bundle(bob_jid, bob_device_id, &stale_bob_bundle)
+            .await;
 
         // Force Alice to rebuild (stale cached bundle scenario).
         alice.sessions.insert(
