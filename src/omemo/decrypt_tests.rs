@@ -107,7 +107,7 @@ mod tests {
         let msg = alice.encrypt_message(bob_jid, "stale").await.unwrap();
 
         // Bob rotates the SPK past history depth so the message can no longer decrypt.
-        bob.prekey_rotation_config.check_interval = 0;
+        bob.prekey_rotation_config.max_signed_prekey_age = 0;
         for _ in 0..8 {
             bob.prekey_rotation_config.last_rotation = 0;
             bob.check_and_rotate_prekeys().await.unwrap();
@@ -123,4 +123,3 @@ mod tests {
         );
     }
 }
-

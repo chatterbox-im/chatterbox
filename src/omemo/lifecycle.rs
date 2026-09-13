@@ -473,16 +473,6 @@ impl OmemoManager {
         debug!("Checking if PreKeys need rotation");
 
         let now = self.now_secs();
-
-        if now.saturating_sub(self.prekey_rotation_config.last_rotation)
-            < self.prekey_rotation_config.check_interval
-        {
-            debug!("Not time to rotate PreKeys yet");
-            return Ok(false);
-        }
-
-        info!("Performing PreKey rotation");
-
         let current_bundle = match &self.key_bundle {
             Some(bundle) => bundle.clone(),
             None => {
@@ -492,23 +482,68 @@ impl OmemoManager {
             }
         };
 
-        info!("Generating new signed PreKey");
-        let signed_pre_key_pair = X3DHProtocol::generate_key_pair().map_err(|e| {
-            OmemoError::ProtocolError(format!("Failed to generate signed PreKey: {}", e))
-        })?;
-
-        let signed_pre_key_id = current_bundle.signed_pre_key_id + 1;
-
-        let signed_pre_key_signature = X3DHProtocol::sign_pre_key(
-            current_bundle.identity_key_pair.private_key.expose_secret(),
-            signed_pre_key_pair.public_key.as_ref(),
-        )
-        .map_err(|e| OmemoError::ProtocolError(format!("Failed to sign PreKey: {}", e)))?;
-
         let remaining_one_time_prekeys = current_bundle.one_time_pre_key_pairs.len() as u32;
+        let rotate_signed_prekey = now
+            .saturating_sub(self.prekey_rotation_config.last_rotation)
+            >= self.prekey_rotation_config.max_signed_prekey_age;
+        let replenish_one_time_prekeys =
+            remaining_one_time_prekeys < self.prekey_rotation_config.min_one_time_prekeys;
+
+        if !rotate_signed_prekey && !replenish_one_time_prekeys {
+            debug!("No PreKey rotation or replenishment needed");
+            return Ok(false);
+        }
+
+        let (
+            signed_pre_key_id,
+            signed_pre_key_pair,
+            signed_pre_key_signature,
+            signed_pre_key_history,
+        ) = if rotate_signed_prekey {
+            info!("Generating new signed PreKey");
+            let signed_pre_key_pair = X3DHProtocol::generate_key_pair().map_err(|e| {
+                OmemoError::ProtocolError(format!("Failed to generate signed PreKey: {}", e))
+            })?;
+            let signed_pre_key_signature = X3DHProtocol::sign_pre_key(
+                current_bundle.identity_key_pair.private_key.expose_secret(),
+                signed_pre_key_pair.public_key.as_ref(),
+            )
+            .map_err(|e| OmemoError::ProtocolError(format!("Failed to sign PreKey: {}", e)))?;
+
+            // Retain recent SPKs so in-flight PreKey messages can still establish
+            // sessions after a rotation.
+            const SPK_HISTORY_DEPTH: usize = 5;
+            let mut history = current_bundle.signed_pre_key_history.clone();
+            history.insert(
+                current_bundle.signed_pre_key_id,
+                current_bundle.signed_pre_key_pair.clone(),
+            );
+            if history.len() > SPK_HISTORY_DEPTH {
+                let mut ids: Vec<u32> = history.keys().copied().collect();
+                ids.sort_unstable();
+                for old_id in ids.iter().take(ids.len() - SPK_HISTORY_DEPTH) {
+                    history.remove(old_id);
+                }
+            }
+
+            (
+                current_bundle.signed_pre_key_id + 1,
+                signed_pre_key_pair,
+                signed_pre_key_signature,
+                history,
+            )
+        } else {
+            (
+                current_bundle.signed_pre_key_id,
+                current_bundle.signed_pre_key_pair.clone(),
+                current_bundle.signed_pre_key_signature.clone(),
+                current_bundle.signed_pre_key_history.clone(),
+            )
+        };
+
         let mut one_time_pre_key_pairs = current_bundle.one_time_pre_key_pairs.clone();
 
-        if remaining_one_time_prekeys < self.prekey_rotation_config.min_one_time_prekeys {
+        if replenish_one_time_prekeys {
             info!("Generating additional one-time PreKeys");
             let target = self
                 .prekey_rotation_config
@@ -538,25 +573,7 @@ impl OmemoManager {
             signed_pre_key_pair,
             signed_pre_key_signature,
             one_time_pre_key_pairs,
-            signed_pre_key_history: {
-                // Move the outgoing SPK into history so peers that built a
-                // PreKeySignalMessage against it before the rotation can still
-                // establish a session.  Trim to the last SPK_HISTORY_DEPTH entries.
-                const SPK_HISTORY_DEPTH: usize = 5;
-                let mut history = current_bundle.signed_pre_key_history.clone();
-                history.insert(
-                    current_bundle.signed_pre_key_id,
-                    current_bundle.signed_pre_key_pair.clone(),
-                );
-                if history.len() > SPK_HISTORY_DEPTH {
-                    let mut ids: Vec<u32> = history.keys().copied().collect();
-                    ids.sort_unstable();
-                    for old_id in ids.iter().take(ids.len() - SPK_HISTORY_DEPTH) {
-                        history.remove(old_id);
-                    }
-                }
-                history
-            },
+            signed_pre_key_history,
         };
 
         let storage_guard = self.storage.lock().await;
@@ -566,16 +583,18 @@ impl OmemoManager {
         drop(storage_guard);
 
         self.key_bundle = Some(new_bundle);
-        self.prekey_rotation_config.last_rotation = now;
 
-        let storage_guard = self.storage.lock().await;
-        storage_guard
-            .store_prekey_rotation_time(now as i64)
-            .map_err(|e| {
-                OmemoError::StorageError(format!("Failed to store rotation time: {}", e))
-            })?;
+        if rotate_signed_prekey {
+            self.prekey_rotation_config.last_rotation = now;
+            let storage_guard = self.storage.lock().await;
+            storage_guard
+                .store_prekey_rotation_time(now as i64)
+                .map_err(|e| {
+                    OmemoError::StorageError(format!("Failed to store rotation time: {}", e))
+                })?;
+        }
 
-        info!("PreKey rotation completed successfully");
+        info!("PreKey maintenance completed successfully");
         Ok(true)
     }
 
@@ -755,33 +774,47 @@ impl OmemoManager {
         Ok(())
     }
 
-    /// Ensure that our device bundle is published to the server
+    /// Publish our current device bundle to the server.
+    ///
+    /// The persisted publication marker only records that this device has
+    /// published at least once; it does not prove that the server has the
+    /// latest locally rotated signed prekey or OPK set. Republish on startup so
+    /// peers cannot build sessions from an obsolete server-side bundle.
     pub async fn ensure_bundle_published(&self) -> Result<()> {
         debug!("Ensuring bundle is published for device {}", self.device_id);
-        let storage = self.storage.lock().await;
-        let has_published = storage.is_bundle_published(self.device_id)?;
-        if !has_published {
-            info!("Bundle not yet published for device {}, publishing now", self.device_id);
-            let bundle = match self.generate_bundle().await {
-                Ok(bundle) => bundle,
-                Err(e) => {
-                    error!("Failed to generate bundle: {}", e);
-                    return Err(anyhow!("Failed to generate bundle: {}", e));
-                }
-            };
-            match self.bundle_to_xml(&bundle) {
-                Ok(xml) => info!("[DEBUG] Bundle XML to be published: {}", xml),
-                Err(e) => error!("[DEBUG] Failed to convert bundle to XML: {}", e),
-            }
-            if let Err(e) = self.publish_bundle(bundle).await {
-                error!("Failed to publish bundle: {}", e);
-                return Err(anyhow!("Failed to publish bundle: {}", e));
-            }
-            if let Err(e) = storage.mark_bundle_published(self.device_id).await {
-                warn!("Failed to mark bundle as published: {}", e);
-            }
+        let has_published = self
+            .storage
+            .lock()
+            .await
+            .is_bundle_published(self.device_id)?;
+        if has_published {
+            debug!(
+                "Bundle was published previously for device {}; refreshing server copy",
+                self.device_id
+            );
         } else {
-            debug!("Bundle already published for device {}, skipping", self.device_id);
+            info!(
+                "Bundle not yet published for device {}, publishing now",
+                self.device_id
+            );
+        }
+
+        let bundle = self.generate_bundle().await.map_err(|e| {
+            error!("Failed to generate bundle: {}", e);
+            anyhow!("Failed to generate bundle: {}", e)
+        })?;
+        if let Err(e) = self.publish_bundle(bundle).await {
+            error!("Failed to publish bundle: {}", e);
+            return Err(anyhow!("Failed to publish bundle: {}", e));
+        }
+        if let Err(e) = self
+            .storage
+            .lock()
+            .await
+            .mark_bundle_published(self.device_id)
+            .await
+        {
+            warn!("Failed to mark bundle as published: {}", e);
         }
         Ok(())
     }

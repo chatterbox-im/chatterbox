@@ -34,9 +34,9 @@ mod tests {
             .retain(|id, _| (77..=100).contains(id));
         let retained_ids: std::collections::HashSet<u32> =
             bundle.one_time_pre_key_pairs.keys().copied().collect();
+        let signed_prekey_id = bundle.signed_pre_key_id;
 
-        mgr.prekey_rotation_config.check_interval = 0;
-        mgr.prekey_rotation_config.last_rotation = 0;
+        mgr.prekey_rotation_config.last_rotation = mgr.now_secs();
         mgr.check_and_rotate_prekeys().await.unwrap();
 
         let replenished = &mgr.key_bundle.as_ref().unwrap().one_time_pre_key_pairs;
@@ -50,6 +50,11 @@ mod tests {
             Some(176),
             "new OPK IDs must continue above the active maximum"
         );
+        assert_eq!(
+            mgr.key_bundle.as_ref().unwrap().signed_pre_key_id,
+            signed_prekey_id,
+            "refilling OPKs must not rotate a signed prekey before its maximum age"
+        );
     }
 
     // ── SPK rotation ──────────────────────────────────────────────────────────
@@ -58,7 +63,7 @@ mod tests {
     async fn rotation_advances_spk_id_and_stores_old_key_in_history() {
         let ps = RecordingPubSub::new();
         let (mut mgr, _d) = make_manager("alice@example.com", 1, ps).await;
-        mgr.prekey_rotation_config.check_interval = 0;
+        mgr.prekey_rotation_config.max_signed_prekey_age = 0;
         mgr.prekey_rotation_config.last_rotation  = 0;
 
         let before = mgr.key_bundle.clone().unwrap();
@@ -94,7 +99,7 @@ mod tests {
     async fn history_trims_to_depth_5_keeping_newest() {
         let ps = RecordingPubSub::new();
         let (mut mgr, _d) = make_manager("alice@example.com", 2, ps).await;
-        mgr.prekey_rotation_config.check_interval = 0;
+        mgr.prekey_rotation_config.max_signed_prekey_age = 0;
 
         let mut ids = Vec::new();
         for _ in 0..8 {
@@ -114,14 +119,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_rotation_when_interval_not_reached() {
+    async fn no_rotation_before_signed_prekey_reaches_max_age() {
         let ps = RecordingPubSub::new();
         let (mut mgr, _d) = make_manager("alice@example.com", 3, ps).await;
-        mgr.prekey_rotation_config.check_interval = 86_400;
+        mgr.prekey_rotation_config.check_interval = 0;
+        mgr.prekey_rotation_config.max_signed_prekey_age = 7 * 86_400;
         mgr.prekey_rotation_config.last_rotation  = mgr.now_secs(); // just rotated
 
         let rotated = mgr.check_and_rotate_prekeys().await.unwrap();
-        assert!(!rotated, "rotation must be skipped when interval not reached");
+        assert!(
+            !rotated,
+            "elapsed check interval must not rotate an SPK before its maximum age"
+        );
     }
 
     /// Future last_rotation (e.g. NTP step or restored backup) must not panic.
@@ -130,7 +139,7 @@ mod tests {
     async fn rotation_survives_last_rotation_in_the_future() {
         let ps = RecordingPubSub::new();
         let (mut mgr, _d) = make_manager("alice@example.com", 4, ps).await;
-        mgr.prekey_rotation_config.check_interval = 86_400;
+        mgr.prekey_rotation_config.max_signed_prekey_age = 86_400;
         mgr.prekey_rotation_config.last_rotation  = mgr.now_secs() + 86_400;
 
         let r = mgr.check_and_rotate_prekeys().await;
@@ -148,7 +157,7 @@ mod tests {
         let msg = alice.encrypt_message(bob_jid, "in flight").await.unwrap();
 
         // Bob rotates before the message lands.
-        bob.prekey_rotation_config.check_interval = 0;
+        bob.prekey_rotation_config.max_signed_prekey_age = 0;
         bob.prekey_rotation_config.last_rotation  = 0;
         bob.check_and_rotate_prekeys().await.unwrap();
 
@@ -172,7 +181,7 @@ mod tests {
 
         // Rotate 8 times, pushing the original SPK off the end of the history.
         for _ in 0..8 {
-            bob.prekey_rotation_config.check_interval = 0;
+            bob.prekey_rotation_config.max_signed_prekey_age = 0;
             bob.prekey_rotation_config.last_rotation  = 0;
             bob.check_and_rotate_prekeys().await.unwrap();
         }
@@ -224,6 +233,34 @@ mod tests {
             log.device_lists.is_empty(),
             "must not republish when already present; log: {:?}",
             log.device_lists
+        );
+    }
+
+    #[tokio::test]
+    async fn current_bundle_is_republished_even_when_marked_as_published() {
+        let ps = RecordingPubSub::new();
+        let (mut mgr, _d) = make_manager("alice@example.com", 556, ps.clone()).await;
+
+        mgr.storage
+            .lock()
+            .await
+            .mark_bundle_published(mgr.device_id)
+            .await
+            .unwrap();
+        mgr.prekey_rotation_config.max_signed_prekey_age = 0;
+        mgr.prekey_rotation_config.last_rotation = 0;
+        mgr.check_and_rotate_prekeys().await.unwrap();
+        let current_spk_id = mgr.key_bundle.as_ref().unwrap().signed_pre_key_id;
+
+        mgr.ensure_bundle_published().await.unwrap();
+
+        let log = ps.log.lock().await;
+        let (_, payload) = log.bundles.last().expect("current bundle must be republished");
+        let double_quoted_id = format!("signedPreKeyId=\"{current_spk_id}\"");
+        let single_quoted_id = format!("signedPreKeyId='{current_spk_id}'");
+        assert!(
+            payload.contains(&double_quoted_id) || payload.contains(&single_quoted_id),
+            "published bundle must contain current signed prekey {current_spk_id}: {payload}"
         );
     }
 
