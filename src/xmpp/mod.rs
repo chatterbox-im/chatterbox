@@ -7,9 +7,9 @@ use base64::Engine;
 use log::{debug, error, info};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
-use tokio::sync::{mpsc, watch, Mutex as TokioMutex};
+use tokio::sync::{mpsc, oneshot, watch, Mutex as TokioMutex};
 use uuid::Uuid;
 
 // Import the core xmpp libraries
@@ -123,6 +123,8 @@ pub struct XMPPClient {
     pub(crate) omemo_manager: Option<Arc<TokioMutex<crate::omemo::OmemoManager>>>,
     pub(crate) carbons_enabled: Arc<AtomicBool>,
     pub(crate) iq_registry: Arc<TokioMutex<iq_registry::IqResponseRegistry>>,
+    /// Stops the transport even while event-loop tasks retain stanza senders.
+    pub(crate) transport_shutdown: Arc<StdMutex<Option<oneshot::Sender<()>>>>,
     /// Watch channel sender for publishing late-bound state to the event loop.
     /// `Some` on the real client, `None` on temporary clones.
     pub(crate) late_state_tx: Option<LateStateTx>,
@@ -159,6 +161,7 @@ impl XMPPClient {
                 omemo_manager: None,
                 carbons_enabled: Arc::new(AtomicBool::new(true)),
                 iq_registry: Arc::new(TokioMutex::new(iq_registry::IqResponseRegistry::new())),
+                transport_shutdown: Arc::new(StdMutex::new(None)),
                 late_state_tx: Some(late_state_tx),
                 typing_tx: None,
                 omemo_dir: None,
@@ -290,6 +293,7 @@ impl XMPPClient {
             omemo_manager: self.omemo_manager.clone(),
             carbons_enabled: self.carbons_enabled.clone(),
             iq_registry: self.iq_registry.clone(),
+            transport_shutdown: self.transport_shutdown.clone(),
             late_state_tx: None, // clones don't publish state
             typing_tx: self.typing_tx.clone(),
             omemo_dir: self.omemo_dir.clone(),

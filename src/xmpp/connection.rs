@@ -60,12 +60,18 @@ impl XMPPClient {
     /// domain for real connections or any string for test connections.
     pub async fn connect_with_transport(
         &mut self,
-        transport_handle: super::transport::TransportHandle,
+        mut transport_handle: super::transport::TransportHandle,
         full_jid: String,
         server_domain: &str,
     ) -> Result<()> {
+        self.signal_transport_shutdown()?;
         self.jid = full_jid;
         self.stanza_tx = Some(transport_handle.stanza_tx.clone());
+        *self
+            .transport_shutdown
+            .lock()
+            .map_err(|_| anyhow!("Transport shutdown lock poisoned"))? =
+            transport_handle.take_shutdown_tx();
 
         // Spawn the event processing loop — lives for the entire session,
         // surviving reconnects transparently.
@@ -91,8 +97,19 @@ impl XMPPClient {
 
         // Wait for the first Online event (or a fatal error / 20-second timeout).
         // Transient initial-connect failures are retried transparently by the transport.
-        self.wait_for_connection(Duration::from_secs(20), online_rx)
-            .await?;
+        if let Err(error) = self
+            .wait_for_connection(Duration::from_secs(20), online_rx)
+            .await
+        {
+            if let Err(shutdown_error) = self.signal_transport_shutdown() {
+                warn!(
+                    "Failed to stop transport after connection failure: {}",
+                    shutdown_error
+                );
+            }
+            self.stanza_tx = None;
+            return Err(error);
+        }
 
         info!("Connected to XMPP server successfully");
 
@@ -166,7 +183,20 @@ impl XMPPClient {
         }
     }
 
-    pub async fn disconnect(&mut self) -> Result<()> {
+    fn signal_transport_shutdown(&self) -> Result<()> {
+        let shutdown_tx = self
+            .transport_shutdown
+            .lock()
+            .map_err(|_| anyhow!("Transport shutdown lock poisoned"))?
+            .take();
+        if let Some(shutdown_tx) = shutdown_tx {
+            let _ = shutdown_tx.send(());
+        }
+        Ok(())
+    }
+
+    /// Stop the active transport through a shared reference.
+    pub async fn shutdown(&self) -> Result<()> {
         info!("Disconnecting from XMPP server");
 
         // Send unavailable presence before disconnecting
@@ -180,7 +210,12 @@ impl XMPPClient {
             }
         }
 
-        // Drop the sender — this signals the transport task to shut down
+        self.iq_registry.lock().await.cancel_all();
+        self.signal_transport_shutdown()
+    }
+
+    pub async fn disconnect(&mut self) -> Result<()> {
+        self.shutdown().await?;
         self.stanza_tx = None;
         self.connected = false;
 
@@ -256,6 +291,29 @@ mod tests {
         assert!(
             err.to_string().contains("terminated") || err.to_string().contains("dropped"),
             "expected dropped-sender error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_disconnect_signals_transport_shutdown() {
+        let mut client = client();
+        let (stanza_tx, mut stanza_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        client.stanza_tx = Some(stanza_tx);
+        *client.transport_shutdown.lock().unwrap() = Some(shutdown_tx);
+
+        client.disconnect().await.unwrap();
+
+        shutdown_rx.await.expect("transport shutdown was not signaled");
+        let presence = stanza_rx
+            .recv()
+            .await
+            .expect("unavailable presence was not queued");
+        assert_eq!(presence.name(), "presence");
+        assert_eq!(presence.attr("type"), Some("unavailable"));
+        assert!(
+            stanza_rx.recv().await.is_none(),
+            "disconnect must drop the client-owned stanza sender"
         );
     }
 }

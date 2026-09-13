@@ -12,6 +12,12 @@ use crate::omemo::protocol::{self, OmemoMessage};
 use crate::omemo::session::{self, OmemoSession, OmemoSessionState};
 use crate::omemo::{OmemoError, OmemoManager};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DecryptionFailurePolicy {
+    RecoverSession,
+    PreserveSession,
+}
+
 impl OmemoManager {
     /// Decrypt a message from a sender
     pub async fn decrypt_message(
@@ -19,6 +25,39 @@ impl OmemoManager {
         sender: &str,
         device_id: DeviceId,
         message: &OmemoMessage,
+    ) -> Result<String, OmemoError> {
+        self.decrypt_message_with_policy(
+            sender,
+            device_id,
+            message,
+            DecryptionFailurePolicy::RecoverSession,
+        )
+        .await
+    }
+
+    /// Decrypt an archived message without allowing replay failures to reset
+    /// the session used for live traffic.
+    pub(crate) async fn decrypt_archived_message(
+        &mut self,
+        sender: &str,
+        device_id: DeviceId,
+        message: &OmemoMessage,
+    ) -> Result<String, OmemoError> {
+        self.decrypt_message_with_policy(
+            sender,
+            device_id,
+            message,
+            DecryptionFailurePolicy::PreserveSession,
+        )
+        .await
+    }
+
+    async fn decrypt_message_with_policy(
+        &mut self,
+        sender: &str,
+        device_id: DeviceId,
+        message: &OmemoMessage,
+        failure_policy: DecryptionFailurePolicy,
     ) -> Result<String, OmemoError> {
         info!("Decrypting message from {}:{}", sender, device_id);
 
@@ -417,6 +456,9 @@ impl OmemoManager {
                     (data, Some(ratchet_state))
                 }
                 Err(session_error) => {
+                    if failure_policy == DecryptionFailurePolicy::PreserveSession {
+                        return Err(OmemoError::SessionError(session_error));
+                    }
                     return self
                         .handle_decryption_failure(sender_str, device_id.get(), session_error)
                         .await;

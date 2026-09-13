@@ -253,6 +253,36 @@ pub fn get_log_contents() -> String {
         .unwrap_or_default()
 }
 
+fn clear_log_storage(
+    buffer: &StdMutex<VecDeque<String>>,
+    log_file: &StdMutex<Option<std::fs::File>>,
+) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind, Seek, SeekFrom, Write};
+
+    let mut buffer = buffer
+        .lock()
+        .map_err(|_| Error::new(ErrorKind::Other, "Log buffer lock poisoned"))?;
+    let mut log_file = log_file
+        .lock()
+        .map_err(|_| Error::new(ErrorKind::Other, "Log file lock poisoned"))?;
+
+    if let Some(file) = log_file.as_mut() {
+        file.seek(SeekFrom::Start(0))?;
+        file.set_len(0)?;
+        file.flush()?;
+    }
+    buffer.clear();
+    Ok(())
+}
+
+/// Clear the in-memory log buffer and truncate the active persistent log file.
+#[uniffi::export]
+pub fn clear_log_contents() -> Option<String> {
+    clear_log_storage(&LOG_BUFFER, &LOG_FILE)
+        .err()
+        .map(|e| e.to_string())
+}
+
 // ---------------------------------------------------------------------------
 // Main client object
 // ---------------------------------------------------------------------------
@@ -328,6 +358,14 @@ impl ChatterboxClient {
         // xmpp.connect() can find a reactor.  JoinHandle<T> is Send, so the
         // outer UniFFI future stays Send even though the work runs elsewhere.
         RUNTIME.spawn(async move {
+            let previous = inner.lock().await.take();
+            if let Some(previous) = previous {
+                if let Err(e) = previous.xmpp.shutdown().await {
+                    log::warn!("Failed to stop previous XMPP connection: {e}");
+                }
+            }
+            event_stream.lock().await.take();
+
             let (mut xmpp, msg_rx) = XMPPClient::new();
 
             let bare_jid = username.split('/').next().unwrap_or(&username).to_string();
@@ -337,9 +375,16 @@ impl ChatterboxClient {
                 .await
                 .map_err(|e| FfiError::Connection { reason: e.to_string() })?;
 
-            xmpp.initialize_client()
-                .await
-                .map_err(|e| FfiError::Omemo { reason: e.to_string() })?;
+            if let Err(e) = xmpp.initialize_client().await {
+                if let Err(shutdown_error) = xmpp.disconnect().await {
+                    log::warn!(
+                        "Failed to stop XMPP transport after OMEMO initialization failure: {shutdown_error}"
+                    );
+                }
+                return Err(FfiError::Omemo {
+                    reason: e.to_string(),
+                });
+            }
 
             crate::xmpp::publish_late_state(&xmpp);
 
@@ -788,11 +833,13 @@ impl ChatterboxClient {
         let inner = Arc::clone(&self.inner);
         let event_stream = Arc::clone(&self.event_stream);
         let _ = RUNTIME.spawn(async move {
-            // Drop the client-owned sender first.  Once the XMPP/typing pumps
-            // are dropped with `inner`, any waiter on this receiver observes
-            // the closed channel and returns `None`.
             event_stream.lock().await.take();
-            *inner.lock().await = None;
+            let state = inner.lock().await.take();
+            if let Some(state) = state {
+                if let Err(e) = state.xmpp.shutdown().await {
+                    log::warn!("Failed to stop XMPP connection cleanly: {e}");
+                }
+            }
         })
         .await;
     }
@@ -902,8 +949,8 @@ fn format_fingerprint(raw: &str) -> String {
 #[cfg(test)]
 mod timestamp_tests {
     use super::*;
-    use crate::models::{DeliveryStatus, Message};
-    use chatterbox::units::Millis;
+    use crate::models::{DeliveryStatus, Direction, Message};
+    use crate::units::Millis;
     use chrono::Datelike;
 
     /// A real millisecond timestamp: 2026-07-26T07:22:04Z.
@@ -920,6 +967,9 @@ mod timestamp_tests {
             timestamp: ts,
             delivery_status: DeliveryStatus::Sent,
             encrypted: true,
+            direction: Direction::Outgoing {
+                to: BareJid::parse("alice@example.com").unwrap(),
+            },
         }
     }
 
@@ -944,9 +994,42 @@ mod timestamp_tests {
     #[test]
     fn mam_window_start_is_a_present_day_date() {
         let start = chrono::DateTime::from_timestamp_millis(
-            chatterbox::units::Secs(SAMPLE_SECS).to_millis().get(),
+            crate::units::Secs(SAMPLE_SECS).to_millis().get(),
         )
         .expect("MAM start must be representable");
         assert_eq!(start.format("%Y-%m-%d").to_string(), "2026-07-26");
+    }
+}
+
+#[cfg(test)]
+mod log_tests {
+    use super::clear_log_storage;
+    use std::collections::VecDeque;
+    use std::io::{Seek, SeekFrom, Write};
+    use std::sync::Mutex;
+
+    #[test]
+    fn clear_log_storage_clears_buffer_and_resets_file_position() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        let mut file = temp.reopen().unwrap();
+        file.write_all(b"old logs").unwrap();
+        file.seek(SeekFrom::End(0)).unwrap();
+
+        let buffer = Mutex::new(VecDeque::from(["old log".to_string()]));
+        let log_file = Mutex::new(Some(file));
+
+        clear_log_storage(&buffer, &log_file).unwrap();
+
+        assert!(buffer.lock().unwrap().is_empty());
+        assert_eq!(std::fs::metadata(temp.path()).unwrap().len(), 0);
+
+        log_file
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .write_all(b"new log")
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(temp.path()).unwrap(), "new log");
     }
 }

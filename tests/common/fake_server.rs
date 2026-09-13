@@ -99,7 +99,7 @@ impl FakeServer {
             }
         });
 
-        TransportHandle { stanza_tx, event_rx }
+        TransportHandle::from_channels(stanza_tx, event_rx)
     }
 
     // ── Assertion helpers ─────────────────────────────────────────────────

@@ -18,11 +18,7 @@ impl XMPPClient {
 
     /// Like `send_message` but uses a specific message ID.
     pub async fn send_message_with_id(&self, recipient: &str, content: &str, msg_id: &str) -> Result<()> {
-        info!(
-            "SEND_MESSAGE CALLED: recipient={}, content_starts_with={}",
-            recipient,
-            content.chars().take(30).collect::<String>()
-        );
+        info!("SEND_MESSAGE CALLED: recipient={}", recipient);
 
         // Normalize JIDs for self-message detection (strip resource, lowercase)
         let recipient_bare = recipient.split('/').next().unwrap_or(recipient).to_lowercase();
