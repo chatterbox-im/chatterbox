@@ -210,6 +210,178 @@ mod tests {
         assert_eq!(decrypted, "Hello Bob from Alice device 1");
     }
 
+    /// If two owned devices send before either receives the other's carbon,
+    /// their simultaneous PreKey initiations must converge on one session.
+    #[tokio::test]
+    async fn test_crossed_own_device_prekeys_converge() {
+        let alice_jid = "alice@example.com";
+        let bob_jid = "bob@example.com";
+        let alice_device_1 = 1101;
+        let alice_device_2 = 1102;
+        let bob_device = 2201;
+        let pubsub = RecordingPubSub::new();
+
+        let (mut alice1, _alice1_dir) =
+            create_manager(alice_jid, alice_device_1, pubsub.clone()).await;
+        let (mut alice2, _alice2_dir) =
+            create_manager(alice_jid, alice_device_2, pubsub.clone()).await;
+        let (bob, _bob_dir) =
+            create_manager(bob_jid, bob_device, pubsub.clone()).await;
+
+        pubsub
+            .add_device_list(alice_jid, &[alice_device_1, alice_device_2])
+            .await;
+        pubsub.add_device_list(bob_jid, &[bob_device]).await;
+        pubsub
+            .add_bundle(
+                alice_jid,
+                alice_device_1,
+                alice1.key_bundle.as_ref().unwrap(),
+            )
+            .await;
+        pubsub
+            .add_bundle(
+                alice_jid,
+                alice_device_2,
+                alice2.key_bundle.as_ref().unwrap(),
+            )
+            .await;
+        pubsub
+            .add_bundle(bob_jid, bob_device, bob.key_bundle.as_ref().unwrap())
+            .await;
+
+        // Both devices send before receiving the other's sent carbon.
+        let from_alice1 = alice1.encrypt_message(bob_jid, "from device 1").await.unwrap();
+        let from_alice2 = alice2.encrypt_message(bob_jid, "from device 2").await.unwrap();
+
+        // Device 1 has the lower address, so its initiation wins. Device 2
+        // accepts that PreKey; device 1 rejects device 2's competing PreKey
+        // without discarding its winning session.
+        assert_eq!(
+            alice2
+            .decrypt_message(alice_jid, DeviceId::from(alice_device_1), &from_alice1)
+            .await
+            .unwrap(),
+            "from device 1"
+        );
+        let losing_prekey = alice1
+            .decrypt_message(alice_jid, DeviceId::from(alice_device_2), &from_alice2)
+            .await
+            .expect_err("higher-address crossed PreKey must lose the tie");
+        assert!(
+            losing_prekey.to_string().contains("Crossed PreKey"),
+            "unexpected collision error: {}",
+            losing_prekey
+        );
+
+        let follow_up = alice1
+            .encrypt_message(bob_jid, "after crossing from device 1")
+            .await
+            .unwrap();
+        assert_eq!(
+            alice2
+                .decrypt_message(alice_jid, DeviceId::from(alice_device_1), &follow_up)
+                .await
+                .expect("owned-device sessions must converge after crossed PreKeys"),
+            "after crossing from device 1"
+        );
+
+        let reverse = alice2
+            .encrypt_message(bob_jid, "after crossing from device 2")
+            .await
+            .unwrap();
+        assert_eq!(
+            alice1
+                .decrypt_message(alice_jid, DeviceId::from(alice_device_2), &reverse)
+                .await
+                .expect("converged session must work in the reverse direction"),
+            "after crossing from device 2"
+        );
+    }
+
+    /// Sent carbons may arrive out of order or be replayed by MAM. Skipped-key
+    /// handling and failed replay attempts must not poison the live session.
+    #[tokio::test]
+    async fn test_own_device_carbons_survive_reordering_and_replay() {
+        let alice_jid = "alice@example.com";
+        let bob_jid = "bob@example.com";
+        let alice_device_1 = 1201;
+        let alice_device_2 = 1202;
+        let bob_device = 2202;
+        let pubsub = RecordingPubSub::new();
+
+        let (mut alice1, _alice1_dir) =
+            create_manager(alice_jid, alice_device_1, pubsub.clone()).await;
+        let (mut alice2, _alice2_dir) =
+            create_manager(alice_jid, alice_device_2, pubsub.clone()).await;
+        let (bob, _bob_dir) =
+            create_manager(bob_jid, bob_device, pubsub.clone()).await;
+
+        pubsub
+            .add_device_list(alice_jid, &[alice_device_1, alice_device_2])
+            .await;
+        pubsub.add_device_list(bob_jid, &[bob_device]).await;
+        pubsub
+            .add_bundle(
+                alice_jid,
+                alice_device_1,
+                alice1.key_bundle.as_ref().unwrap(),
+            )
+            .await;
+        pubsub
+            .add_bundle(
+                alice_jid,
+                alice_device_2,
+                alice2.key_bundle.as_ref().unwrap(),
+            )
+            .await;
+        pubsub
+            .add_bundle(bob_jid, bob_device, bob.key_bundle.as_ref().unwrap())
+            .await;
+
+        let first = alice1.encrypt_message(bob_jid, "first").await.unwrap();
+        assert_eq!(
+            alice2
+                .decrypt_message(alice_jid, DeviceId::from(alice_device_1), &first)
+                .await
+                .unwrap(),
+            "first"
+        );
+
+        let second = alice1.encrypt_message(bob_jid, "second").await.unwrap();
+        let third = alice1.encrypt_message(bob_jid, "third").await.unwrap();
+
+        assert_eq!(
+            alice2
+                .decrypt_message(alice_jid, DeviceId::from(alice_device_1), &third)
+                .await
+                .unwrap(),
+            "third"
+        );
+        assert_eq!(
+            alice2
+                .decrypt_message(alice_jid, DeviceId::from(alice_device_1), &second)
+                .await
+                .unwrap(),
+            "second"
+        );
+
+        let replay = alice2
+            .decrypt_message(alice_jid, DeviceId::from(alice_device_1), &second)
+            .await
+            .expect_err("a replayed carbon must be rejected");
+        assert!(replay.to_string().contains("already processed"));
+
+        let fourth = alice1.encrypt_message(bob_jid, "fourth").await.unwrap();
+        assert_eq!(
+            alice2
+                .decrypt_message(alice_jid, DeviceId::from(alice_device_1), &fourth)
+                .await
+                .expect("replay rejection must not damage the session"),
+            "fourth"
+        );
+    }
+
     /// Test full round-trip: Alice encrypts → Bob decrypts successfully.
     #[tokio::test]
     async fn test_encrypt_decrypt_round_trip() {

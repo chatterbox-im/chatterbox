@@ -55,6 +55,32 @@ impl OmemoManager {
             .map(|s| s.is_initialized())
             .unwrap_or(false);
 
+        // If both endpoints initiated a session before seeing the other's
+        // PreKey, deterministically keep the initiation from the lower address.
+        // Without this tie-break both sides replace their outbound session with
+        // the other's inbound session and end up on opposite ratchets.
+        let local_jid = Self::normalize_jid_to_bare(&self.local_jid);
+        let local_initiation_wins = incoming_prekey.is_some()
+            && local_jid == bare_jid
+            && matches!(
+                self.sessions.get(&(bare_jid.clone(), device_id)),
+                Some(OmemoSessionState::InitiatorAwaitingReply { session, .. })
+                    if session.ratchet_state.send_message_number == 1
+            )
+            && (local_jid.as_str(), self.device_id.get()) < (bare_jid.as_str(), device_id.get());
+
+        if local_initiation_wins {
+            info!(
+                "Ignoring crossed PreKey from {}:{}; retaining winning local initiation from {}:{}",
+                bare_jid, device_id, local_jid, self.device_id
+            );
+            return Err(OmemoError::SessionError(
+                session::SessionError::InvalidStateError(
+                    "Crossed PreKey lost deterministic session tie-break".to_string(),
+                ),
+            ));
+        }
+
         // Decide whether this PreKey header should actually trigger a fresh
         // X3DH exchange.
         //
