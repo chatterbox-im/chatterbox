@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 // Credentials module for tests
 // This module provides a simple Credentials struct for testing
 

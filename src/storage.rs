@@ -84,15 +84,28 @@ impl MessageStore {
             .conn
             .execute_batch("ALTER TABLE messages ADD COLUMN encrypted INTEGER NOT NULL DEFAULT 0;");
 
+        // Purge rows with known-bad contact_jid sentinel values written by early
+        // buggy builds.  This is safe to run repeatedly (DELETE is idempotent).
+        let _ = self.conn.execute_batch(
+            "DELETE FROM messages WHERE contact_jid IN ('me', 'unknown', 'system')
+             OR contact_jid NOT LIKE '%@%';"
+        );
+
+        // Migrate second-precision timestamps to milliseconds (idempotent: ms values
+        // are already > 9_999_999_999 and won't match the WHERE clause).
+        let _ = self.conn.execute_batch(
+            "UPDATE messages SET timestamp = timestamp * 1000 WHERE timestamp < 9999999999;"
+        );
+
         Ok(())
     }
 
-    /// Persist a message. Duplicate IDs are silently ignored (idempotent).
-    pub fn store_message(&self, msg: &Message) -> Result<()> {
+    /// Persist a message. Returns `true` if the row was inserted, `false` if the id already existed.
+    pub fn store_message(&self, msg: &Message) -> Result<bool> {
         let contact_jid = Self::contact_jid_for(msg);
         let status = msg.delivery_status as i32;
 
-        self.conn.execute(
+        let changed = self.conn.execute(
             "INSERT OR IGNORE INTO messages (id, contact_jid, sender_id, recipient_id, content, timestamp, delivery_status, encrypted)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
@@ -101,12 +114,12 @@ impl MessageStore {
                 msg.sender_id,
                 msg.recipient_id,
                 msg.content,
-                msg.timestamp as i64,
+                msg.timestamp.get(),
                 status,
                 msg.encrypted as i32,
             ],
         )?;
-        Ok(())
+        Ok(changed > 0)
     }
 
     /// Load the most recent `limit` messages for a contact, ordered oldest-first.
@@ -120,19 +133,68 @@ impl MessageStore {
         )?;
 
         let rows = stmt.query_map(params![contact_jid, limit as i64], |row| {
+            let sender_id: String = row.get(1)?;
+            let recipient_id: String = row.get(2)?;
+            let direction = crate::models::Direction::from_sql(
+                &sender_id, &recipient_id, contact_jid,
+            );
             Ok(Message {
                 id: row.get(0)?,
-                sender_id: row.get(1)?,
-                recipient_id: row.get(2)?,
+                sender_id,
+                recipient_id,
                 content: row.get(3)?,
-                timestamp: row.get::<_, i64>(4)? as u64,
+                timestamp: crate::units::Millis(row.get::<_, i64>(4)?),
                 delivery_status: Self::status_from_i32(row.get(5)?),
                 encrypted: row.get::<_, i32>(6).unwrap_or(0) != 0,
+                direction,
             })
         })?;
 
         let mut messages: Vec<Message> = rows.filter_map(|r| r.ok()).collect();
         messages.reverse(); // oldest first
+        Ok(messages)
+    }
+
+    /// Load messages older than a timestamp, ordered oldest-first.
+    pub fn load_messages_before(
+        &self,
+        contact_jid: &str,
+        before_timestamp: i64,
+        limit: usize,
+    ) -> Result<Vec<Message>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, sender_id, recipient_id, content, timestamp, delivery_status, encrypted
+             FROM messages
+             WHERE contact_jid = ?1 AND timestamp < ?2
+             ORDER BY timestamp DESC
+             LIMIT ?3",
+        )?;
+
+        let rows = stmt.query_map(
+            params![contact_jid, before_timestamp, limit as i64],
+            |row| {
+                let sender_id: String = row.get(1)?;
+                let recipient_id: String = row.get(2)?;
+                let direction = crate::models::Direction::from_sql(
+                    &sender_id,
+                    &recipient_id,
+                    contact_jid,
+                );
+                Ok(Message {
+                    id: row.get(0)?,
+                    sender_id,
+                    recipient_id,
+                    content: row.get(3)?,
+                    timestamp: crate::units::Millis(row.get::<_, i64>(4)?),
+                    delivery_status: Self::status_from_i32(row.get(5)?),
+                    encrypted: row.get::<_, i32>(6).unwrap_or(0) != 0,
+                    direction,
+                })
+            },
+        )?;
+
+        let mut messages: Vec<Message> = rows.filter_map(|r| r.ok()).collect();
+        messages.reverse();
         Ok(messages)
     }
 
@@ -160,23 +222,29 @@ impl MessageStore {
         Ok(())
     }
 
+    /// Return all contact JIDs that have stored messages, ordered by most recent activity.
+    pub fn list_contacts(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT contact_jid FROM messages
+             GROUP BY contact_jid
+             ORDER BY MAX(timestamp) DESC",
+        )?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Delete all messages for a contact (conversation delete).
+    pub fn delete_conversation(&self, contact_jid: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM messages WHERE contact_jid = ?1",
+            rusqlite::params![contact_jid],
+        )?;
+        Ok(())
+    }
+
     /// Determine which JID a message belongs to in the conversation index.
-    /// For outgoing messages (sender = "me"/"You"), the contact is the recipient.
-    /// For incoming messages, the contact is the sender (bare JID).
     fn contact_jid_for(msg: &Message) -> String {
-        if msg.sender_id == "me" || msg.sender_id == "You" || msg.sender_id == "system" {
-            msg.recipient_id
-                .split('/')
-                .next()
-                .unwrap_or(&msg.recipient_id)
-                .to_string()
-        } else {
-            msg.sender_id
-                .split('/')
-                .next()
-                .unwrap_or(&msg.sender_id)
-                .to_string()
-        }
+        msg.direction.conversation().to_string()
     }
 
     fn status_from_i32(val: i32) -> DeliveryStatus {
@@ -196,15 +264,16 @@ impl MessageStore {
 mod tests {
     use super::*;
 
-    fn make_msg(id: &str, sender: &str, recipient: &str, content: &str, ts: u64) -> Message {
+    fn make_msg(id: &str, sender: &str, recipient: &str, content: &str, ts: i64) -> Message {
         Message {
             id: id.to_string(),
             sender_id: sender.to_string(),
             recipient_id: recipient.to_string(),
             content: content.to_string(),
-            timestamp: ts,
+            timestamp: crate::units::Millis(ts),
             delivery_status: DeliveryStatus::Delivered,
             encrypted: false,
+            direction: crate::models::Direction::from_sql(sender, recipient, if sender == "me" { recipient } else { sender }),
         }
     }
 
@@ -246,6 +315,30 @@ mod tests {
 
         let ts_none = store.newest_timestamp("unknown@example.com").unwrap();
         assert_eq!(ts_none, None);
+    }
+
+    #[test]
+    fn cross_path_identity_dedup() {
+        // Regression guard: the same logical message arriving via direct delivery,
+        // carbon, and MAM must produce exactly one row and one UI bubble.
+        let store = MessageStore::open_in_memory().unwrap();
+        let msg = make_msg("stable-id", "alice@example.com", "me@example.com", "Hello", 1000);
+
+        assert!(store.store_message(&msg).unwrap(), "first path: newly inserted");
+        assert!(!store.store_message(&msg).unwrap(), "second path: duplicate id → false");
+        assert!(!store.store_message(&msg).unwrap(), "third path: still false");
+
+        let rows = store.load_messages("alice@example.com", 10).unwrap();
+        assert_eq!(rows.len(), 1, "exactly one row must survive all three paths");
+    }
+
+    #[test]
+    fn store_message_returns_true_for_new_id() {
+        let store = MessageStore::open_in_memory().unwrap();
+        let m1 = make_msg("id-a", "alice@example.com", "me@example.com", "Hi", 1000);
+        let m2 = make_msg("id-b", "alice@example.com", "me@example.com", "Hey", 1001);
+        assert!(store.store_message(&m1).unwrap());
+        assert!(store.store_message(&m2).unwrap());
     }
 
     #[test]

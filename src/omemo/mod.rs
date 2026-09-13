@@ -13,6 +13,7 @@ use std::time::Instant;
 use thiserror::Error;
 use tokio::sync::Mutex;
 
+use crate::jid::BareJid;
 use crate::omemo::crypto::CryptoError;
 use crate::omemo::device_id::DeviceId;
 use crate::omemo::session::{OmemoSessionState, SessionError};
@@ -22,21 +23,61 @@ pub use crate::omemo::storage::TrustLevel;
 pub mod bundle;
 pub mod crypto;
 mod decrypt;
+#[cfg(test)]
+mod decrypt_tests;
 pub mod device_discovery;
 pub mod device_id;
 mod encrypt;
 #[cfg(test)]
 mod encrypt_decrypt_test;
 #[cfg(test)]
-mod session_proptest;
+mod encrypt_tests;
+pub mod keys;
 mod lifecycle;
+#[cfg(test)]
+mod lifecycle_tests;
 pub mod protocol;
 pub mod session;
+#[cfg(test)]
+mod session_proptest;
 pub mod storage;
+mod store_migrate;
+pub mod store_sqlite;
+#[cfg(test)]
+mod security_tests;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod wire;
 
 /// The OMEMO namespace used in XMPP stanzas
 pub const OMEMO_NAMESPACE: &str = "eu.siacs.conversations.axolotl";
+
+/// Primary PEP node for device lists (legacy Conversations format).
+pub fn devicelist_node() -> String {
+    format!("{}.devicelist", OMEMO_NAMESPACE)
+}
+
+/// Primary PEP node for a device's bundle.
+pub fn bundle_node(device_id: crate::omemo::device_id::DeviceId) -> String {
+    format!("{}.bundles:{}", OMEMO_NAMESPACE, device_id)
+}
+
+/// All node-name variants tried when fetching a device list (primary first).
+pub fn devicelist_node_variants() -> [String; 3] {
+    [
+        format!("{}.devicelist", OMEMO_NAMESPACE),
+        format!("{}:devices",    OMEMO_NAMESPACE),
+        format!("{}:devicelist", OMEMO_NAMESPACE),
+    ]
+}
+
+/// All node-name variants tried when fetching a bundle (primary first).
+pub fn bundle_node_variants(device_id: crate::omemo::device_id::DeviceId) -> [String; 2] {
+    [
+        format!("{}.bundles:{}", OMEMO_NAMESPACE, device_id),
+        format!("{}:bundles:{}", OMEMO_NAMESPACE, device_id),
+    ]
+}
 
 /// Trait abstracting the XMPP PubSub operations that OMEMO needs.
 /// This breaks the circular dependency: OmemoManager depends on this trait,
@@ -191,7 +232,7 @@ pub struct OmemoManager {
     /// Each entry is an `OmemoSessionState` rather than a bare `OmemoSession` so
     /// that pending-rebuild markers (`PeerResetPending`) can be stored in the same
     /// map, eliminating the old `pending_session_rebuilds: HashSet` side-channel.
-    pub(crate) sessions: HashMap<(String, u32), OmemoSessionState>,
+    pub(crate) sessions: HashMap<(BareJid, DeviceId), OmemoSessionState>,
 
     /// PreKey rotation configuration
     pub prekey_rotation_config: PreKeyRotationConfig,
@@ -199,15 +240,15 @@ pub struct OmemoManager {
     /// Devices whose trust level should be restored to Trusted after a session rebuild.
     /// This prevents identity-key-pinning from overriding an explicit user trust decision
     /// when the remote device has a new identity (e.g. fresh install).
-    pub(crate) pending_trust_restorations: HashSet<(String, DeviceId)>,
+    pub(crate) pending_trust_restorations: HashSet<(BareJid, DeviceId)>,
 
     /// Ephemeral keys for pending PreKey messages to specific devices.
     /// Value is (key_bytes, insertion_time) for TTL eviction.
-    pub(crate) prekey_ephemeral_keys: HashMap<(String, DeviceId), (Vec<u8>, Instant)>,
+    pub(crate) prekey_ephemeral_keys: HashMap<(BareJid, DeviceId), (Vec<u8>, Instant)>,
 
     /// Remote device PreKey IDs captured during session creation:
     /// (jid, device_id) → (signed_pre_key_id, Option<one_time_pre_key_id>, insertion_time)
-    pub(crate) remote_prekey_ids: HashMap<(String, DeviceId), (u32, Option<u32>, Instant)>,
+    pub(crate) remote_prekey_ids: HashMap<(BareJid, DeviceId), (u32, Option<u32>, Instant)>,
 
     /// Message IDs that have been successfully decrypted. Used to skip duplicate
     /// decryption attempts when the same OMEMO message arrives both as a direct
@@ -222,9 +263,26 @@ pub struct OmemoManager {
 
     /// PubSub operations — injected dependency instead of global access
     pub(crate) pubsub: Arc<dyn OmemoPubSub>,
+
+    /// Override for SystemTime::now() in tests; None → use real wall clock.
+    #[cfg(test)]
+    pub(crate) now_override: Option<u64>,
 }
 
 impl OmemoManager {
+    /// Current time as seconds since UNIX_EPOCH.
+    /// Overridable in tests via `now_override`.
+    pub(crate) fn now_secs(&self) -> u64 {
+        #[cfg(test)]
+        if let Some(t) = self.now_override {
+            return t;
+        }
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    }
+
     /// Create a new OMEMO manager
     pub async fn new(
         storage: OmemoStorage,
@@ -242,18 +300,18 @@ impl OmemoManager {
 
                 let mut storage_guard = storage.lock().await;
                 storage_guard
-                    .store_device_id(id)
+                    .store_device_id(DeviceId::from(id))
                     .map_err(|e| OmemoError::StorageError(e.to_string()))?;
                 drop(storage_guard);
 
-                device_id::save_device_id(id).map_err(|e| {
+                device_id::save_device_id(DeviceId::from(id)).map_err(|e| {
                     OmemoError::StorageError(format!(
                         "Failed to save device ID to filesystem: {}",
                         e
                     ))
                 })?;
 
-                id
+                DeviceId::from(id)
             }
             None => {
                 // Use the device ID from OmemoStorage (already loaded from the correct path)
@@ -261,7 +319,7 @@ impl OmemoManager {
                 let storage_device_id = storage_guard.get_device_id();
                 drop(storage_guard);
 
-                if storage_device_id > 0 {
+                if storage_device_id.get() > 0 {
                     info!("Loaded existing device ID: {}", storage_device_id);
                     storage_device_id
                 } else {
@@ -298,6 +356,8 @@ impl OmemoManager {
             recently_decrypted_ids: std::collections::VecDeque::new(),
             recently_failed_ids: std::collections::VecDeque::new(),
             pubsub,
+            #[cfg(test)]
+            now_override: None,
         };
 
         // Load the last PreKey rotation time from storage
@@ -337,19 +397,14 @@ impl OmemoManager {
             )
         };
         for (jid, device_id) in rebuild_pending {
-            // Represent "needs rebuild" directly in the sessions map so it
-            // survives restarts without a separate HashSet.
             manager
                 .sessions
-                .insert((jid, device_id), OmemoSessionState::PeerResetPending);
+                .insert((BareJid::parse(&jid).expect("expected valid JID"), device_id), OmemoSessionState::PeerResetPending);
         }
         for (jid, device_id) in prekey_pending {
-            // Load recovery state: any device with a prekey-pending-since file
-            // was in RecoveryPreKeySent before the last restart.
-            // `PeerResetPending` takes priority if already set by rebuild_pending.
             manager
                 .sessions
-                .entry((jid, device_id))
+                .entry((BareJid::parse(&jid).expect("expected valid JID"), device_id))
                 .or_insert(OmemoSessionState::RecoveryPreKeySent { attempt: 0 });
         }
         for msg_id in failed_ids {
@@ -448,6 +503,23 @@ impl OmemoManager {
 
     /// Evict stale entries from bounded collections.
     /// Call periodically (e.g., before each encrypt) to prevent unbounded growth.
+    /// Reset the consecutive-failure counter for a device.
+    /// Called after MAM replay failures to prevent false-positive session resets.
+    pub async fn reset_failure_count(&mut self, jid: &str, device_id: u32) -> Result<(), crate::omemo::OmemoError> {
+        let bare = Self::normalize_jid_to_bare(jid);
+        let storage = self.storage.lock().await;
+        let _ = storage.reset_device_failure_count(&bare, DeviceId::from(device_id));
+        Ok(())
+    }
+
+    /// Clear the ignore status for a device so it is eligible for encryption again.
+    pub async fn clear_device_ignore(&mut self, jid: &str, device_id: u32) -> Result<(), crate::omemo::OmemoError> {
+        let bare = Self::normalize_jid_to_bare(jid);
+        let storage = self.storage.lock().await;
+        let _ = storage.clear_device_ignore_status(&bare, DeviceId::from(device_id));
+        Ok(())
+    }
+
     pub fn evict_stale_entries(&mut self) {
         use std::time::Duration;
         let ttl = Duration::from_secs(Self::PENDING_TTL_SECS);
@@ -468,14 +540,8 @@ impl OmemoManager {
     }
 
     /// Normalize a JID to bare JID (without resource) for OMEMO session storage
-    pub(crate) fn normalize_jid_to_bare(jid: &str) -> String {
-        let clean_jid = jid.to_lowercase().trim().to_string();
-
-        if let Some(slash_pos) = clean_jid.rfind('/') {
-            clean_jid[..slash_pos].to_string()
-        } else {
-            clean_jid
-        }
+    pub(crate) fn normalize_jid_to_bare(jid: &str) -> BareJid {
+        BareJid::parse(jid).expect("expected valid JID")
     }
 }
 
@@ -549,10 +615,10 @@ mod tests {
     #[tokio::test]
     async fn test_device_id_generation() {
         let device_id = generate_device_id();
-        assert!(device_id > 0, "Device ID should be non-zero");
+        assert!(device_id.get() > 0, "Device ID should be non-zero");
 
         let device_id2 = generate_device_id();
-        assert!(device_id2 > 0, "Second device ID should be non-zero");
+        assert!(device_id2.get() > 0, "Second device ID should be non-zero");
         assert_ne!(
             device_id, device_id2,
             "Two generated device IDs should likely be different"
@@ -560,7 +626,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
     async fn test_omemo_manager_device_id() -> Result<(), anyhow::Error> {
         let storage = create_test_storage().await?;
 
@@ -570,12 +635,11 @@ mod tests {
                 .expect("Failed to create OmemoManager");
 
         let device_id = manager.get_device_id();
-        assert!(device_id > 0, "Manager's device ID should be non-zero");
+        assert!(device_id.get() > 0, "Manager's device ID should be non-zero");
 
-        let storage_path = std::env::temp_dir().join("omemo_device_id_test.db");
-        if storage_path.exists() {
-            std::fs::remove_file(&storage_path)?;
-        }
+        // Use a TempDir so cleanup is automatic and remove_dir_all is not needed.
+        let persist_dir = tempdir()?;
+        let storage_path = persist_dir.path().to_path_buf();
 
         let storage1 = OmemoStorage::new(Some(storage_path.clone()))?;
         let manager1 = OmemoManager::new(
@@ -589,7 +653,7 @@ mod tests {
 
         let device_id1 = manager1.get_device_id();
         assert!(
-            device_id1 > 0,
+            device_id1.get() > 0,
             "First manager's device ID should be non-zero"
         );
 
@@ -609,23 +673,18 @@ mod tests {
             "Device ID should persist in storage"
         );
 
-        if storage_path.exists() {
-            std::fs::remove_file(&storage_path)?;
-        }
-
         Ok(())
     }
 
     #[tokio::test]
-    #[ignore]
     async fn test_explicit_device_id() -> Result<(), anyhow::Error> {
         let storage = create_test_storage().await?;
 
-        let explicit_id: DeviceId = 12345;
+        let explicit_id = DeviceId::from(12345u32);
         let manager = OmemoManager::new(
             storage,
             "test@example.com".to_string(),
-            Some(explicit_id),
+            Some(explicit_id.get()),
             test_pubsub(),
         )
         .await
@@ -656,16 +715,16 @@ mod tests {
 
         // prekey_ephemeral_keys and remote_prekey_ids are TTL-evicted
         manager.prekey_ephemeral_keys.insert(
-            ("old@peer.com".to_string(), 1u32),
+            (BareJid::parse("old@peer.com").expect("expected valid JID"), DeviceId::from(1u32)),
             (vec![0xAA; 32], old_time),
         );
         manager.prekey_ephemeral_keys.insert(
-            ("fresh@peer.com".to_string(), 2u32),
+            (BareJid::parse("fresh@peer.com").expect("expected valid JID"), DeviceId::from(2u32)),
             (vec![0xBB; 32], fresh_time),
         );
         manager
             .remote_prekey_ids
-            .insert(("old@peer.com".to_string(), 1u32), (1, Some(2), old_time));
+            .insert((BareJid::parse("old@peer.com").expect("expected valid JID"), DeviceId::from(1u32)), (1, Some(2), old_time));
 
         assert_eq!(manager.prekey_ephemeral_keys.len(), 2);
         manager.evict_stale_entries();
@@ -673,7 +732,7 @@ mod tests {
         assert_eq!(manager.prekey_ephemeral_keys.len(), 1);
         assert!(manager
             .prekey_ephemeral_keys
-            .contains_key(&("fresh@peer.com".to_string(), 2u32)));
+            .contains_key(&(BareJid::parse("fresh@peer.com").expect("expected valid JID"), DeviceId::from(2u32))));
         assert!(manager.remote_prekey_ids.is_empty());
 
         Ok(())
@@ -689,7 +748,7 @@ mod tests {
         let now = Instant::now();
         for i in 0..1050u32 {
             manager.prekey_ephemeral_keys.insert(
-                (format!("peer{}@test.com", i), DeviceId::from(i)),
+                (BareJid::parse(&format!("peer{}@test.com", i)).expect("expected valid JID"), DeviceId::from(i)),
                 (vec![0u8; 32], now),
             );
         }

@@ -4,57 +4,62 @@
 use anyhow::{anyhow, Result};
 use base64::Engine;
 use log::{debug, error, info, warn};
-use xmpp_parsers::Element;
+use xmpp_parsers::minidom::Element;
 
 use super::{custom_ns, XMPPClient};
 use crate::models::{DeliveryStatus, Message, PendingMessage};
 
 impl XMPPClient {
-    /// Send a message (encrypted if OMEMO is enabled, plaintext otherwise)
-    pub async fn send_message(&mut self, recipient: &str, content: &str) -> Result<()> {
+    /// Send a message (encrypted if OMEMO is enabled, plaintext otherwise).
+    /// `msg_id` is caller-supplied so the wire ID matches what was stored/returned.
+    pub async fn send_message(&self, recipient: &str, content: &str) -> Result<()> {
+        self.send_message_with_id(recipient, content, &uuid::Uuid::new_v4().to_string()).await
+    }
+
+    /// Like `send_message` but uses a specific message ID.
+    pub async fn send_message_with_id(&self, recipient: &str, content: &str, msg_id: &str) -> Result<()> {
         info!(
             "SEND_MESSAGE CALLED: recipient={}, content_starts_with={}",
             recipient,
             content.chars().take(30).collect::<String>()
         );
 
-        // Check if OMEMO is enabled - if it is, always use encrypted messaging
+        // Normalize JIDs for self-message detection (strip resource, lowercase)
+        let recipient_bare = recipient.split('/').next().unwrap_or(recipient).to_lowercase();
+        let self_bare = self.jid.split('/').next().unwrap_or(&self.jid).to_lowercase();
+        let is_self_message = recipient_bare == self_bare;
+
+        if is_self_message {
+            info!("Self-message detected, sending plaintext to: {}", recipient);
+            return self.send_message_with_receipt(recipient, content).await;
+        }
+
         let omemo_enabled = self.is_omemo_enabled().await;
 
         if omemo_enabled {
-            info!(
-                "OMEMO is enabled, sending encrypted message to: {}",
-                recipient
-            );
-            self.send_encrypted_message(recipient, content).await
+            info!("OMEMO is enabled, sending encrypted message to: {}", recipient);
+            self.send_encrypted_message_with_id(recipient, content, msg_id).await
         } else {
-            info!(
-                "OMEMO is disabled, sending plaintext message to: {}",
-                recipient
-            );
+            info!("OMEMO is disabled, sending plaintext message to: {}", recipient);
             warn!("⚠️ WARNING: Message is being sent in plaintext without encryption!");
             self.send_message_with_receipt(recipient, content).await
         }
     }
 
     /// Send an encrypted message using OMEMO
-    pub async fn send_encrypted_message(&mut self, to: &str, content: &str) -> Result<()> {
+    pub async fn send_encrypted_message(&self, to: &str, content: &str) -> Result<()> {
+        self.send_encrypted_message_with_id(to, content, &uuid::Uuid::new_v4().to_string()).await
+    }
+
+    /// Send an encrypted message using a specific message ID (used by the FFI layer).
+    pub async fn send_encrypted_message_with_id(&self, to: &str, content: &str, msg_id: &str) -> Result<()> {
         info!("Sending encrypted message to {}", to);
 
-        // Get our OMEMO manager
-        let omemo_manager = match &self.omemo_manager {
-            Some(manager) => manager.clone(),
-            None => {
-                self.initialize_client().await?;
-                match &self.omemo_manager {
-                    Some(manager) => manager.clone(),
-                    None => {
-                        error!("Failed to initialize OMEMO manager");
-                        return Err(anyhow!("Failed to initialize OMEMO manager"));
-                    }
-                }
-            }
-        };
+        // OMEMO must be initialized before sending — initialize_client() is
+        // called during connect(), so this should never be None in practice.
+        let omemo_manager = self.omemo_manager.as_ref()
+            .ok_or_else(|| anyhow!("OMEMO not initialized — call connect() first"))?
+            .clone();
 
         // Encrypt the message.
         // NOTE: The lock is held across the entire encrypt_message() call because the
@@ -70,32 +75,56 @@ impl XMPPClient {
             }
         };
 
-// Verify that the serialised OMEMO payload does not contain the plaintext.
-    // This is a defence-in-depth check; a real encryption bug would be caught
-    // here before the stanza reaches the network.
-    let omemo_xml = omemo_manager_guard.message_to_xml(&encrypted_message);
-    match omemo_manager_guard.verify_message_encryption(&omemo_xml, content) {
-        Ok(_) => debug!("OMEMO encryption verification passed"),
-        Err(e) => {
-            error!("OMEMO encryption verification FAILED — aborting send: {}", e);
+        // Verify that the serialised OMEMO payload does not contain the plaintext.
+        // This is a defence-in-depth check; a real encryption bug would be caught
+        // here before the stanza reaches the network.
+        let omemo_xml = omemo_manager_guard.message_to_xml(&encrypted_message);
+        match omemo_manager_guard.verify_message_encryption(&omemo_xml, content) {
+            Ok(_) => debug!("OMEMO encryption verification passed"),
+            Err(e) => {
+                error!(
+                    "OMEMO encryption verification FAILED — aborting send: {}",
+                    e
+                );
                 return Err(anyhow!("OMEMO encryption verification failed: {}", e));
             }
         }
 
         drop(omemo_manager_guard);
 
-        // Generate a message ID
-        let id = uuid::Uuid::new_v4().to_string();
+        // Use the caller-supplied message ID so the wire ID matches storage.
+        let id = msg_id.to_string();
 
         // Create the OMEMO message stanza
         let mut message_element = Element::builder("message", "jabber:client").build();
-        message_element.set_attr("id", &id);
-        message_element.set_attr("to", to);
-        message_element.set_attr("type", "chat");
+        message_element.set_attr(
+            xmpp_parsers::minidom::rxml::Namespace::NONE,
+            "id".try_into().unwrap(),
+            &id,
+        );
+        message_element.set_attr(
+            xmpp_parsers::minidom::rxml::Namespace::NONE,
+            "to".try_into().unwrap(),
+            to,
+        );
+        message_element.set_attr(
+            xmpp_parsers::minidom::rxml::Namespace::NONE,
+            "type".try_into().unwrap(),
+            "chat",
+        );
 
         // Add receipt request
         let request_element = Element::builder("request", custom_ns::RECEIPTS).build();
         message_element.append_child(request_element);
+
+        // XEP-0359: sender-authored stable id so carbons/MAM always correlate to the same message.
+        let mut origin_id = Element::builder("origin-id", custom_ns::SID).build();
+        origin_id.set_attr(
+            xmpp_parsers::minidom::rxml::Namespace::NONE,
+            "id".try_into().unwrap(),
+            &id,
+        );
+        message_element.append_child(origin_id);
 
         // Add chat state
         let active_element = Element::builder("active", custom_ns::CHATSTATES).build();
@@ -106,14 +135,26 @@ impl XMPPClient {
 
         // Create header element
         let mut header_element = Element::builder("header", custom_ns::OMEMO_V1).build();
-        header_element.set_attr("sid", &encrypted_message.sender_device_id.to_string());
+        header_element.set_attr(
+            xmpp_parsers::minidom::rxml::Namespace::NONE,
+            "sid".try_into().unwrap(),
+            &encrypted_message.sender_device_id.to_string(),
+        );
 
         // Add key elements, including prekey="true" for PreKeySignalMessages
         for (device_id, encrypted_key) in &encrypted_message.encrypted_keys {
             let mut key_element = Element::builder("key", custom_ns::OMEMO_V1).build();
-            key_element.set_attr("rid", &device_id.to_string());
+            key_element.set_attr(
+                xmpp_parsers::minidom::rxml::Namespace::NONE,
+                "rid".try_into().unwrap(),
+                &device_id.to_string(),
+            );
             if encrypted_message.prekey_devices.contains(device_id) {
-                key_element.set_attr("prekey", "true");
+                key_element.set_attr(
+                    xmpp_parsers::minidom::rxml::Namespace::NONE,
+                    "prekey".try_into().unwrap(),
+                    "true",
+                );
             }
             key_element
                 .append_text_node(&base64::engine::general_purpose::STANDARD.encode(encrypted_key));
@@ -140,8 +181,16 @@ impl XMPPClient {
 
         // Add EME indicator (XEP-0380)
         let mut eme_element = Element::builder("encryption", "urn:xmpp:eme:0").build();
-        eme_element.set_attr("namespace", custom_ns::OMEMO_V1);
-        eme_element.set_attr("name", "OMEMO");
+        eme_element.set_attr(
+            xmpp_parsers::minidom::rxml::Namespace::NONE,
+            "namespace".try_into().unwrap(),
+            custom_ns::OMEMO_V1,
+        );
+        eme_element.set_attr(
+            xmpp_parsers::minidom::rxml::Namespace::NONE,
+            "name".try_into().unwrap(),
+            "OMEMO",
+        );
         message_element.append_child(eme_element);
 
         // Add body fallback for clients that don't support OMEMO
@@ -166,7 +215,7 @@ impl XMPPClient {
                 id: id.clone(),
                 to: to.to_string(),
                 content: content.to_string(),
-                timestamp: chrono::Utc::now().timestamp() as u64,
+                timestamp: chrono::Utc::now().timestamp_millis().into(),
                 status: DeliveryStatus::Sent,
             };
             pending_receipts_guard.insert(id.clone(), pending_message);
@@ -175,7 +224,7 @@ impl XMPPClient {
         // Create a "sent" message for the UI
         let message = Message::outgoing_encrypted(id.clone(), to, content);
 
-        if let Err(e) = self.msg_tx.send(message).await {
+        if let Err(e) = self.msg_tx.send(crate::models::AppEvent::Chat(message)).await {
             error!("Failed to send message to UI: {}", e);
         }
 
@@ -190,7 +239,7 @@ impl XMPPClient {
             id: message_id.to_string(),
             to: recipient.to_string(),
             content: String::new(),
-            timestamp: chrono::Utc::now().timestamp() as u64,
+            timestamp: chrono::Utc::now().timestamp_millis().into(),
             status: DeliveryStatus::Sent,
         };
 

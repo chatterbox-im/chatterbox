@@ -2,6 +2,7 @@
 // These tests verify OMEMO encryption functionality according to XEP-0384
 
 // Import common test utilities
+#[path = "../tests/common/mod.rs"]
 mod common;
 use common::{get_test_credentials, get_test_recipient, setup_logging, wait_for_message};
 
@@ -17,14 +18,25 @@ use chatterbox::models::DeliveryStatus;
 use base64::Engine;
 use chatterbox::omemo::protocol::OmemoMessage;
 use chatterbox::xmpp::introspection::verify_omemo_stanza;
-use xmpp_parsers::Element;
+// `Element` is re-exported from minidom, not from the xmpp-parsers root.
+// Every module in `src/` already uses this path.
+use xmpp_parsers::minidom::Element;
 
 // Instead, define the OMEMO namespace constant locally:
 const OMEMO: &str = "eu.siacs.conversations.axolotl";
 
+/// minidom 0.19 changed `set_attr` to take an explicit namespace and a checked
+/// `NcName`.  `src/xmpp/send.rs` spells the new call out in full at every site;
+/// this helper keeps the tests readable while using the identical API.
+fn set_plain_attr(elem: &mut Element, name: &str, value: &str) {
+    elem.set_attr(
+        xmpp_parsers::minidom::rxml::Namespace::NONE,
+        name.try_into().expect("attribute name must be a valid NcName"),
+        value,
+    );
+}
+
 /// Test OMEMO encryption functionality
-#[tokio::test]
-#[ignore = "requires live XMPP server"]
 async fn test_omemo_encryption() -> Result<()> {
     // Setup logging for the test
     setup_logging();
@@ -183,9 +195,12 @@ async fn test_omemo_encryption() -> Result<()> {
                 content: test_message.clone(),
                 sender_id: "".to_string(),
                 recipient_id: test_contact.to_string(),
-                timestamp: chrono::Utc::now().timestamp() as u64,
+                timestamp: chatterbox::units::Millis::from(chrono::Utc::now().timestamp_millis()),
                 delivery_status: DeliveryStatus::Unknown,
                 encrypted: false,
+                direction: chatterbox::models::Direction::Outgoing {
+                    to: chatterbox::jid::BareJid::parse(test_contact).expect("expected valid JID"),
+                },
             }
         }
     };
@@ -241,7 +256,7 @@ async fn test_omemo_encryption() -> Result<()> {
 
                                     // Test trust/untrust operations
                                     drop(manager_guard);
-                                    let manager_guard = omemo_manager.lock().await;
+                                    let mut manager_guard = omemo_manager.lock().await;
 
                                     // First mark as trusted
                                     if let Err(e) = manager_guard
@@ -493,8 +508,6 @@ async fn test_omemo_encryption() -> Result<()> {
 }
 
 /// Test OMEMO device trust management functionality
-#[tokio::test]
-#[ignore = "requires live XMPP server"]
 async fn test_omemo_device_trust() -> Result<()> {
     // Setup logging for the test
     setup_logging();
@@ -571,7 +584,7 @@ async fn test_omemo_device_trust() -> Result<()> {
 
     // First mark as untrusted
     match client
-        .mark_device_untrusted(&credentials.username, device_id)
+        .mark_device_untrusted(&credentials.username, device_id.into())
         .await
     {
         Ok(_) => info!("Successfully marked device as untrusted"),
@@ -583,7 +596,7 @@ async fn test_omemo_device_trust() -> Result<()> {
 
     // Verify it's untrusted
     let trusted_status = match client
-        .is_device_trusted(&credentials.username, device_id)
+        .is_device_trusted(&credentials.username, device_id.into())
         .await
     {
         Ok(status) => {
@@ -608,7 +621,7 @@ async fn test_omemo_device_trust() -> Result<()> {
 
     // Mark as trusted
     match client
-        .mark_device_trusted(&credentials.username, device_id)
+        .mark_device_trusted(&credentials.username, device_id.into())
         .await
     {
         Ok(_) => info!("Successfully marked device as trusted"),
@@ -621,7 +634,7 @@ async fn test_omemo_device_trust() -> Result<()> {
 
     // Verify it's now trusted
     let trusted_status_after = match client
-        .is_device_trusted(&credentials.username, device_id)
+        .is_device_trusted(&credentials.username, device_id.into())
         .await
     {
         Ok(status) => {
@@ -682,7 +695,7 @@ async fn test_omemo_device_trust() -> Result<()> {
             if devices.is_empty() {
                 info!("Contact {} has no OMEMO devices", test_contact);
                 // Create a mock device ID for testing
-                vec![1]
+                vec![chatterbox::omemo::device_id::DeviceId::from(1u32)]
             } else {
                 info!(
                     "Contact {} has {} OMEMO devices: {:?}",
@@ -696,7 +709,7 @@ async fn test_omemo_device_trust() -> Result<()> {
         Err(e) => {
             warn!("Failed to get contact devices: {}", e);
             // Use a mock device ID for testing
-            vec![1]
+            vec![chatterbox::omemo::device_id::DeviceId::from(1u32)]
         }
     };
 
@@ -746,8 +759,6 @@ async fn test_omemo_device_trust() -> Result<()> {
 }
 
 /// Test OMEMO bundle management and rotation
-#[tokio::test]
-#[ignore = "requires live XMPP server"]
 async fn test_omemo_bundle_management() -> Result<()> {
     // Setup logging for the test
     setup_logging();
@@ -863,8 +874,6 @@ async fn test_omemo_bundle_management() -> Result<()> {
 }
 
 /// Test OMEMO group encryption functionality
-#[tokio::test]
-#[ignore = "requires live XMPP server"]
 async fn test_omemo_group_encryption() -> Result<()> {
     // Setup logging for the test
     setup_logging();
@@ -976,8 +985,6 @@ async fn test_omemo_group_encryption() -> Result<()> {
 // -----------------------------------------------------------------------------
 
 /// Positive test: Send a well-formed OMEMO stanza and verify compliance
-#[tokio::test]
-#[ignore = "requires live XMPP server"]
 async fn test_omemo_stanza_positive_compliance() -> anyhow::Result<()> {
     let credentials = common::get_test_credentials().await?;
     let (mut client, _msg_rx) = chatterbox::xmpp::XMPPClient::new();
@@ -991,11 +998,11 @@ async fn test_omemo_stanza_positive_compliance() -> anyhow::Result<()> {
     client.initialize_client().await?;
 
     // Construct a minimal, valid OmemoMessage
-    let sender_device_id = 12345u32;
+    let sender_device_id = chatterbox::omemo::device_id::DeviceId::from(12345u32);
     let iv = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
     let ciphertext = b"hello encrypted world".to_vec();
-    let mut encrypted_keys = std::collections::HashMap::new();
-    encrypted_keys.insert(67890u32, vec![9, 8, 7, 6, 5, 4, 3, 2, 1]);
+    let mut encrypted_keys = std::collections::HashMap::<chatterbox::omemo::device_id::DeviceId, Vec<u8>>::new();
+    encrypted_keys.insert(chatterbox::omemo::device_id::DeviceId::from(67890u32), vec![9, 8, 7, 6, 5, 4, 3, 2, 1]);
     let _omemo_msg = OmemoMessage {
         sender_device_id,
         ratchet_key: vec![0; 32],
@@ -1012,18 +1019,18 @@ async fn test_omemo_stanza_positive_compliance() -> anyhow::Result<()> {
 
     // Manually construct the OMEMO stanza as Element
     let mut message_element = Element::builder("message", "jabber:client").build();
-    message_element.set_attr("to", &credentials.username);
-    message_element.set_attr("type", "chat");
+    set_plain_attr(&mut message_element, "to", &credentials.username);
+    set_plain_attr(&mut message_element, "type", "chat");
 
     let mut encrypted_element = Element::builder("encrypted", OMEMO).build();
     let mut header_element = Element::builder("header", OMEMO).build();
-    header_element.set_attr("sid", &sender_device_id.to_string());
+    set_plain_attr(&mut header_element, "sid", &sender_device_id.to_string());
     let mut iv_element = Element::builder("iv", OMEMO).build();
     iv_element.append_text_node(&base64::engine::general_purpose::STANDARD.encode(&iv));
     header_element.append_child(iv_element);
     for (device_id, key) in &encrypted_keys {
         let mut key_element = Element::builder("key", OMEMO).build();
-        key_element.set_attr("rid", &device_id.to_string());
+        set_plain_attr(&mut key_element, "rid", &device_id.to_string());
         key_element.append_text_node(&base64::engine::general_purpose::STANDARD.encode(key));
         header_element.append_child(key_element);
     }
@@ -1048,13 +1055,11 @@ async fn test_omemo_stanza_positive_compliance() -> anyhow::Result<()> {
 
 /// Negative test: Send a malformed OMEMO stanza and verify non-compliance
 /// This test intentionally omits the 'header' element and includes plaintext in the payload.
-#[tokio::test]
-#[ignore = "requires live XMPP server"]
 async fn test_omemo_stanza_negative_compliance() -> anyhow::Result<()> {
     // Construct a malformed OMEMO stanza (missing header, plaintext in payload)
     let mut message_element = Element::builder("message", "jabber:client").build();
-    message_element.set_attr("to", "alice@example.com");
-    message_element.set_attr("type", "chat");
+    set_plain_attr(&mut message_element, "to", "alice@example.com");
+    set_plain_attr(&mut message_element, "type", "chat");
 
     let mut encrypted_element = Element::builder("encrypted", OMEMO).build();
     // Intentionally omit the 'header' element
@@ -1070,5 +1075,16 @@ async fn test_omemo_stanza_negative_compliance() -> anyhow::Result<()> {
         result.is_err(),
         "Malformed OMEMO stanza should not be considered compliant"
     );
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    test_omemo_encryption().await?;
+    test_omemo_device_trust().await?;
+    test_omemo_bundle_management().await?;
+    test_omemo_group_encryption().await?;
+    test_omemo_stanza_positive_compliance().await?;
+    test_omemo_stanza_negative_compliance().await?;
     Ok(())
 }

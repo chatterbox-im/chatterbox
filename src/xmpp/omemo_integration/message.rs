@@ -4,10 +4,11 @@ use log::{debug, error, info, trace, warn};
 use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
 
-use tokio_xmpp::Element;
-use xmpp_parsers::BareJid as JidBare;
+use xmpp_parsers::jid::BareJid as JidBare;
+use xmpp_parsers::minidom::Element;
 
 use crate::omemo::crypto;
+use crate::omemo::device_id::DeviceId;
 use crate::omemo::OmemoError;
 use crate::omemo::{OmemoManager, OMEMO_NAMESPACE};
 
@@ -205,7 +206,7 @@ pub fn create_omemo_header(
 ) -> Result<Element, OmemoError> {
     // Create the header element
     let mut header = Element::builder("header", "eu.siacs.conversations.axolotl")
-        .attr("sid", sender_device_id.to_string())
+        .attr("sid".try_into().unwrap(), sender_device_id.to_string())
         .build();
 
     // Add IV to header
@@ -214,7 +215,7 @@ pub fn create_omemo_header(
     // Add encrypted keys to header
     for (rid, key_data) in keys {
         let mut key_element = Element::builder("key", "eu.siacs.conversations.axolotl")
-            .attr("rid", rid.to_string())
+            .attr("rid".try_into().unwrap(), rid.to_string())
             .build();
         key_element.append_text_node(&BASE64_STANDARD.encode(key_data));
 
@@ -367,10 +368,10 @@ pub async fn process_incoming_omemo_message(
     // Find a matching key for our device
     let mut message_key_option: Option<Vec<u8>> = None;
     for (rid, key_data) in encrypted_keys {
-        if own_device_ids.contains(&rid) {
+        if own_device_ids.contains(&DeviceId::from(rid)) {
             // Decrypt the message key
             let _key_result = match omemo
-                .decrypt_message_key(from_jid.to_string(), sender_device_id, &key_data)
+                .decrypt_message_key(from_jid.to_string(), DeviceId::from(sender_device_id), &key_data)
                 .await
             {
                 Ok(key) => {

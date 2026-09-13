@@ -22,6 +22,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use crate::omemo::crypto;
+use crate::omemo::keys::{PublicKey, Secret};
 use crate::omemo::protocol::KeyPair;
 
 // TESTING: Optional path override for tests
@@ -37,10 +38,33 @@ pub fn set_test_path_override(path: Option<PathBuf>) {
     *override_lock = path;
 }
 
-/// Type definition for OMEMO device IDs
+/// OMEMO device identifier.
 ///
-/// According to XEP-0384, device IDs should be in the range 1 to 2^31 - 1.
-pub type DeviceId = u32;
+/// Valid range per XEP-0384: 1 ≤ id ≤ 2^31−1.  Use `DeviceId::from(v)` to
+/// wrap a `u32`; use `.get()` to recover the inner value.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DeviceId(u32);
+
+impl DeviceId {
+    pub fn get(self) -> u32 { self.0 }
+    pub fn is_valid_xep384(self) -> bool { self.0 > 0 && self.0 <= i32::MAX as u32 }
+}
+
+impl From<u32> for DeviceId { fn from(v: u32) -> Self { DeviceId(v) } }
+impl From<DeviceId> for u32 { fn from(d: DeviceId) -> Self { d.0 } }
+
+impl std::fmt::Display for DeviceId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "{}", self.0) }
+}
+impl std::fmt::Debug for DeviceId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "DeviceId({})", self.0) }
+}
+
+impl std::str::FromStr for DeviceId {
+    type Err = std::num::ParseIntError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> { s.parse::<u32>().map(DeviceId) }
+}
 
 // ------------------- Device ID Management -------------------
 
@@ -58,7 +82,7 @@ pub fn generate_device_id() -> DeviceId {
     let mut rng = rand::thread_rng();
     // Ensure we generate device IDs within the range specified by XEP-0384
     // (1 to 2^31 - 1, i.e., positive 31-bit integers)
-    rng.gen_range(1..i32::MAX as u32)
+    rng.gen_range(1..i32::MAX as u32).into()
 }
 
 /// Get the path to the device ID file
@@ -150,7 +174,7 @@ pub fn load_or_generate_device_id() -> Result<(DeviceId, bool)> {
 
         // Parse the device ID
         match content.trim().parse::<DeviceId>() {
-            Ok(id) if id > 0 && id < i32::MAX as u32 => {
+            Ok(id) if id.is_valid_xep384() => {
                 //debug!("Loaded device ID: {}", id);
                 Ok((id, false))
             }
@@ -283,12 +307,12 @@ fn get_identity_key_file_path() -> Result<PathBuf> {
 /// According to XEP-0384, the Identity Key is a long-term key used for authentication
 /// and initial key agreement.
 pub fn generate_identity_key() -> Result<KeyPair> {
-    // generate_x25519_keypair returns (private_key, public_key)
-    let (private_key, public_key) = crypto::generate_x25519_keypair()?;
-
+    let (private_key_bytes, public_key_bytes) = crypto::generate_x25519_keypair()?;
     Ok(KeyPair {
-        public_key,
-        private_key,
+        public_key: PublicKey::from_wire(&public_key_bytes)
+            .ok_or_else(|| anyhow!("generated x25519 public key has unexpected length"))?,
+        private_key: Secret::from_slice(&private_key_bytes)
+            .expect("x25519 key is always 32 bytes"),
     })
 }
 
@@ -298,7 +322,7 @@ pub fn generate_identity_key() -> Result<KeyPair> {
 /// The format is: "public_key:private_key" where both keys are Base64 encoded.
 fn serialize_key_pair(key_pair: &KeyPair) -> String {
     let public_b64 = BASE64.encode(&key_pair.public_key);
-    let private_b64 = BASE64.encode(&key_pair.private_key);
+    let private_b64 = BASE64.encode(key_pair.private_key.expose_secret());
     format!("{}:{}", public_b64, private_b64)
 }
 
@@ -323,8 +347,10 @@ fn deserialize_key_pair(serialized: &str) -> Result<KeyPair> {
         .map_err(|e| anyhow!("Failed to decode private key: {}", e))?;
 
     Ok(KeyPair {
-        public_key,
-        private_key,
+        public_key: PublicKey::from_wire(&public_key)
+            .ok_or_else(|| anyhow!("public key must be 32 bytes, got {}", public_key.len()))?,
+        private_key: Secret::from_slice(&private_key)
+            .ok_or_else(|| anyhow!("private key must be 32 bytes, got {}", private_key.len()))?,
     })
 }
 
@@ -459,7 +485,7 @@ impl Default for MultiDeviceInfo {
             .as_secs();
 
         Self {
-            current_device_id: 0, // Will be set properly when initialized
+            current_device_id: DeviceId::from(0u32), // Will be set properly when initialized
             known_device_ids: HashSet::new(),
             last_updated: now,
         }
@@ -500,7 +526,7 @@ pub fn load_or_initialize_multi_device_info(device_id: DeviceId) -> Result<Multi
         match load_multi_device_info(&path) {
             Ok(mut info) => {
                 // Update with the current device ID if needed
-                if info.current_device_id != device_id && device_id > 0 {
+                if info.current_device_id != device_id && device_id.get() > 0 {
                     info.current_device_id = device_id;
                     info.known_device_ids.insert(device_id);
 
@@ -759,17 +785,17 @@ mod tests {
     fn test_device_id_generation() {
         // Generate a device ID
         let device_id = generate_device_id();
-        assert!(device_id > 0, "Device ID should be non-zero");
+        assert!(device_id.get() > 0, "Device ID should be non-zero");
         assert!(
-            device_id <= i32::MAX as u32,
+            device_id.get() <= i32::MAX as u32,
             "Device ID should be within range"
         );
 
         // Generate another ID and verify it's different
         let device_id2 = generate_device_id();
-        assert!(device_id2 > 0, "Second device ID should be non-zero");
+        assert!(device_id2.get() > 0, "Second device ID should be non-zero");
         assert!(
-            device_id2 <= i32::MAX as u32,
+            device_id2.get() <= i32::MAX as u32,
             "Second device ID should be within range"
         );
 
@@ -822,7 +848,7 @@ mod tests {
             "Second call should load the existing device ID"
         );
         assert_eq!(
-            device_id, loaded_id,
+            device_id, loaded_id.get(),
             "Loaded device ID should match the saved one"
         );
 
@@ -841,11 +867,11 @@ mod tests {
 
         // Verify the key has valid data
         assert!(
-            !key_pair.public_key.is_empty(),
+            !key_pair.public_key.as_ref().is_empty(),
             "Public key should not be empty"
         );
         assert!(
-            !key_pair.private_key.is_empty(),
+            !key_pair.private_key.expose_secret().is_empty(),
             "Private key should not be empty"
         );
 
@@ -958,9 +984,9 @@ mod tests {
 
         // Create a new info
         let mut info = MultiDeviceInfo::default();
-        info.current_device_id = 12345;
-        info.known_device_ids.insert(12345);
-        info.known_device_ids.insert(67890);
+        info.current_device_id = DeviceId::from(12345);
+        info.known_device_ids.insert(DeviceId::from(12345));
+        info.known_device_ids.insert(DeviceId::from(67890));
 
         // Save it
         save_multi_device_info(&file_path, &info)?;
@@ -994,8 +1020,8 @@ mod tests {
 
         // Create an initial info
         let mut info = MultiDeviceInfo::default();
-        info.current_device_id = 12345;
-        info.known_device_ids.insert(12345);
+        info.current_device_id = DeviceId::from(12345);
+        info.known_device_ids.insert(DeviceId::from(12345));
 
         // Save it
         save_multi_device_info(&path, &info)?;
@@ -1012,7 +1038,7 @@ mod tests {
             initial_info.known_device_ids
         );
         assert!(
-            initial_info.known_device_ids.contains(&12345),
+            initial_info.known_device_ids.contains(&DeviceId::from(12345)),
             "Initial info should contain device ID 12345"
         );
 
@@ -1025,8 +1051,8 @@ mod tests {
 
         // Manually update the info to ensure it works correctly
         let mut updated_info = initial_info.clone();
-        updated_info.known_device_ids.insert(67890);
-        updated_info.known_device_ids.insert(13579);
+        updated_info.known_device_ids.insert(DeviceId::from(67890));
+        updated_info.known_device_ids.insert(DeviceId::from(13579));
         save_multi_device_info(&path, &updated_info)?;
 
         // Load it back directly to verify
@@ -1038,15 +1064,15 @@ mod tests {
 
         // Verify all devices are there in the loaded info
         assert!(
-            loaded_info.known_device_ids.contains(&12345),
+            loaded_info.known_device_ids.contains(&DeviceId::from(12345)),
             "Loaded info should contain device ID 12345"
         );
         assert!(
-            loaded_info.known_device_ids.contains(&67890),
+            loaded_info.known_device_ids.contains(&DeviceId::from(67890)),
             "Loaded info should contain device ID 67890"
         );
         assert!(
-            loaded_info.known_device_ids.contains(&13579),
+            loaded_info.known_device_ids.contains(&DeviceId::from(13579)),
             "Loaded info should contain device ID 13579"
         );
 
@@ -1072,10 +1098,10 @@ mod tests {
 
         // Create an initial info with multiple devices
         let mut info = MultiDeviceInfo::default();
-        info.current_device_id = 12345;
-        info.known_device_ids.insert(12345);
-        info.known_device_ids.insert(67890);
-        info.known_device_ids.insert(13579);
+        info.current_device_id = DeviceId::from(12345);
+        info.known_device_ids.insert(DeviceId::from(12345));
+        info.known_device_ids.insert(DeviceId::from(67890));
+        info.known_device_ids.insert(DeviceId::from(13579));
 
         // Save it
         save_multi_device_info(&path, &info)?;
@@ -1092,13 +1118,13 @@ mod tests {
             initial_info.known_device_ids
         );
         assert!(
-            initial_info.known_device_ids.contains(&67890),
+            initial_info.known_device_ids.contains(&DeviceId::from(67890)),
             "Initial info should contain device ID 67890"
         );
 
         // Manually remove the device to ensure it works correctly
         let mut updated_info = initial_info.clone();
-        updated_info.known_device_ids.remove(&67890);
+        updated_info.known_device_ids.remove(&DeviceId::from(67890));
         save_multi_device_info(&path, &updated_info)?;
         println!("[test_remove_device] device 67890 manually removed");
 
@@ -1111,15 +1137,15 @@ mod tests {
 
         // Verify the device was removed
         assert!(
-            loaded_info.known_device_ids.contains(&12345),
+            loaded_info.known_device_ids.contains(&DeviceId::from(12345)),
             "Loaded info should contain device ID 12345"
         );
         assert!(
-            !loaded_info.known_device_ids.contains(&67890),
+            !loaded_info.known_device_ids.contains(&DeviceId::from(67890)),
             "Loaded info should NOT contain device ID 67890"
         );
         assert!(
-            loaded_info.known_device_ids.contains(&13579),
+            loaded_info.known_device_ids.contains(&DeviceId::from(13579)),
             "Loaded info should contain device ID 13579"
         );
 

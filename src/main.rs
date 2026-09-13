@@ -9,10 +9,47 @@ use std::{
 };
 
 mod app;
+mod commands;
 mod credentials;
 mod sandbox;
 mod ui;
 mod utils;
+mod instance_lock;
+
+/// Checks whether the Linux kernel supports Landlock sandboxing.
+/// Tries multiple detection methods: sysfs, /proc/config.gz, and kernel version.
+#[cfg(target_os = "linux")]
+fn landlock_supported() -> bool {
+    // Method 1: Check /proc/sys/kernel/landlock (sysfs) — most reliable.
+    if let Ok(content) = std::fs::read_to_string("/proc/sys/kernel/landlock") {
+        if content.trim().parse::<u32>().is_ok() {
+            return true;
+        }
+    }
+
+    // Method 2: Check /proc/config.gz for CONFIG_LANDLOCK=y
+    if let Ok(content) = std::fs::read_to_string("/proc/config.gz") {
+        if content.contains("CONFIG_LANDLOCK=y") || content.contains("CONFIG_LANDLOCK=full") {
+            return true;
+        }
+    }
+
+    // Method 3: Parse kernel version from /proc/version as a fallback.
+    if let Ok(version_content) = std::fs::read_to_string("/proc/version") {
+        if let Some(pos) = version_content.find("Linux ") {
+            let kernel_str = &version_content[pos + 6..];
+            if let Some((major, minor)) = kernel_str.split_once('.') {
+                if let (Ok(major), Ok(minor)) = (major.parse::<usize>(), minor.parse::<usize>()) {
+                    if major > 5 || (major == 5 && minor >= 13) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    false
+}
 
 use crate::credentials::{load_credentials, save_credentials, Credentials};
 use chatterbox::xmpp::XMPPClient;
@@ -27,9 +64,15 @@ use chatterbox::xmpp::XMPPClient;
     Optional parameters:\n\
     --omemo-dir <PATH>     Override the directory for OMEMO device_id, identity_key, and multi-device info files\n\
     --disable-mam          Disable Message Archive Management (MAM) - no historical messages will be loaded\n\
+    --no-sandbox           Disable the startup filesystem sandbox (same as CHATTERBOX_NO_SANDBOX=1)\n\
     Use -h or --help to see all options."
 )]
-struct Args {
+struct Args {    #[arg(
+        long,
+        help = "Disable the startup filesystem sandbox (same as CHATTERBOX_NO_SANDBOX=1)"
+    )]
+    no_sandbox: bool,
+
     /// Directory for OMEMO device_id, identity_key, and multi-device info files
     #[arg(
         long,
@@ -44,6 +87,13 @@ struct Args {
         help = "Disable Message Archive Management (MAM) - no historical messages will be loaded"
     )]
     disable_mam: bool,
+
+    /// Allow multiple instances of Chatterbox to run concurrently (not recommended)
+    #[arg(
+        long,
+        help = "Allow multiple instances to run concurrently (may corrupt OMEMO state and databases)"
+    )]
+    allow_multiple_instances: bool,
 }
 
 /// Prompts the user for login credentials or uses environment variables
@@ -101,8 +151,72 @@ fn main() -> Result<()> {
         });
         allow_dirs.sort();
         allow_dirs.dedup();
-        sandbox::install_and_reexec(&allow_dirs);
+
+        // On Linux, check if the kernel supports Landlock before attempting to sandbox.
+        // If not supported, exit with a clear message rather than failing silently.
+        let sandbox_disabled = args.no_sandbox || std::env::var_os("CHATTERBOX_NO_SANDBOX").is_some();
+
+        #[cfg(target_os = "linux")]
+        {
+            if sandbox_disabled {
+                // User explicitly disabled sandbox — skip entirely.
+                sandbox::install_and_reexec(&allow_dirs, false);
+            } else if !landlock_supported() {
+                eprintln!("chatterbox: ERROR — Linux kernel does not support Landlock sandboxing.");
+                eprintln!("  Required: CONFIG_LANDLOCK=y and kernel >= 5.13.");
+                eprintln!("  This can happen in containers (Docker, WSL) or minimal kernels.");
+                eprintln!("  Workaround: use --no-sandbox to run without filesystem isolation,");
+                eprintln!("  or set CHATTERBOX_NO_SANDBOX=1.");
+                std::process::exit(1);
+            } else {
+                // Landlock available — install sandbox.
+                sandbox::install_and_reexec(&allow_dirs, true);
+            }
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            sandbox::install_and_reexec(&allow_dirs, sandbox_disabled);
+        }
     }
+
+    // Ensure only a single instance of Chatterbox runs per data directory
+    let _instance_lock = if !args.allow_multiple_instances {
+        let lock_dir = match &args.omemo_dir {
+            Some(dir) => dir.clone(),
+            None => dirs::data_dir()
+                .map(|d| d.join("chatterbox"))
+                .unwrap_or_else(|| PathBuf::from(".")),
+        };
+        let lock_path = lock_dir.join("chatterbox.lock");
+        match instance_lock::InstanceLock::acquire(&lock_path) {
+            Ok(lock) => Some(lock),
+            Err(instance_lock::InstanceLockError::AlreadyRunning { pid, path }) => {
+                let pid_msg = pid.map(|p| format!(" (PID {p})")).unwrap_or_default();
+                eprintln!(
+                    "chatterbox: ERROR — Another instance of Chatterbox is already running{pid_msg}."
+                );
+                eprintln!("  Lockfile: {}", path.display());
+                eprintln!(
+                    "  Running multiple instances against the same data directory can corrupt"
+                );
+                eprintln!(
+                    "  local message databases and desynchronize OMEMO cryptographic ratchet sessions."
+                );
+                eprintln!(
+                    "  Use --allow-multiple-instances if you need to run anyway."
+                );
+                std::process::exit(1);
+            }
+            Err(e) => {
+                eprintln!("chatterbox: WARNING — Failed to acquire instance lock: {e}");
+                eprintln!("  Continuing anyway...");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     // Sandbox is installed (still single-threaded). Now start the async runtime
     // and run the application body. Runtime::new() == multi-thread + enable_all,

@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use thiserror::Error;
 
 use crate::omemo::device_id::DeviceId;
+use crate::omemo::keys::{ChainKey, EphemeralPrivateKey, OneTimePreKeyId, RegistrationId, RootKey, Secret, SignedPreKeyId};
 use crate::omemo::protocol::{DoubleRatchet, DoubleRatchetError, KeyPair, RatchetState};
 
 /// Session manager errors
@@ -129,7 +130,9 @@ impl OmemoSessionState {
 
     /// True when the inner session has been cryptographically initialised.
     pub fn is_initialized(&self) -> bool {
-        self.as_session().map(|s| s.is_initialized()).unwrap_or(false)
+        self.as_session()
+            .map(|s| s.is_initialized())
+            .unwrap_or(false)
     }
 
     /// True when the entry needs a fresh outbound PreKey — either because the
@@ -137,7 +140,10 @@ impl OmemoSessionState {
     /// because we are proactively recovering from repeated MAC failures
     /// (`RecoveryPreKeySent`).
     pub fn needs_rebuild(&self) -> bool {
-        matches!(self, Self::PeerResetPending | Self::RecoveryPreKeySent { .. })
+        matches!(
+            self,
+            Self::PeerResetPending | Self::RecoveryPreKeySent { .. }
+        )
     }
 
     /// True when this entry represents an in-progress recovery attempt.
@@ -162,15 +168,15 @@ impl OmemoSession {
                 is_initiator: false,
                 remote_identity_key: vec![],
                 local_identity_key_pair: KeyPair {
-                    public_key: vec![],
-                    private_key: vec![],
+                    public_key: crate::omemo::keys::PublicKey::new([0u8; 32]),
+                    private_key: Secret::new([0u8; 32]),
                 },
-                root_key: vec![],
-                send_chain_key: vec![],
-                receive_chain_key: vec![],
+                root_key: RootKey::from_slice(&[0u8; 32]).unwrap(),
+                send_chain_key: ChainKey::from_slice(&[0u8; 32]).unwrap(),
+                receive_chain_key: ChainKey::from_slice(&[0u8; 32]).unwrap(),
                 ratchet_key_pair: KeyPair {
-                    public_key: vec![],
-                    private_key: vec![],
+                    public_key: crate::omemo::keys::PublicKey::new([0u8; 32]),
+                    private_key: Secret::new([0u8; 32]),
                 },
                 remote_ratchet_key: vec![],
                 prev_remote_ratchet_key: vec![],
@@ -182,6 +188,7 @@ impl OmemoSession {
                 local_device_id,
                 remote_device_id,
                 remote_jid: remote_jid,
+                establishing_base_key: None,
             },
         }
     }
@@ -222,7 +229,7 @@ impl OmemoSession {
         remote_identity_key: Vec<u8>,
         remote_signed_prekey: Vec<u8>,
         remote_one_time_prekey: Option<Vec<u8>>,
-        ephemeral_key: Vec<u8>,
+        ephemeral_key: EphemeralPrivateKey,
         local_device_id: DeviceId,
     ) -> Result<Self, SessionError> {
         debug!(
@@ -356,41 +363,6 @@ impl OmemoSession {
         self.remote_device_id
     }
 
-    /// Encrypt a message
-    pub fn encrypt(&mut self, plaintext: &[u8]) -> Result<Vec<u8>, SessionError> {
-        if !self.ratchet_state.initialized {
-            return Err(SessionError::InvalidStateError(
-                "Session not initialized".to_string(),
-            ));
-        }
-
-        let message = DoubleRatchet::encrypt(&mut self.ratchet_state, plaintext)?;
-
-        // For this example, we'll use JSON serialization
-        let encoded = serde_json::to_vec(&message)
-            .map_err(|e| SessionError::SerializationError(e.to_string()))?;
-
-        Ok(encoded)
-    }
-
-    /// Decrypt a message
-    pub fn decrypt(&mut self, ciphertext: &[u8]) -> Result<Vec<u8>, SessionError> {
-        if !self.ratchet_state.initialized {
-            return Err(SessionError::InvalidStateError(
-                "Session not initialized".to_string(),
-            ));
-        }
-
-        // Deserialize the message
-        let message = serde_json::from_slice(ciphertext)
-            .map_err(|e| SessionError::SerializationError(e.to_string()))?;
-
-        // Decrypt it
-        let plaintext = DoubleRatchet::decrypt(&mut self.ratchet_state, &message)?;
-
-        Ok(plaintext)
-    }
-
     /// Encrypt a message key for transport (produces a SignalMessage in wire format)
     pub fn encrypt_key(&mut self, key: &[u8]) -> Result<Vec<u8>, SessionError> {
         if !self.ratchet_state.initialized {
@@ -409,9 +381,9 @@ impl OmemoSession {
     pub fn encrypt_key_prekey(
         &mut self,
         key: &[u8],
-        registration_id: u32,
-        pre_key_id: Option<u32>,
-        signed_pre_key_id: u32,
+        registration_id: RegistrationId,
+        pre_key_id: Option<OneTimePreKeyId>,
+        signed_pre_key_id: SignedPreKeyId,
         base_key: &[u8],
         identity_key: &[u8],
     ) -> Result<Vec<u8>, SessionError> {
@@ -427,9 +399,9 @@ impl OmemoSession {
         // Wrap in PreKeySignalMessage, embedding the raw inner bytes directly
         // (no re-serialization, preserving the original MAC)
         let prekey_msg = crate::omemo::wire::PreKeySignalMessage {
-            registration_id,
-            pre_key_id,
-            signed_pre_key_id,
+            registration_id: registration_id.0,
+            pre_key_id: pre_key_id.map(|id| id.0),
+            signed_pre_key_id: signed_pre_key_id.0,
             base_key: base_key.to_vec(),
             identity_key: identity_key.to_vec(),
             message: crate::omemo::wire::SignalMessage {
@@ -495,8 +467,8 @@ mod tests {
         use std::collections::HashMap;
 
         let remote_jid = "User@Domain.Com".to_string();
-        let remote_device_id = 123;
-        let local_device_id = 456;
+        let remote_device_id = DeviceId::from(123u32);
+        let local_device_id = DeviceId::from(456u32);
 
         let mut session = OmemoSession::new(remote_jid.clone(), remote_device_id, local_device_id);
 
@@ -506,15 +478,15 @@ mod tests {
             is_initiator: false,
             remote_identity_key: vec![],
             local_identity_key_pair: crate::omemo::protocol::KeyPair {
-                private_key: vec![],
-                public_key: vec![],
+                private_key: Secret::new([0u8; 32]),
+                public_key: crate::omemo::keys::PublicKey::new([0u8; 32]),
             },
-            root_key: vec![],
-            send_chain_key: vec![],
-            receive_chain_key: vec![],
+            root_key: RootKey::from_slice(&[0u8; 32]).unwrap(),
+            send_chain_key: ChainKey::from_slice(&[0u8; 32]).unwrap(),
+            receive_chain_key: ChainKey::from_slice(&[0u8; 32]).unwrap(),
             ratchet_key_pair: crate::omemo::protocol::KeyPair {
-                private_key: vec![],
-                public_key: vec![],
+                private_key: Secret::new([0u8; 32]),
+                public_key: crate::omemo::keys::PublicKey::new([0u8; 32]),
             },
             remote_ratchet_key: vec![],
             prev_remote_ratchet_key: vec![],
@@ -526,6 +498,7 @@ mod tests {
             local_device_id,
             remote_device_id,
             remote_jid: "user@domain.com".to_string(), // Different case
+            establishing_base_key: None,
         };
 
         // Should succeed despite case difference

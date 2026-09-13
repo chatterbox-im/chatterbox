@@ -28,23 +28,77 @@ fn strip_key_prefix(key: Vec<u8>) -> Vec<u8> {
 }
 
 /// MAC length appended to SignalMessage (8 bytes)
-const MAC_LENGTH: usize = 8;
+pub(crate) const MAC_LENGTH: usize = 8;
+
+/// An 8-byte truncated HMAC-SHA256 MAC.  Can only be constructed from exactly
+/// MAC_LENGTH bytes, so `verify_mac` never receives a wrong-length slice.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Mac([u8; MAC_LENGTH]);
+
+impl Mac {
+    /// Construct from a slice.  Returns `None` if the length is not MAC_LENGTH.
+    pub fn from_bytes(b: &[u8]) -> Option<Self> {
+        <[u8; MAC_LENGTH]>::try_from(b).ok().map(Mac)
+    }
+    pub fn as_bytes(&self) -> &[u8; MAC_LENGTH] {
+        &self.0
+    }
+}
+
+/// Proof that a `SignalMessage`'s MAC was verified against the derived mac_key.
+/// No public constructor — only produced by `verify_and_authenticate`.
+/// The ratchet decrypt step takes this type so decryption cannot precede MAC check.
+pub(super) struct AuthenticatedSignalMessage(pub(super) SignalMessage);
+
+/// MAC verification failed.
+#[derive(Debug)]
+pub(super) struct MacFailure;
+
+/// Verify the Signal-protocol MAC and, if correct, return an authenticated wrapper.
+/// `mac_key`, `mac_input`, and `msg.mac` must all be consistent with one call
+/// site's construction of the MAC input (identity keys ‖ message bytes).
+pub(super) fn verify_and_authenticate(
+    mac_key: &[u8],
+    mac_input: &[u8],
+    msg: SignalMessage,
+) -> Result<AuthenticatedSignalMessage, MacFailure> {
+    let expected = match Mac::from_bytes(&msg.mac) {
+        Some(m) => m,
+        None => return Err(MacFailure),
+    };
+    if verify_mac(mac_key, mac_input, &expected) {
+        Ok(AuthenticatedSignalMessage(msg))
+    } else {
+        Err(MacFailure)
+    }
+}
 
 // Protobuf field tags (field_number << 3 | wire_type)
 // Wire type 0 = varint, 2 = length-delimited
+// Tag byte layout: [field_number (high 5 bits)] [wire_type (low 3 bits)]
 mod signal_message_tags {
+    /// Field 1: Ratchet public key (32-byte Curve25519 key, encoded with 0x05 prefix)
     pub const RATCHET_KEY: u8 = (1 << 3) | 2; // field 1, length-delimited
+    /// Field 2: Ratchet counter (monotonically increasing message number)
     pub const COUNTER: u8 = (2 << 3) | 0; // field 2, varint
+    /// Field 3: Previous ratchet counter (0 for first message in chain)
     pub const PREV_COUNTER: u8 = (3 << 3) | 0; // field 3, varint
+    /// Field 4: AES-GCM encrypted ciphertext (typically 48 bytes)
     pub const CIPHERTEXT: u8 = (4 << 3) | 2; // field 4, length-delimited
 }
 
 mod prekey_message_tags {
+    /// Field 1: One-time pre-key ID (optional, only present for first message)
     pub const PRE_KEY_ID: u8 = (1 << 3) | 0; // field 1, varint
+    /// Field 2: ECDH base key (32-byte Curve25519 public key, encoded with 0x05 prefix)
     pub const BASE_KEY: u8 = (2 << 3) | 2; // field 2, length-delimited
+    /// Field 3: Sender's identity key (32-byte Curve25519 public key, encoded with 0x05 prefix)
     pub const IDENTITY_KEY: u8 = (3 << 3) | 2; // field 3, length-delimited
+    /// Field 4: Inner SignalMessage (pre-serialized with its own MAC)
     pub const MESSAGE: u8 = (4 << 3) | 2; // field 4, length-delimited
+    /// Field 5: Device registration ID (random 16-bit value for key ratcheting)
     pub const REGISTRATION_ID: u8 = (5 << 3) | 0; // field 5, varint
+    /// Field 6: Signed pre-key ID (used for initial key exchange)
     pub const SIGNED_PRE_KEY_ID: u8 = (6 << 3) | 0; // field 6, varint
 }
 
@@ -278,9 +332,23 @@ impl SignalMessage {
                         0 => {
                             decode_varint(data, &mut offset)?;
                         } // varint
+                        1 => {
+                            // 64-bit: skip 8 bytes
+                            if offset + 8 > data.len() {
+                                return None;
+                            }
+                            offset += 8;
+                        }
                         2 => {
                             decode_bytes(data, &mut offset)?;
                         } // length-delimited
+                        5 => {
+                            // 32-bit (fixed32): skip 4 bytes
+                            if offset + 4 > data.len() {
+                                return None;
+                            }
+                            offset += 4;
+                        }
                         _ => {
                             warn!("Unknown wire type {} in SignalMessage", wire_type);
                             return None;
@@ -408,8 +476,22 @@ impl PreKeySignalMessage {
                         0 => {
                             decode_varint(data, &mut offset)?;
                         }
+                        1 => {
+                            // 64-bit: skip 8 bytes
+                            if offset + 8 > data.len() {
+                                return None;
+                            }
+                            offset += 8;
+                        }
                         2 => {
                             decode_bytes(data, &mut offset)?;
+                        }
+                        5 => {
+                            // 32-bit (fixed32): skip 4 bytes
+                            if offset + 4 > data.len() {
+                                return None;
+                            }
+                            offset += 4;
                         }
                         _ => {
                             warn!("Unknown wire type {} in PreKeySignalMessage", wire_type);
@@ -449,18 +531,12 @@ fn compute_mac(key: &[u8], data: &[u8]) -> Vec<u8> {
     mac.finalize().into_bytes().to_vec()
 }
 
-/// Verify an 8-byte truncated HMAC-SHA256
-pub fn verify_mac(key: &[u8], data: &[u8], expected_mac: &[u8]) -> bool {
+/// Verify an 8-byte truncated HMAC-SHA256.  The `expected` type guarantees the
+/// slice is exactly MAC_LENGTH bytes — no runtime length check needed.
+pub fn verify_mac(key: &[u8], data: &[u8], expected: &Mac) -> bool {
     let computed = compute_mac(key, data);
-    if expected_mac.len() > computed.len() {
-        return false;
-    }
-    // Constant-time comparison
     let mut result = 0u8;
-    for (a, b) in computed[..expected_mac.len()]
-        .iter()
-        .zip(expected_mac.iter())
-    {
+    for (a, b) in computed[..MAC_LENGTH].iter().zip(expected.0.iter()) {
         result |= a ^ b;
     }
     result == 0
@@ -534,5 +610,35 @@ mod tests {
         // Two bytes
         assert_eq!(encode_varint(128), vec![0x80, 0x01]);
         assert_eq!(encode_varint(300), vec![0xAC, 0x02]);
+    }
+
+    #[test]
+    fn test_verify_mac_empty_mac_rejected() {
+        // Mac::from_bytes rejects wrong lengths at construction — an empty MAC
+        // can never reach verify_mac, making the C3 bug unconstructible.
+        assert!(Mac::from_bytes(&[]).is_none(), "empty slice must not produce a Mac");
+        assert!(Mac::from_bytes(&[0u8; 1]).is_none(), "1-byte slice must not produce a Mac");
+        assert!(Mac::from_bytes(&[0u8; MAC_LENGTH]).is_some(), "correct length must succeed");
+    }
+
+    #[test]
+    fn test_verify_mac_length_enforcement() {
+        let key = vec![0x22u8; 32];
+        let data = b"some data";
+
+        let full_mac = compute_mac(&key, data);
+
+        // 32-byte full HMAC-SHA256 must not construct a Mac (MAC_LENGTH is 8).
+        assert!(Mac::from_bytes(&full_mac).is_none());
+
+        // Correct 8-byte truncated MAC must be accepted.
+        let mac = Mac::from_bytes(&full_mac[..MAC_LENGTH]).unwrap();
+        assert!(verify_mac(&key, data, &mac));
+
+        // Tampered MAC must be rejected.
+        let mut tampered_bytes = full_mac[..MAC_LENGTH].to_vec();
+        tampered_bytes[0] ^= 0xFF;
+        let tampered = Mac::from_bytes(&tampered_bytes).unwrap();
+        assert!(!verify_mac(&key, data, &tampered));
     }
 }

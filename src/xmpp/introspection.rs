@@ -6,7 +6,7 @@ use log::{debug, error, info, trace};
 use std::collections::VecDeque;
 use std::sync::RwLock;
 use tokio::sync::mpsc;
-use xmpp_parsers::Element;
+use xmpp_parsers::minidom::Element;
 
 // For OMEMO stanza verification
 use crate::xmpp::custom_ns;
@@ -133,7 +133,7 @@ pub fn verify_omemo_stanza(stanza: &Element, content: &str) -> Result<(), String
     }
 
     trace!("Message attributes:");
-    for (name, value) in stanza.attrs() {
+    for ((_, name), value) in stanza.attrs() {
         trace!("  - {}: {}", name, value);
     }
     // Check for encrypted element with either the standard or legacy OMEMO namespace
@@ -310,7 +310,7 @@ mod tests {
             base64::engine::general_purpose::STANDARD.encode(b"encrypted-payload-content");
 
         let key_elem = Element::builder("key", custom_ns::OMEMO)
-            .attr("rid", "12345")
+            .attr("rid".try_into().unwrap(), "12345")
             .append(key_b64)
             .build();
 
@@ -319,7 +319,7 @@ mod tests {
             .build();
 
         let header = Element::builder("header", custom_ns::OMEMO)
-            .attr("sid", "67890")
+            .attr("sid".try_into().unwrap(), "67890")
             .append(key_elem)
             .append(iv_elem)
             .build();
@@ -334,8 +334,8 @@ mod tests {
             .build();
 
         Element::builder("message", "jabber:client")
-            .attr("from", "alice@example.com/phone")
-            .attr("to", "bob@example.com/laptop")
+            .attr("from".try_into().unwrap(), "alice@example.com/phone")
+            .attr("to".try_into().unwrap(), "bob@example.com/laptop")
             .append(encrypted)
             .build()
     }
@@ -352,10 +352,10 @@ mod tests {
         let plaintext = "my secret content";
         // Build a stanza that happens to contain the plaintext in an attribute
         let encrypted = Element::builder("encrypted", custom_ns::OMEMO)
-            .attr("debug", plaintext) // Simulates accidental leak
+            .attr("debug".try_into().unwrap(), plaintext) // Simulates accidental leak
             .build();
         let stanza = Element::builder("message", "jabber:client")
-            .attr("from", "alice@example.com")
+            .attr("from".try_into().unwrap(), "alice@example.com")
             .append(encrypted)
             .build();
 
@@ -367,7 +367,7 @@ mod tests {
     #[test]
     fn test_missing_encrypted_element() {
         let stanza = Element::builder("message", "jabber:client")
-            .attr("from", "alice@example.com")
+            .attr("from".try_into().unwrap(), "alice@example.com")
             .append(
                 Element::builder("body", "jabber:client")
                     .append("hello")
@@ -384,7 +384,7 @@ mod tests {
     fn test_missing_header_element() {
         let encrypted = Element::builder("encrypted", custom_ns::OMEMO).build();
         let stanza = Element::builder("message", "jabber:client")
-            .attr("from", "alice@example.com")
+            .attr("from".try_into().unwrap(), "alice@example.com")
             .append(encrypted)
             .build();
 
@@ -396,7 +396,7 @@ mod tests {
     #[test]
     fn test_non_message_element_fails() {
         let stanza = Element::builder("iq", "jabber:client")
-            .attr("type", "result")
+            .attr("type".try_into().unwrap(), "result")
             .build();
 
         let result = verify_omemo_stanza(&stanza, "unrelated");
@@ -406,7 +406,7 @@ mod tests {
     #[test]
     fn test_wrong_namespace_fails() {
         let stanza = Element::builder("message", "jabber:server")
-            .attr("from", "alice@example.com")
+            .attr("from".try_into().unwrap(), "alice@example.com")
             .build();
 
         let result = verify_omemo_stanza(&stanza, "unrelated");

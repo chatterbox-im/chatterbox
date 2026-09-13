@@ -3,6 +3,7 @@ use log::{error, info, warn};
 use tokio::time::{timeout, Duration as TokioDuration};
 
 // Import common test utilities
+#[path = "../tests/common/mod.rs"]
 mod common;
 use common::{get_test_credentials, setup_logging, wait_for_message};
 
@@ -12,8 +13,6 @@ use chatterbox::xmpp::XMPPClient;
 // Import credentials from our common module
 use common::credentials::Credentials;
 
-#[tokio::test]
-#[ignore = "requires live XMPP server"]
 async fn test_omemo_device_identity_and_carbons() -> Result<()> {
     // Setup logging
     setup_logging();
@@ -172,7 +171,8 @@ async fn test_omemo_device_identity_and_carbons() -> Result<()> {
     info!("Retrieving device list for our own account...");
     // Use the full JID (username@domain) instead of just the username
     let full_jid = format!("{}@{}", ca_credentials.username, ca_credentials.server);
-    let device_list: Vec<u32> = match ca_client.get_contact_devices(&full_jid).await {
+    use chatterbox::omemo::device_id::DeviceId;
+    let device_list: Vec<DeviceId> = match ca_client.get_contact_devices(&full_jid).await {
         Ok(list) => {
             info!("Retrieved device list: {:?}", list);
             list
@@ -186,8 +186,8 @@ async fn test_omemo_device_identity_and_carbons() -> Result<()> {
     };
 
     // Check if both device IDs are in the list
-    let has_device1 = device_list.contains(&ca_device_id);
-    let has_device2 = device_list.contains(&ca_device2_id);
+    let has_device1 = device_list.contains(&DeviceId::from(ca_device_id));
+    let has_device2 = device_list.contains(&DeviceId::from(ca_device2_id));
 
     info!("Device list contains first device: {}", has_device1);
     info!("Device list contains second device: {}", has_device2);
@@ -355,5 +355,11 @@ async fn test_omemo_device_identity_and_carbons() -> Result<()> {
         warn!("Test PARTIAL SUCCESS: Some checks failed");
     }
 
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    test_omemo_device_identity_and_carbons().await?;
     Ok(())
 }

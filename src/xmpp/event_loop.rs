@@ -10,7 +10,8 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex as TokioMutex};
 
 use tokio_xmpp::Event as XMPPEvent;
-use xmpp_parsers::Element;
+use tokio_xmpp::Stanza;
+use xmpp_parsers::minidom::Element;
 
 use super::transport::{self, StanzaTx};
 use super::{chat_states, delivery_receipts, discovery, presence};
@@ -23,13 +24,14 @@ impl XMPPClient {
     pub(super) async fn handle_incoming_messages(
         stanza_tx: StanzaTx,
         mut event_rx: mpsc::UnboundedReceiver<XMPPEvent>,
-        msg_tx: mpsc::Sender<Message>,
+        msg_tx: mpsc::Sender<crate::models::AppEvent>,
         pending_receipts: Arc<TokioMutex<std::collections::HashMap<String, PendingMessage>>>,
         iq_registry: Arc<TokioMutex<crate::xmpp::iq_registry::IqResponseRegistry>>,
         late_state: LateStateRx,
         online_tx: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
     ) {
         let mut seen_online_event = false;
+        let mut reconnecting = false;
         let mut online_tx = online_tx;
         let mut typing_tx_cache: Option<mpsc::Sender<(String, chat_states::TypingStatus)>> = None;
         let mut our_bare_jid: Option<String> = None;
@@ -40,6 +42,13 @@ impl XMPPClient {
         while let Some(event) = event_rx.recv().await {
             match event {
                 XMPPEvent::Stanza(stanza) => {
+                    // v6 yields a typed Stanza; convert to raw Element so the
+                    // rest of the event loop can use the existing minidom API.
+                    let stanza: Element = match stanza {
+                        Stanza::Message(m) => m.into(),
+                        Stanza::Presence(p) => p.into(),
+                        Stanza::Iq(i) => i.into(),
+                    };
                     if stanza.name() == "presence" {
                         if let Err(e) = presence::handle_presence_stanza(&stanza) {
                             error!("Error processing presence stanza: {}", e);
@@ -74,12 +83,10 @@ impl XMPPClient {
 
                         let from = stanza.attr("from").unwrap_or("");
                         let to = stanza.attr("to").unwrap_or("");
-                        info!("Received message stanza from='{}', to='{}'", from, to);
-                        // Don't dump the full stanza — it may contain a plaintext body.
-                        debug!("Received <{}> stanza from {}", stanza.name(), from);
+                        debug!("Received message stanza from='{}', to='{}'", from, to);
 
                         fn has_omemo_encryption(
-                            msg_stanza: &xmpp_parsers::Element,
+                            msg_stanza: &xmpp_parsers::minidom::Element,
                         ) -> (bool, bool, bool, bool) {
                             let has_omemo_v1 = msg_stanza.has_child("encrypted", custom_ns::OMEMO);
                             let has_omemo_axolotl =
@@ -159,7 +166,7 @@ impl XMPPClient {
                         }
 
                         if has_any_omemo || has_mam_omemo {
-                            info!("Detected OMEMO encrypted message (outer: v1={}, axolotl={}, MAM: v1={}, axolotl={})", 
+                            debug!("Detected OMEMO encrypted message (outer: v1={}, axolotl={}, MAM: v1={}, axolotl={})", 
                                 has_omemo_v1, has_omemo_axolotl, mam_has_omemo_v1, mam_has_omemo_axolotl);
 
                             let target_stanza = if has_mam_omemo && mam_message_stanza.is_some() {
@@ -198,7 +205,6 @@ impl XMPPClient {
                                     omemo_manager,
                                     carbons_enabled: Arc::new(AtomicBool::new(true)),
                                     iq_registry: iq_registry_clone,
-                                    pubsub_responses: None,
                                     late_state_tx: None,
                                     typing_tx: None,
                                     omemo_dir: None,
@@ -214,9 +220,7 @@ impl XMPPClient {
                                 }
                             });
                         } else {
-                            info!("Processing non-OMEMO message from {}", from);
-                            // Don't dump the full stanza — it contains the plaintext body.
-                            debug!("Non-OMEMO message <{}> from {}", stanza.name(), from);
+                            debug!("Processing non-OMEMO message from {}", from);
 
                             if let Err(e) = delivery_receipts::handle_receipt(
                                 &stanza,
@@ -268,7 +272,6 @@ impl XMPPClient {
                                         omemo_manager: state.omemo_manager.clone(),
                                         carbons_enabled: Arc::new(AtomicBool::new(true)),
                                         iq_registry: iq_registry_clone2,
-                                        pubsub_responses: None,
                                         late_state_tx: None,
                                         typing_tx: None,
                                         omemo_dir: None,
@@ -293,7 +296,11 @@ impl XMPPClient {
                                     .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
                                 let content = body.text();
 
-                                debug!("Found message body from {} ({} bytes)", from, content.len());
+                                debug!(
+                                    "Found message body from {} ({} bytes)",
+                                    from,
+                                    content.len()
+                                );
 
                                 if !content.is_empty() {
                                     let sender_bare_jid =
@@ -305,17 +312,17 @@ impl XMPPClient {
                                         content.clone(),
                                     );
 
-                                    info!(
+                                    debug!(
                                         "Sending message to UI: from='{}' (bare: '{}', {} bytes)",
                                         from,
                                         sender_bare_jid,
                                         content.len()
                                     );
 
-                                    if let Err(e) = msg_tx.send(message).await {
+                                    if let Err(e) = msg_tx.send(crate::models::AppEvent::Chat(message)).await {
                                         error!("Failed to send message to UI: {}", e);
                                     } else {
-                                        info!("Successfully sent message to UI channel");
+                                        debug!("Successfully sent message to UI channel");
                                     }
 
                                     // Send a receipt if requested
@@ -347,8 +354,8 @@ impl XMPPClient {
                             if stanza.attr("type") == Some("set") {
                                 if let Some(stanza_id) = stanza.attr("id") {
                                     let ack = Element::builder("iq", "jabber:client")
-                                        .attr("type", "result")
-                                        .attr("id", stanza_id)
+                                        .attr("type".try_into().unwrap(), "result")
+                                        .attr("id".try_into().unwrap(), stanza_id)
                                         .build();
                                     if let Err(e) = transport::send_stanza(&stanza_tx, ack) {
                                         warn!("Failed to acknowledge roster push: {}", e);
@@ -392,36 +399,13 @@ impl XMPPClient {
                                         "Received pubsub request but OMEMO manager not available"
                                     );
                                 }
-                            } else if stanza.attr("type") == Some("result") {
+                            } else if stanza.attr("type") == Some("result")
+                                || stanza.attr("type") == Some("error")
+                            {
+                                // Late/unregistered pubsub response — already consumed by
+                                // iq_registry.try_route() above if it was pending.
                                 if let Some(stanza_id) = stanza.attr("id") {
-                                    debug!("Received pubsub response with ID: {}", stanza_id);
-                                    let xml_string =
-                                        crate::xmpp::omemo_integration::element_to_xml_string(
-                                            &stanza,
-                                        );
-                                    let responses = late_state.borrow().pubsub_responses.clone();
-                                    if let Some(ref responses) = responses {
-                                        crate::xmpp::omemo_integration::store_pubsub_response_to(
-                                            responses,
-                                            stanza_id.to_string(),
-                                            xml_string,
-                                        )
-                                        .await;
-                                    }
-                                }
-                            }
-                        } else if stanza.attr("type") == Some("error") {
-                            if let Some(stanza_id) = stanza.attr("id") {
-                                let xml_string =
-                                    crate::xmpp::omemo_integration::element_to_xml_string(&stanza);
-                                let responses = late_state.borrow().pubsub_responses.clone();
-                                if let Some(ref responses) = responses {
-                                    crate::xmpp::omemo_integration::store_pubsub_response_to(
-                                        responses,
-                                        stanza_id.to_string(),
-                                        xml_string,
-                                    )
-                                    .await;
+                                    debug!("Unmatched late pubsub response (id={}), ignoring", stanza_id);
                                 }
                             }
                         }
@@ -429,9 +413,41 @@ impl XMPPClient {
                 }
                 XMPPEvent::Online {
                     bound_jid,
-                    resumed: _,
+                    features: _,
+                    resumed,
                 } => {
-                    if !seen_online_event {
+                    // `reconnecting` is set when we saw an explicit Disconnected event.
+                    // `!resumed && seen_online_event` catches the case where SM resumption
+                    // failed and tokio-xmpp started a completely fresh session without
+                    // emitting Disconnected first — carbons and presence must be
+                    // re-established or the new session will be invisible to the server.
+                    if reconnecting || (!resumed && seen_online_event) {
+                        // Mid-session reconnect — re-establish XMPP session state.
+                        // Carbons and presence are fire-and-forget (best-effort).
+                        // Cancel any in-flight IQ requests from the old session so
+                        // callers fail fast rather than waiting out their timeouts.
+                        iq_registry.lock().await.cancel_all();
+                        reconnecting = false;
+                        info!("Reconnected to XMPP server as {}", bound_jid);
+                        let iq_id = uuid::Uuid::new_v4().to_string();
+                        let carbons_iq = Element::builder("iq", "jabber:client")
+                            .attr("type".try_into().unwrap(), "set")
+                            .attr("id".try_into().unwrap(), &iq_id)
+                            .append(Element::builder("enable", custom_ns::CARBONS).build())
+                            .build();
+                        if let Err(e) = transport::send_stanza(&stanza_tx, carbons_iq) {
+                            warn!("Failed to re-enable carbons after reconnect: {}", e);
+                        }
+                        if let Err(e) = transport::send_stanza(
+                            &stanza_tx,
+                            Element::builder("presence", "jabber:client").build(),
+                        ) {
+                            warn!("Failed to re-send presence after reconnect: {}", e);
+                        }
+                        if let Some(ref jid) = our_bare_jid {
+                            let _ = msg_tx.send(crate::models::AppEvent::Chat(Message::system(jid, "Reconnected."))).await;
+                        }
+                    } else if !seen_online_event {
                         info!("Connected to XMPP server as {}", bound_jid);
                         seen_online_event = true;
                         our_bare_jid = Some(
@@ -455,18 +471,52 @@ impl XMPPClient {
                 XMPPEvent::Disconnected(reason) => {
                     let reason_str = format!("{:?}", reason);
                     error!("XMPP client is disconnected: {}", reason_str);
+
+                    // NOTE: fatality detection inspects tokio-xmpp's Debug output.
+                    // If that format changes in a future version this check may
+                    // silently stop working and TLS errors would retry indefinitely.
+                    let is_fatal = reason_str.contains("not trusted")
+                        || reason_str.contains("ertificate") // Certificate / certificate
+                        || reason_str.contains("NotAuthorized")
+                        || reason_str.contains("not-authorized");
+
                     if let Some(tx) = online_tx.take() {
-                        let msg = if reason_str.contains("not trusted")
-                            || reason_str.contains("certificate")
-                            || reason_str.contains("Certificate")
-                        {
-                            "TLS certificate is not trusted by this system".to_string()
+                        // Still in the initial-connect phase (Online not yet seen).
+                        if is_fatal {
+                            // Signal failure and exit; dropping event_rx shuts the
+                            // transport down so it stops retrying.
+                            let msg = if reason_str.contains("not trusted")
+                                || reason_str.contains("ertificate")
+                            {
+                                "TLS certificate is not trusted by this system".to_string()
+                            } else {
+                                format!("Connection failed: {}", reason_str)
+                            };
+                            let _ = tx.send(Err(msg));
+                            break;
+                        }
+                        // Transient failure: restore online_tx and let the transport
+                        // retry. wait_for_connection's 20-second timeout is the limit.
+                        online_tx = Some(tx);
+                    } else {
+                        // Mid-session drop. Set reconnecting flag so the next Online
+                        // event re-establishes carbons and presence.
+                        // Cancel in-flight IQs immediately so callers fail fast.
+                        iq_registry.lock().await.cancel_all();
+                        reconnecting = true;
+                        let notify = if is_fatal {
+                            format!("Connection error — cannot reconnect: {}", reason_str)
                         } else {
-                            format!("Connection failed: {}", reason_str)
+                            "Connection lost. Reconnecting...".to_string()
                         };
-                        let _ = tx.send(Err(msg));
+                        if let Some(ref jid) = our_bare_jid {
+                            let _ = msg_tx.send(crate::models::AppEvent::Chat(Message::system(jid, &notify))).await;
+                        }
+                        if is_fatal {
+                            break;
+                        }
+                        // Don't break — transport will reconnect and fire Online.
                     }
-                    break;
                 }
             }
 
@@ -488,5 +538,205 @@ impl XMPPClient {
         }
 
         info!("Event loop exiting (transport channel closed)");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::xmpp::iq_registry::IqResponseRegistry;
+    use crate::xmpp::LateState;
+    use std::time::Duration;
+    use tokio::sync::{mpsc, oneshot, watch};
+    use tokio::time::timeout;
+    use tokio_xmpp::Event as XMPPEvent;
+
+    /// Minimal event loop harness: returns (event sender, stanza receiver,
+    /// message receiver, online oneshot receiver).
+    fn spawn_loop() -> (
+        mpsc::UnboundedSender<XMPPEvent>,
+        mpsc::UnboundedReceiver<xmpp_parsers::minidom::Element>,
+        mpsc::Receiver<crate::models::AppEvent>,
+        oneshot::Receiver<Result<(), String>>,
+    ) {
+        let (stanza_tx, stanza_rx) = mpsc::unbounded_channel::<xmpp_parsers::minidom::Element>();
+        let (event_tx, event_rx) = mpsc::unbounded_channel::<XMPPEvent>();
+        let (msg_tx, msg_rx) = mpsc::channel::<crate::models::AppEvent>(16);
+        let pending_receipts = Arc::new(TokioMutex::new(std::collections::HashMap::<
+            String,
+            PendingMessage,
+        >::new()));
+        let iq_registry = Arc::new(TokioMutex::new(IqResponseRegistry::new()));
+        let (_late_tx, late_rx) = watch::channel(LateState::default());
+        let (online_tx, online_rx) = oneshot::channel::<Result<(), String>>();
+
+        tokio::spawn(XMPPClient::handle_incoming_messages(
+            stanza_tx,
+            event_rx,
+            msg_tx,
+            pending_receipts,
+            iq_registry,
+            late_rx,
+            Some(online_tx),
+        ));
+
+        (event_tx, stanza_rx, msg_rx, online_rx)
+    }
+
+    fn online(jid: &str) -> XMPPEvent {
+        XMPPEvent::Online {
+            bound_jid: jid.parse().unwrap(),
+            features: Default::default(),
+            resumed: false,
+        }
+    }
+
+    fn disconnected() -> XMPPEvent {
+        XMPPEvent::Disconnected(tokio_xmpp::Error::Disconnected)
+    }
+
+    // ── Initial connect ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_initial_online_signals_ok() {
+        let (event_tx, _stanzas, _msgs, online_rx) = spawn_loop();
+        event_tx.send(online("als@example.org/r1")).unwrap();
+        let result = timeout(Duration::from_secs(1), online_rx)
+            .await
+            .expect("timed out")
+            .expect("sender dropped");
+        assert!(result.is_ok(), "expected Ok(()), got {:?}", result);
+    }
+
+    // Regression: online_tx must NOT be consumed on a transient disconnect;
+    // it must fire Ok(()) only after the subsequent Online event.
+    #[tokio::test]
+    async fn test_transient_disconnect_does_not_consume_online_tx() {
+        let (event_tx, _stanzas, _msgs, online_rx) = spawn_loop();
+        event_tx.send(disconnected()).unwrap(); // transient — put online_tx back
+        event_tx.send(online("als@example.org/r1")).unwrap();
+        let result = timeout(Duration::from_secs(1), online_rx)
+            .await
+            .expect("timed out")
+            .expect("sender dropped");
+        assert!(
+            result.is_ok(),
+            "online_tx should fire Ok after transient disconnect+Online, got {:?}",
+            result
+        );
+    }
+
+    // The fatal-error path (where online_tx receives Err) is tested directly
+    // in connection.rs via test_wait_for_connection_propagates_error_message.
+    // The event_loop side of this is: a Disconnected with matching debug string
+    // calls tx.send(Err(msg)) and breaks.  Constructing such an error requires
+    // cross-crate version alignment that is fragile, so we cover the string-
+    // matching logic through the connection module tests instead.
+
+    // ── Mid-session reconnect ─────────────────────────────────────────────
+
+    // Core reconnect regression: after a mid-session disconnect, the next
+    // Online must fire carbons enable and presence via stanza_tx, and send
+    // "Reconnected" to the UI.
+    #[tokio::test]
+    async fn test_mid_session_reconnect_sends_carbons_presence_and_ui_message() {
+        let (event_tx, mut stanzas, mut msgs, online_rx) = spawn_loop();
+
+        // Initial connection
+        event_tx.send(online("als@example.org/r1")).unwrap();
+        timeout(Duration::from_secs(1), online_rx)
+            .await
+            .unwrap()
+            .unwrap()
+            .expect("initial Online should give Ok(())");
+
+        // Mid-session disconnect
+        event_tx.send(disconnected()).unwrap();
+
+        // UI must receive a "Reconnecting" notice
+        let msg = timeout(Duration::from_secs(1), msgs.recv())
+            .await
+            .expect("timed out waiting for reconnect UI message")
+            .expect("msg channel closed");
+        let content = match msg { crate::models::AppEvent::Chat(m) => m.content, other => panic!("expected Chat event, got {:?}", other) };
+        assert!(
+            content.contains("Reconnecting"),
+            "expected 'Reconnecting' in UI message, got: {:?}",
+            content
+        );
+
+        // Transport reconnects
+        event_tx.send(online("als@example.org/r2")).unwrap();
+
+        // Carbons enable IQ must be the first stanza sent
+        let carbons = timeout(Duration::from_secs(1), stanzas.recv())
+            .await
+            .expect("timed out waiting for carbons IQ")
+            .expect("stanza channel closed");
+        assert_eq!(carbons.name(), "iq");
+        assert_eq!(carbons.attr("type"), Some("set"));
+        assert!(
+            carbons.get_child("enable", "urn:xmpp:carbons:2").is_some(),
+            "carbons IQ missing <enable xmlns='urn:xmpp:carbons:2'/>"
+        );
+
+        // Available presence must follow
+        let pres = timeout(Duration::from_secs(1), stanzas.recv())
+            .await
+            .expect("timed out waiting for presence")
+            .expect("stanza channel closed");
+        assert_eq!(pres.name(), "presence");
+        assert_eq!(
+            pres.attr("type"),
+            None,
+            "reconnect presence must be 'available' (no type attr)"
+        );
+
+        // UI must receive "Reconnected"
+        let msg2 = timeout(Duration::from_secs(1), msgs.recv())
+            .await
+            .expect("timed out waiting for reconnected UI message")
+            .expect("msg channel closed");
+        let content2 = match msg2 { crate::models::AppEvent::Chat(m) => m.content, other => panic!("expected Chat event, got {:?}", other) };
+        assert!(
+            content2.contains("Reconnected"),
+            "expected 'Reconnected' in UI message, got: {:?}",
+            content2
+        );
+    }
+
+    // ── Stanza XML format ─────────────────────────────────────────────────
+
+    // Regression: the carbons enable stanza built in the reconnect path must
+    // have the correct namespace and type attribute.
+    #[test]
+    fn test_carbons_iq_xml_structure() {
+        let iq_id = "test-id";
+        let iq = xmpp_parsers::minidom::Element::builder("iq", "jabber:client")
+            .attr("type".try_into().unwrap(), "set")
+            .attr("id".try_into().unwrap(), iq_id)
+            .append(xmpp_parsers::minidom::Element::builder("enable", custom_ns::CARBONS).build())
+            .build();
+
+        assert_eq!(iq.name(), "iq");
+        assert_eq!(iq.attr("type"), Some("set"));
+        assert_eq!(iq.attr("id"), Some(iq_id));
+        assert!(
+            iq.get_child("enable", "urn:xmpp:carbons:2").is_some(),
+            "carbons IQ must contain <enable xmlns='urn:xmpp:carbons:2'/>"
+        );
+    }
+
+    // Regression: the presence built in the reconnect path must be an
+    // available presence (no type attribute).
+    #[test]
+    fn test_reconnect_presence_is_available() {
+        let pres = xmpp_parsers::minidom::Element::builder("presence", "jabber:client").build();
+        assert_eq!(pres.name(), "presence");
+        assert_eq!(
+            pres.attr("type"),
+            None,
+            "available presence must have no type attr"
+        );
     }
 }

@@ -5,7 +5,7 @@
 
 use aes_gcm::{
     aead::{Aead, KeyInit, Payload},
-    Aes128Gcm, Nonce,
+    Nonce,
 };
 use curve25519_dalek::{edwards::CompressedEdwardsY, montgomery::MontgomeryPoint, scalar::Scalar};
 use hex;
@@ -15,7 +15,9 @@ use log::{debug, error, trace};
 use rand::{rngs::OsRng, RngCore};
 use sha2::{Digest, Sha256, Sha512};
 use thiserror::Error;
-use x25519_dalek::{PublicKey, StaticSecret};
+use x25519_dalek::{PublicKey as DalekPublicKey, StaticSecret};
+
+use crate::omemo::keys::{AesCbcKey, AesGcmKey, CbcIv, GcmNonce, Ikm, PublicKey, Salt, Secret};
 
 /// Errors related to cryptographic operations
 #[derive(Debug, Error)]
@@ -45,31 +47,11 @@ pub enum CryptoError {
     InvalidIV(String),
 }
 
-/// The size of the AES key in bytes (256 bits)
+/// The size of the AES key in bytes (128 bits)
 pub const AES_KEY_SIZE: usize = 16;
 
 /// The size of the IV in bytes for AES-GCM (96 bits)
 pub const AES_IV_SIZE: usize = 12;
-
-/// Generate a random initialization vector for AES-GCM
-pub fn generate_iv() -> Vec<u8> {
-    trace!("Generating random {}-bit IV for AES-GCM", AES_IV_SIZE * 8);
-    let mut iv = vec![0u8; AES_IV_SIZE];
-    let mut rng = rand::thread_rng();
-    rng.fill_bytes(&mut iv);
-    trace!("Generated IV: {}", hex::encode(&iv));
-    iv
-}
-
-/// Generate a random key for message encryption
-pub fn generate_message_key() -> Vec<u8> {
-    trace!("Generating random 128-bit message key");
-    let mut bytes = vec![0u8; 16]; // 128 bits for AES-128
-    let mut rng = rand::thread_rng();
-    rng.fill_bytes(&mut bytes);
-    trace!("Generated message key: {}", hex::encode(&bytes));
-    bytes
-}
 
 // Constants for Dino-compatible AES-GCM
 pub const AES_GCM_KEY_SIZE: usize = 16; // 128-bit key for Dino compatibility
@@ -93,7 +75,7 @@ pub fn generate_gcm_iv() -> Vec<u8> {
 
 /// Encrypt data using AES-128-GCM (Dino-compatible format)
 /// Returns ciphertext + auth_tag combined
-pub fn aes_gcm_encrypt(plaintext: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>, CryptoError> {
+pub fn aes_gcm_encrypt(plaintext: &[u8], key: &AesGcmKey, iv: &GcmNonce) -> Result<Vec<u8>, CryptoError> {
     aes_gcm_encrypt_with_ad(plaintext, key, iv, &[])
 }
 
@@ -101,38 +83,19 @@ pub fn aes_gcm_encrypt(plaintext: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8
 /// AD is authenticated but not encrypted — binds ciphertext to session context.
 pub fn aes_gcm_encrypt_with_ad(
     plaintext: &[u8],
-    key: &[u8],
-    iv: &[u8],
+    key: &AesGcmKey,
+    iv: &GcmNonce,
     ad: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
     use aes_gcm::Aes128Gcm;
 
-    if key.len() != AES_GCM_KEY_SIZE {
-        return Err(CryptoError::InvalidInputError(format!(
-            "Invalid key size for AES-GCM: {} (expected {} bytes)",
-            key.len(),
-            AES_GCM_KEY_SIZE
-        )));
-    }
-
-    if iv.len() != AES_GCM_IV_SIZE {
-        return Err(CryptoError::InvalidIV(format!(
-            "Invalid IV size for AES-GCM: {} (expected {} bytes)",
-            iv.len(),
-            AES_GCM_IV_SIZE
-        )));
-    }
-
-    let cipher = Aes128Gcm::new_from_slice(key).map_err(|e| {
+    let cipher = Aes128Gcm::new_from_slice(key.as_bytes()).map_err(|e| {
         CryptoError::AesGcmError(format!("Failed to create AES-128-GCM cipher: {}", e))
     })?;
 
-    let nonce = Nonce::from_slice(iv);
+    let nonce = Nonce::from_slice(iv.as_bytes());
 
-    let payload = Payload {
-        msg: plaintext,
-        aad: ad,
-    };
+    let payload = Payload { msg: plaintext, aad: ad };
     let ciphertext = cipher
         .encrypt(nonce, payload)
         .map_err(|e| CryptoError::AesGcmError(format!("AES-128-GCM encryption failed: {}", e)))?;
@@ -148,45 +111,26 @@ pub fn aes_gcm_encrypt_with_ad(
 
 /// Decrypt data using AES-128-GCM (Dino-compatible format)
 /// Expects ciphertext + auth_tag combined
-pub fn aes_gcm_decrypt(ciphertext: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>, CryptoError> {
+pub fn aes_gcm_decrypt(ciphertext: &[u8], key: &AesGcmKey, iv: &GcmNonce) -> Result<Vec<u8>, CryptoError> {
     aes_gcm_decrypt_with_ad(ciphertext, key, iv, &[])
 }
 
 /// Decrypt data using AES-128-GCM with Associated Data (AD)
 pub fn aes_gcm_decrypt_with_ad(
     ciphertext: &[u8],
-    key: &[u8],
-    iv: &[u8],
+    key: &AesGcmKey,
+    iv: &GcmNonce,
     ad: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
     use aes_gcm::Aes128Gcm;
 
-    if key.len() != AES_GCM_KEY_SIZE {
-        return Err(CryptoError::InvalidInputError(format!(
-            "Invalid key size for AES-GCM: {} (expected {} bytes)",
-            key.len(),
-            AES_GCM_KEY_SIZE
-        )));
-    }
-
-    if iv.len() != AES_GCM_IV_SIZE {
-        return Err(CryptoError::InvalidIV(format!(
-            "Invalid IV size for AES-GCM: {} (expected {} bytes)",
-            iv.len(),
-            AES_GCM_IV_SIZE
-        )));
-    }
-
-    let cipher = Aes128Gcm::new_from_slice(key).map_err(|e| {
+    let cipher = Aes128Gcm::new_from_slice(key.as_bytes()).map_err(|e| {
         CryptoError::AesGcmError(format!("Failed to create AES-128-GCM cipher: {}", e))
     })?;
 
-    let nonce = Nonce::from_slice(iv);
+    let nonce = Nonce::from_slice(iv.as_bytes());
 
-    let payload = Payload {
-        msg: ciphertext,
-        aad: ad,
-    };
+    let payload = Payload { msg: ciphertext, aad: ad };
     let plaintext = cipher
         .decrypt(nonce, payload)
         .map_err(|e| CryptoError::AesGcmError(format!("AES-128-GCM decryption failed: {}", e)))?;
@@ -202,30 +146,16 @@ pub fn aes_gcm_decrypt_with_ad(
 
 /// Encrypt using AES-256-CBC with PKCS7 padding (Signal protocol inner cipher)
 pub fn aes_256_cbc_encrypt(
-    key: &[u8],
-    iv: &[u8],
+    key: &AesCbcKey,
+    iv: &CbcIv,
     plaintext: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
     use cbc::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
     type Aes256CbcEnc = cbc::Encryptor<aes::Aes256>;
 
-    if key.len() != 32 {
-        return Err(CryptoError::InvalidInputError(format!(
-            "Invalid key size for AES-256-CBC: {} (expected 32)",
-            key.len()
-        )));
-    }
-    if iv.len() != 16 {
-        return Err(CryptoError::InvalidIV(format!(
-            "Invalid IV size for AES-256-CBC: {} (expected 16)",
-            iv.len()
-        )));
-    }
-
-    let cipher = Aes256CbcEnc::new_from_slices(key, iv)
+    let cipher = Aes256CbcEnc::new_from_slices(key.as_bytes(), iv.as_bytes())
         .map_err(|e| CryptoError::AesGcmError(format!("AES-256-CBC init failed: {}", e)))?;
 
-    // Allocate buffer with space for padding (up to one extra block of 16 bytes)
     let mut buf = vec![0u8; plaintext.len() + 16];
     buf[..plaintext.len()].copy_from_slice(plaintext);
     let ct = cipher
@@ -236,27 +166,14 @@ pub fn aes_256_cbc_encrypt(
 
 /// Decrypt using AES-256-CBC with PKCS7 padding (Signal protocol inner cipher)
 pub fn aes_256_cbc_decrypt(
-    key: &[u8],
-    iv: &[u8],
+    key: &AesCbcKey,
+    iv: &CbcIv,
     ciphertext: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
     use cbc::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
     type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
 
-    if key.len() != 32 {
-        return Err(CryptoError::InvalidInputError(format!(
-            "Invalid key size for AES-256-CBC: {} (expected 32)",
-            key.len()
-        )));
-    }
-    if iv.len() != 16 {
-        return Err(CryptoError::InvalidIV(format!(
-            "Invalid IV size for AES-256-CBC: {} (expected 16)",
-            iv.len()
-        )));
-    }
-
-    let cipher = Aes256CbcDec::new_from_slices(key, iv)
+    let cipher = Aes256CbcDec::new_from_slices(key.as_bytes(), iv.as_bytes())
         .map_err(|e| CryptoError::AesGcmError(format!("AES-256-CBC init failed: {}", e)))?;
 
     let mut buf = ciphertext.to_vec();
@@ -290,127 +207,34 @@ pub fn validate_iv(iv: &[u8]) -> Result<(), CryptoError> {
     Ok(())
 }
 
-/// Encrypt a message (currently uses GCM but I think it needs to be CBC for OMEMO)
-pub fn encrypt(
-    plaintext: &[u8],
-    key: &[u8],
-    iv: &[u8],
-    _associated_data: &[u8],
-) -> Result<Vec<u8>, CryptoError> {
-    trace!("Encryption key: {}", hex::encode(key));
-    trace!("IV: {}", hex::encode(iv));
-
-    // Validate key and IV sizes
-    if key.len() != AES_KEY_SIZE {
-        error!(
-            "Invalid key size: {} (expected {} bytes)",
-            key.len(),
-            AES_KEY_SIZE
-        );
-        return Err(CryptoError::InvalidInputError(format!(
-            "Invalid key size: {} (expected {} bytes)",
-            key.len(),
-            AES_KEY_SIZE
-        )));
-    }
-
-    // Validate the IV
-    validate_iv(iv)?;
-
-    // Create the cipher
-    let cipher = match Aes128Gcm::new_from_slice(key) {
-        Ok(c) => c,
-        Err(e) => {
-            error!("Failed to create AES-GCM cipher: {}", e);
-            return Err(CryptoError::AesGcmError(format!(
-                "Failed to create cipher: {}",
-                e
-            )));
-        }
-    };
-
-    // Create the nonce
-    let nonce = Nonce::from_slice(iv);
-
-    // Encrypt the plaintext
-    let ciphertext = match cipher.encrypt(nonce, plaintext) {
-        Ok(c) => c,
-        Err(e) => {
-            error!("AES-GCM encryption failed: {}", e);
-            return Err(CryptoError::AesGcmError(format!(
-                "Encryption failed: {}",
-                e
-            )));
-        }
-    };
-
-    trace!("Ciphertext: {}", hex::encode(&ciphertext));
-
-    Ok(ciphertext)
-}
-
-/// Decrypt a message using AES-256-GCM
+/// Decrypt a message using AES-128-GCM
+/// Boundary function: validates key/IV lengths before calling the typed inner function.
 pub fn decrypt(
     ciphertext: &[u8],
     key: &[u8],
     iv: &[u8],
-    _associated_data: &[u8],
+    associated_data: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
-    trace!("Decryption key: {}", hex::encode(key));
-    trace!("IV: {}", hex::encode(iv));
-    trace!("Ciphertext: {}", hex::encode(ciphertext));
-
-    // Validate key and IV sizes
-    if key.len() != AES_KEY_SIZE {
-        error!(
-            "Invalid key size: {} (expected {} bytes)",
+    let k = AesGcmKey::from_slice(key).ok_or_else(|| {
+        CryptoError::InvalidInputError(format!(
+            "Invalid key size for AES-GCM: {} (expected {})",
             key.len(),
-            AES_KEY_SIZE
-        );
-        return Err(CryptoError::InvalidInputError(format!(
-            "Invalid key size: {} (expected {} bytes)",
-            key.len(),
-            AES_KEY_SIZE
-        )));
-    }
-
-    // Validate the IV
-    validate_iv(iv)?;
-
-    // Create the cipher
-    let cipher = match Aes128Gcm::new_from_slice(key) {
-        Ok(c) => c,
-        Err(e) => {
-            error!("Failed to create AES-GCM cipher: {}", e);
-            return Err(CryptoError::AesGcmError(format!(
-                "Failed to create cipher: {}",
-                e
-            )));
-        }
-    };
-
-    // Create the nonce
-    let nonce = Nonce::from_slice(iv);
-
-    // Decrypt the ciphertext
-    let plaintext = match cipher.decrypt(nonce, ciphertext) {
-        Ok(p) => p,
-        Err(e) => {
-            error!("AES-GCM decryption failed: {}", e);
-            return Err(CryptoError::AesGcmError(format!(
-                "Decryption failed: {}",
-                e
-            )));
-        }
-    };
-
-    Ok(plaintext)
+            AES_GCM_KEY_SIZE
+        ))
+    })?;
+    let n = GcmNonce::from_slice(iv).ok_or_else(|| {
+        CryptoError::InvalidIV(format!(
+            "Invalid IV size for AES-GCM: {} (expected {})",
+            iv.len(),
+            AES_GCM_IV_SIZE
+        ))
+    })?;
+    aes_gcm_decrypt_with_ad(ciphertext, &k, &n, associated_data)
 }
 
 /// HMAC-SHA256 for message authentication
 pub fn hmac_sha256(key: &[u8], data: &[u8]) -> Result<Vec<u8>, CryptoError> {
     //debug!("Calculating HMAC-SHA256 for {} bytes of data", data.len());
-    trace!("HMAC key: {}", hex::encode(key));
 
     // Create the HMAC instance - using hmac::Mac trait's new_from_slice method
     let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(key).map_err(|e| {
@@ -430,24 +254,6 @@ pub fn hmac_sha256(key: &[u8], data: &[u8]) -> Result<Vec<u8>, CryptoError> {
     Ok(result)
 }
 
-/// Derive a key using HKDF with SHA-256
-pub fn kdf(ikm: &[u8], salt: &[u8], info: &[u8]) -> Vec<u8> {
-    //debug!("Deriving key using HKDF-SHA256");
-    trace!("Input key material: {}", hex::encode(ikm));
-    trace!("Salt: {}", hex::encode(salt));
-    trace!("Info: {}", String::from_utf8_lossy(info));
-
-    let hkdf = Hkdf::<Sha256>::new(Some(salt), ikm);
-    let mut output = vec![0u8; 32]; // 256 bits output
-
-    // Extract and expand the key
-    hkdf.expand(info, &mut output)
-        .expect("HKDF expansion failed");
-
-    trace!("Derived key: {}", hex::encode(&output));
-    output
-}
-
 /// Calculate a SHA-256 hash
 pub fn sha256_hash(data: &[u8]) -> Vec<u8> {
     use sha2::Digest;
@@ -461,25 +267,6 @@ pub fn sha256_hash(data: &[u8]) -> Vec<u8> {
     hash
 }
 
-/// Securely compare two byte arrays in constant time
-pub fn secure_compare(a: &[u8], b: &[u8]) -> bool {
-    trace!("Performing constant-time comparison of {} bytes", a.len());
-
-    if a.len() != b.len() {
-        trace!("Length mismatch: {} != {}", a.len(), b.len());
-        return false;
-    }
-
-    let mut result = 0;
-    for (x, y) in a.iter().zip(b.iter()) {
-        result |= x ^ y;
-    }
-
-    let equal = result == 0;
-    trace!("Secure comparison result: {}", equal);
-    equal
-}
-
 /// Generate an ephemeral X25519 key pair for the X3DH key agreement
 pub fn generate_x25519_keypair() -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
     trace!("Generating X25519 key pair");
@@ -488,7 +275,7 @@ pub fn generate_x25519_keypair() -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
     let static_secret = StaticSecret::random_from_rng(OsRng);
 
     // Derive the public key from the secret key
-    let public_key = PublicKey::from(&static_secret);
+    let public_key = DalekPublicKey::from(&static_secret);
 
     // Get the bytes
     let public_key_bytes = public_key.as_bytes().to_vec();
@@ -496,7 +283,6 @@ pub fn generate_x25519_keypair() -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
 
     //debug!("X25519 key pair generation successful in {:?}", duration);
     trace!("Public key: {}", hex::encode(&public_key_bytes));
-    trace!("Private key: {}", hex::encode(&private_key_bytes));
 
     Ok((private_key_bytes, public_key_bytes))
 }
@@ -570,95 +356,68 @@ pub fn ensure_montgomery_form(key: &[u8]) -> Result<Vec<u8>, CryptoError> {
     }
 }
 
-/// Normalize a Curve25519 public key to 32 bytes
-/// OMEMO/Signal protocol sometimes encodes public keys with a 0x05 prefix byte
-fn normalize_curve25519_public_key(key: &[u8]) -> Result<Vec<u8>, CryptoError> {
-    match key.len() {
-        32 => {
-            trace!("Public key already 32 bytes, no normalization needed");
-            Ok(key.to_vec())
-        }
-        33 => {
-            // Check if it has the standard 0x05 prefix for Curve25519 public keys
-            if key[0] == 0x05 {
-                trace!("Normalizing 33-byte public key by removing 0x05 prefix");
-                Ok(key[1..].to_vec())
-            } else {
-                error!(
-                    "33-byte public key with unexpected prefix: 0x{:02X}",
-                    key[0]
-                );
-                Err(CryptoError::InvalidInputError(format!(
-                    "33-byte public key with unexpected prefix: 0x{:02X}",
-                    key[0]
-                )))
-            }
-        }
-        _ => {
-            error!("Invalid Curve25519 public key length: {}", key.len());
-            Err(CryptoError::InvalidInputError(format!(
-                "Invalid Curve25519 public key length: {}",
-                key.len()
-            )))
-        }
-    }
-}
-
-/// Perform a Diffie-Hellman key exchange with X25519
+/// Perform a Diffie-Hellman key exchange with X25519.
+/// Both arguments are typed: `private_key` must be a `Secret<32>` (access via
+/// `.expose_secret()` is done here), and `public_key` must be a `PublicKey`
+/// (already normalized — no 0x05-prefix stripping needed).
 pub fn x25519_diffie_hellman(
-    private_key: &[u8],
-    public_key: &[u8],
+    private_key: &Secret<32>,
+    public_key: &PublicKey,
 ) -> Result<Vec<u8>, CryptoError> {
     trace!("Performing X25519 Diffie-Hellman key exchange");
-    trace!("Using private key: {}", hex::encode(private_key));
-    trace!("Using public key: {}", hex::encode(public_key));
+    trace!("Using public key: {}", hex::encode(public_key.as_raw()));
 
-    // Validate private key length
-    if private_key.len() != 32 {
-        error!("Invalid X25519 private key length: {}", private_key.len());
-        return Err(CryptoError::InvalidInputError(format!(
-            "Invalid private key length: {}",
-            private_key.len()
-        )));
+    // Reject known low-order Curve25519 points (small-subgroup attack vectors).
+    // DH against these points produces a predictable (often all-zero) shared
+    // secret and leaks no key material.
+    const LOW_ORDER_POINTS: &[[u8; 32]] = &[
+        [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+        [0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+        [0xe0, 0xeb, 0x7a, 0x7c, 0x3b, 0x41, 0xb8, 0xae, 0x16, 0x56, 0xe3, 0xfa, 0xf1, 0x9f, 0xc4, 0x6a, 0xda, 0x09, 0x8d, 0xeb, 0x9c, 0x32, 0xb1, 0xfd, 0x86, 0x62, 0x05, 0x16, 0x5f, 0x49, 0xb8, 0x00],
+        [0x5f, 0x9c, 0x95, 0xbc, 0xa3, 0x50, 0x8c, 0x24, 0xb1, 0xd0, 0xb1, 0x55, 0x9c, 0x83, 0xef, 0x5b, 0x04, 0x44, 0x5c, 0xc4, 0x58, 0x1c, 0x8e, 0x86, 0xd8, 0x22, 0x4e, 0xdd, 0xd0, 0x9f, 0x11, 0x57],
+        [0xec, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f],
+        [0xed, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f],
+        [0xee, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f],
+        [0xcd, 0xeb, 0x7a, 0x7c, 0x3b, 0x41, 0xb8, 0xae, 0x16, 0x56, 0xe3, 0xfa, 0xf1, 0x9f, 0xc4, 0x6a, 0xda, 0x09, 0x8d, 0xeb, 0x9c, 0x32, 0xb1, 0xfd, 0x86, 0x62, 0x05, 0x16, 0x5f, 0x49, 0xb8, 0x80],
+    ];
+    if LOW_ORDER_POINTS.contains(public_key.as_raw()) {
+        return Err(CryptoError::InvalidInputError(
+            "Low-order Curve25519 point rejected".to_string(),
+        ));
     }
 
-    // Normalize the public key (handle 33-byte keys with 0x05 prefix)
-    let normalized_public_key = normalize_curve25519_public_key(public_key)?;
-
-    // Convert to the appropriate types for x25519-dalek
-    let mut private_bytes = [0u8; 32];
-    private_bytes.copy_from_slice(private_key);
-
-    let mut public_bytes = [0u8; 32];
-    public_bytes.copy_from_slice(&normalized_public_key);
-
-    // Create the StaticSecret from bytes
-    let static_secret = StaticSecret::from(private_bytes);
-    let public = PublicKey::from(public_bytes);
+    // Create the StaticSecret from the typed private key bytes.
+    let static_secret = StaticSecret::from(*private_key.expose_secret());
+    let dalek_public = DalekPublicKey::from(*public_key.as_raw());
 
     // Compute the DH shared secret
-    let shared_secret = static_secret.diffie_hellman(&public);
+    let shared_secret = static_secret.diffie_hellman(&dalek_public);
     let shared_bytes = shared_secret.as_bytes().to_vec();
 
-    //debug!("X25519 key exchange completed successfully in {:?}", duration);
-    trace!("Shared secret: {}", hex::encode(&shared_bytes));
+    // Reject an all-zero shared secret — produced by low-order points not
+    // caught above, or by a degenerate key.
+    if shared_bytes.iter().all(|&b| b == 0) {
+        return Err(CryptoError::InvalidInputError(
+            "All-zero DH shared secret rejected".to_string(),
+        ));
+    }
 
     Ok(shared_bytes)
 }
 
-/// Derive a key using HKDF
+/// Derive a key using HKDF.
+/// `salt` and `ikm` are distinct types so callers cannot silently swap them.
 pub fn hkdf_derive(
-    salt: &[u8],
-    ikm: &[u8],
+    salt: Salt,
+    ikm: Ikm,
     info: &[u8],
     output_len: usize,
 ) -> Result<Vec<u8>, CryptoError> {
     //debug!("Deriving key with HKDF: output_len={}", output_len);
-    trace!("Salt: {}", hex::encode(salt));
-    trace!("Input key material: {}", hex::encode(ikm));
+    trace!("Salt: {}", hex::encode(salt.0));
     trace!("Info: {}", hex::encode(info));
 
-    let hk = Hkdf::<Sha256>::new(Some(salt), ikm);
+    let hk = Hkdf::<Sha256>::new(Some(salt.0), ikm.0);
     let mut okm = vec![0u8; output_len];
 
     if let Err(e) = hk.expand(info, &mut okm) {
@@ -669,63 +428,9 @@ pub fn hkdf_derive(
         )));
     }
 
-    trace!("Derived key: {}", hex::encode(&okm));
+    trace!("Derived key (length {})", okm.len());
 
     Ok(okm)
-}
-
-/// Create a Diffie-Hellman shared secret
-pub fn calculate_dh(private_key: &[u8], public_key: &[u8]) -> Result<Vec<u8>, CryptoError> {
-    // Just use our x25519_diffie_hellman function
-    x25519_diffie_hellman(private_key, public_key)
-}
-
-/// Generate a key pair for X25519
-pub fn generate_dh_keypair() -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
-    // Just use our generate_x25519_keypair function
-    generate_x25519_keypair()
-}
-
-/// Derive X25519 public key from private key
-pub fn x25519_public_key_from_private(private_key: &[u8]) -> Result<Vec<u8>, CryptoError> {
-    trace!("Deriving X25519 public key from private key");
-
-    // Validate private key length
-    if private_key.len() != 32 {
-        error!("Invalid X25519 private key length: {}", private_key.len());
-        return Err(CryptoError::InvalidInputError(format!(
-            "X25519 private key must be 32 bytes, got {}",
-            private_key.len()
-        )));
-    }
-
-    // Convert to the appropriate type for x25519-dalek
-    let mut private_bytes = [0u8; 32];
-    private_bytes.copy_from_slice(private_key);
-
-    // Create the StaticSecret from bytes
-    let static_secret = StaticSecret::from(private_bytes);
-
-    // Derive the public key
-    let public_key = PublicKey::from(&static_secret);
-
-    Ok(public_key.as_bytes().to_vec())
-}
-
-/// Compute SHA-256 hash
-pub fn sha256(data: &[u8]) -> Vec<u8> {
-    sha256_hash(data)
-}
-
-/// Format a key fingerprint for human readability
-pub fn format_fingerprint(fingerprint: &[u8]) -> String {
-    let fp_hex = hex::encode(fingerprint);
-    let chunks: Vec<String> = fp_hex
-        .as_bytes()
-        .chunks(2)
-        .map(|chunk| String::from_utf8_lossy(chunk).to_string())
-        .collect();
-    chunks.join(":")
 }
 
 /// XEdDSA: Sign a message using an X25519 private key.
@@ -817,7 +522,7 @@ pub fn xeddsa_verify(
     x25519_public_key: &[u8],
     message: &[u8],
     signature: &[u8],
-) -> Result<bool, CryptoError> {
+) -> Result<(), CryptoError> {
     if x25519_public_key.len() != 32 {
         return Err(CryptoError::InvalidInputError(format!(
             "X25519 public key must be 32 bytes, got {}",
@@ -871,7 +576,7 @@ pub fn xeddsa_verify(
     let r_compressed = CompressedEdwardsY(r_bytes);
     let r_point = match r_compressed.decompress() {
         Some(point) => point,
-        None => return Ok(false),
+        None => return Err(CryptoError::InvalidInputError("XEdDSA signature verification failed".to_string())),
     };
 
     // libsignal protocol: sign bit is encoded in signature[63] high bit
@@ -893,7 +598,7 @@ pub fn xeddsa_verify(
         Some(s) => s,
         None => {
             debug!("xeddsa_verify: s is not canonical, returning false");
-            return Ok(false);
+            return Err(CryptoError::InvalidInputError("XEdDSA: non-canonical scalar".to_string()));
         }
     };
 
@@ -918,7 +623,7 @@ pub fn xeddsa_verify(
         let expected = r_point + ca;
         if sb == expected {
             debug!("xeddsa_verify: SUCCESS with sign={}", sign_bit);
-            return Ok(true);
+            return Ok(());
         }
     } else {
         debug!("xeddsa_verify: to_edwards({}) returned None", sign_bit);
@@ -937,7 +642,7 @@ pub fn xeddsa_verify(
         let ca = point * challenge;
         let expected = r_point + ca;
         if sb == expected {
-            return Ok(true);
+            return Ok(());
         }
     }
 
@@ -945,7 +650,7 @@ pub fn xeddsa_verify(
     // signer didn't use the libsignal sign-encoding convention
     let s_orig = match Scalar::from_canonical_bytes(signature[32..].try_into().unwrap()).into() {
         Some(s) => s,
-        None => return Ok(false),
+        None => return Err(CryptoError::InvalidInputError("XEdDSA signature verification failed".to_string())),
     };
     if s_orig != s {
         let sb_orig = curve25519_dalek::constants::ED25519_BASEPOINT_TABLE * &s_orig;
@@ -961,13 +666,13 @@ pub fn xeddsa_verify(
                 let ca = point * challenge;
                 let expected = r_point + ca;
                 if sb_orig == expected {
-                    return Ok(true);
+                    return Ok(());
                 }
             }
         }
     }
 
-    Ok(false)
+    Err(CryptoError::InvalidInputError("XEdDSA signature verification failed".to_string()))
 }
 
 /// Returns true if two encoded Curve25519 identity keys represent *different*
@@ -1060,8 +765,8 @@ mod tests {
         };
 
         // Verify using Montgomery form of the key
-        let result = xeddsa_verify(&public_key, message, &signature).unwrap();
-        assert!(result, "XEdDSA verify should succeed with Montgomery key");
+        xeddsa_verify(&public_key, message, &signature)
+            .expect("XEdDSA verify should succeed with Montgomery key");
     }
 
     #[test]
@@ -1083,68 +788,120 @@ mod tests {
             );
             x25519_dalek::PublicKey::from(&secret).as_bytes().to_vec()
         };
-        let result = xeddsa_verify(&public_key, &message, &signature).unwrap();
+        xeddsa_verify(&public_key, &message, &signature)
+            .expect("XEdDSA verify with 0x05-prefixed SPK should succeed");
+    }
+
+    /// RFC 5869 §A.1 Test Case 1 — HKDF-SHA256
+    /// Verifies the extract-then-expand key derivation against a published reference.
+    #[test]
+    fn hkdf_rfc5869_test_case_1() {
+        let ikm  = &[0x0bu8; 22];
+        let salt = &[0x00u8, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
+                     0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c];
+        let info = &[0xf0u8, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9];
+        // Expected OKM from RFC 5869 Appendix A.1
+        let expected = [
+            0x3c, 0xb2, 0x5f, 0x25, 0xfa, 0xac, 0xd5, 0x7a,
+            0x90, 0x43, 0x4f, 0x64, 0xd0, 0x36, 0x2f, 0x2a,
+            0x2d, 0x2d, 0x0a, 0x90, 0xcf, 0x1a, 0x5a, 0x4c,
+            0x5d, 0xb0, 0x2d, 0x56, 0xec, 0xc4, 0xc5, 0xbf,
+            0x34, 0x00, 0x72, 0x08, 0xd5, 0xb8, 0x87, 0x18,
+            0x58, 0x65,
+        ];
+        let okm = hkdf_derive(Salt(salt), Ikm(ikm), info, 42).unwrap();
+        assert_eq!(&okm[..], &expected[..], "HKDF output must match RFC 5869 §A.1 vector");
+    }
+
+    #[test]
+    fn test_decrypt_binds_aad() {
+        // crypto::decrypt must reject ciphertext authenticated under different AAD.
+        // Previously the _associated_data parameter was silently discarded, so
+        // decryption with wrong AAD would succeed — concealing an AEAD mismatch.
+        let key = generate_aes_key();
+        let iv = generate_gcm_iv();
+        let plaintext = b"sensitive payload";
+        let aad_a = b"correct context";
+        let aad_b = b"wrong context";
+
+        let aes_key = AesGcmKey::from_slice(&key).unwrap();
+        let gcm_iv = GcmNonce::from_slice(&iv).unwrap();
+
+        let ciphertext = aes_gcm_encrypt_with_ad(plaintext, &aes_key, &gcm_iv, aad_a).unwrap();
+
+        // Correct AAD must decrypt successfully.
+        assert!(decrypt(&ciphertext, &key, &iv, aad_a).is_ok());
+
+        // Wrong AAD must fail with an authentication error.
         assert!(
-            result,
-            "XEdDSA verify with 0x05-prefixed SPK should succeed"
+            decrypt(&ciphertext, &key, &iv, aad_b).is_err(),
+            "decryption with wrong AAD must fail — AAD was not bound"
         );
     }
 
     #[test]
-    fn test_encrypt_decrypt() {
-        let key = generate_message_key();
-        let iv = generate_iv();
-        let plaintext = b"Hello, world!";
-        let aad = b"additional data";
-
-        let ciphertext = encrypt(plaintext, &key, &iv, aad).unwrap();
-        assert_ne!(ciphertext, plaintext);
-
-        let decrypted = decrypt(&ciphertext, &key, &iv, aad).unwrap();
-        assert_eq!(decrypted, plaintext);
-    }
-
-    #[test]
-    fn test_hkdf() {
-        let salt = b"salt";
-        let ikm = b"input key material";
-        let info = b"info";
-
-        let key = hkdf_derive(salt, ikm, info, 32).unwrap();
-        assert_eq!(key.len(), 32);
-    }
-
-    #[test]
     fn test_dh() {
-        let (priv_a, pub_a) = generate_dh_keypair().unwrap();
-        let (priv_b, pub_b) = generate_dh_keypair().unwrap();
+        let (priv_a_bytes, pub_a_bytes) = generate_x25519_keypair().unwrap();
+        let (priv_b_bytes, pub_b_bytes) = generate_x25519_keypair().unwrap();
+        let priv_a = Secret::<32>::from_slice(&priv_a_bytes).unwrap();
+        let priv_b = Secret::<32>::from_slice(&priv_b_bytes).unwrap();
+        let pub_a = PublicKey::from_wire(&pub_a_bytes).unwrap();
+        let pub_b = PublicKey::from_wire(&pub_b_bytes).unwrap();
 
-        let secret_a = calculate_dh(&priv_a, &pub_b).unwrap();
-        let secret_b = calculate_dh(&priv_b, &pub_a).unwrap();
+        let secret_a = x25519_diffie_hellman(&priv_a, &pub_b).unwrap();
+        let secret_b = x25519_diffie_hellman(&priv_b, &pub_a).unwrap();
 
         assert_eq!(secret_a, secret_b);
     }
 
     #[test]
-    fn test_hmac() {
-        let key = b"key";
-        let message = b"message";
+    fn test_dh_low_order_points_rejected() {
+        // All 8 small-subgroup (low-order) Curve25519 points in little-endian
+        // Montgomery form.  DH against any of them leaks no key material and
+        // must be rejected to prevent small-subgroup attacks.
+        let low_order_points: &[[u8; 32]] = &[
+            [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+            [0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+            [0xe0, 0xeb, 0x7a, 0x7c, 0x3b, 0x41, 0xb8, 0xae, 0x16, 0x56, 0xe3, 0xfa, 0xf1, 0x9f, 0xc4, 0x6a, 0xda, 0x09, 0x8d, 0xeb, 0x9c, 0x32, 0xb1, 0xfd, 0x86, 0x62, 0x05, 0x16, 0x5f, 0x49, 0xb8, 0x00],
+            [0x5f, 0x9c, 0x95, 0xbc, 0xa3, 0x50, 0x8c, 0x24, 0xb1, 0xd0, 0xb1, 0x55, 0x9c, 0x83, 0xef, 0x5b, 0x04, 0x44, 0x5c, 0xc4, 0x58, 0x1c, 0x8e, 0x86, 0xd8, 0x22, 0x4e, 0xdd, 0xd0, 0x9f, 0x11, 0x57],
+            [0xec, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f],
+            [0xed, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f],
+            [0xee, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f],
+            [0xcd, 0xeb, 0x7a, 0x7c, 0x3b, 0x41, 0xb8, 0xae, 0x16, 0x56, 0xe3, 0xfa, 0xf1, 0x9f, 0xc4, 0x6a, 0xda, 0x09, 0x8d, 0xeb, 0x9c, 0x32, 0xb1, 0xfd, 0x86, 0x62, 0x05, 0x16, 0x5f, 0x49, 0xb8, 0x80],
+        ];
 
-        let hmac = hmac_sha256(key, message).unwrap();
-        assert!(!hmac.is_empty());
+        let (priv_key_bytes, _) = generate_x25519_keypair().unwrap();
+        let priv_key = Secret::<32>::from_slice(&priv_key_bytes).unwrap();
+        for (i, low_order) in low_order_points.iter().enumerate() {
+            let result = x25519_diffie_hellman(&priv_key, &PublicKey::new(*low_order));
+            assert!(
+                result.is_err(),
+                "low-order point {} must be rejected",
+                i
+            );
+        }
     }
 
+    /// RFC 4231 §4.2 Test Case 1 — HMAC-SHA256
+    /// Verifies the MAC computation against a published reference.
     #[test]
-    fn test_sha256() {
-        let data = b"data";
-
-        let hash = sha256(data);
-        assert_eq!(hash.len(), 32); // SHA-256 produces a 32-byte hash
+    fn hmac_sha256_rfc4231_test_case_1() {
+        let key  = &[0x0bu8; 20];
+        let data = b"Hi There";
+        // Expected HMAC from RFC 4231 Section 4.2
+        let expected = [
+            0xb0, 0x34, 0x4c, 0x61, 0xd8, 0xdb, 0x38, 0x53,
+            0x5c, 0xa8, 0xaf, 0xce, 0xaf, 0x0b, 0xf1, 0x2b,
+            0x88, 0x1d, 0xc2, 0x00, 0xc9, 0x83, 0x3d, 0xa7,
+            0x26, 0xe9, 0x37, 0x6c, 0x2e, 0x32, 0xcf, 0xf7,
+        ];
+        let mac = hmac_sha256(key, data).unwrap();
+        assert_eq!(&mac[..], &expected[..], "HMAC-SHA256 output must match RFC 4231 §4.2 vector");
     }
 
     #[test]
     fn test_validate_iv() {
-        let valid_iv = generate_iv();
+        let valid_iv = generate_gcm_iv();
         assert!(validate_iv(&valid_iv).is_ok());
 
         let empty_iv: Vec<u8> = Vec::new();
@@ -1155,76 +912,46 @@ mod tests {
     }
 
     #[test]
-    fn test_format_fingerprint() {
-        let fingerprint = vec![
-            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54,
-            0x32, 0x10,
-        ];
-
-        let formatted = format_fingerprint(&fingerprint);
-        assert_eq!(formatted, "01:23:45:67:89:ab:cd:ef:fe:dc:ba:98:76:54:32:10");
-    }
-
-    #[test]
     fn test_normalize_curve25519_public_key() {
-        // Test 32-byte key (should remain unchanged)
-        let key_32 = vec![0x01; 32];
-        let result = normalize_curve25519_public_key(&key_32).unwrap();
-        assert_eq!(result, key_32);
+        // PublicKey::from_wire replaces the old normalize_curve25519_public_key function.
+        use crate::omemo::keys::PublicKey;
 
-        // Test 33-byte key with 0x05 prefix (should remove prefix)
-        let mut key_33 = vec![0x05];
-        key_33.extend_from_slice(&vec![0x02; 32]);
-        let result = normalize_curve25519_public_key(&key_33).unwrap();
-        assert_eq!(result, vec![0x02; 32]);
+        // 32-byte key: accepted as-is
+        let key_32 = [0x01u8; 32];
+        assert!(PublicKey::from_wire(&key_32).is_some());
 
-        // Test 33-byte key with wrong prefix (should fail)
-        let mut key_33_wrong = vec![0x04];
-        key_33_wrong.extend_from_slice(&vec![0x03; 32]);
-        let result = normalize_curve25519_public_key(&key_33_wrong);
-        assert!(result.is_err());
+        // 33-byte key with 0x05 prefix: strip prefix
+        let mut key_33 = vec![0x05u8];
+        key_33.extend_from_slice(&[0x02u8; 32]);
+        assert!(PublicKey::from_wire(&key_33).is_some());
+        assert_eq!(PublicKey::from_wire(&key_33).unwrap().as_raw(), &[0x02u8; 32]);
 
-        // Test invalid length (should fail)
-        let key_invalid = vec![0x01; 31];
-        let result = normalize_curve25519_public_key(&key_invalid);
-        assert!(result.is_err());
+        // 33-byte key with wrong prefix: rejected
+        let mut key_bad = vec![0x04u8];
+        key_bad.extend_from_slice(&[0x03u8; 32]);
+        assert!(PublicKey::from_wire(&key_bad).is_none());
+
+        // Wrong length: rejected
+        assert!(PublicKey::from_wire(&[0x01u8; 31]).is_none());
     }
 
     #[test]
     fn test_x25519_with_33_byte_public_key() {
         // Generate a test key pair
-        let (private_key, public_key_32) = generate_x25519_keypair().unwrap();
+        let (private_key_bytes, public_key_32_bytes) = generate_x25519_keypair().unwrap();
+        let private_key = Secret::<32>::from_slice(&private_key_bytes).unwrap();
+        let public_key_32 = PublicKey::from_wire(&public_key_32_bytes).unwrap();
 
         // Create a 33-byte version with 0x05 prefix
-        let mut public_key_33 = vec![0x05];
-        public_key_33.extend_from_slice(&public_key_32);
+        let mut prefixed = vec![0x05u8];
+        prefixed.extend_from_slice(&public_key_32_bytes);
+        let public_key_33 = PublicKey::from_wire(&prefixed).unwrap();
 
-        // Both should produce the same result
+        // Both should produce the same result (same normalized key)
         let result_32 = x25519_diffie_hellman(&private_key, &public_key_32).unwrap();
         let result_33 = x25519_diffie_hellman(&private_key, &public_key_33).unwrap();
 
         assert_eq!(result_32, result_33);
-    }
-
-    #[test]
-    fn test_secure_compare() {
-        let data1 = vec![0x01, 0x02, 0x03, 0x04];
-        let data2 = vec![0x01, 0x02, 0x03, 0x04];
-        let data3 = vec![0x01, 0x02, 0x03, 0x05];
-        let data4 = vec![0x01, 0x02, 0x03]; // Different length
-
-        assert!(
-            secure_compare(&data1, &data2),
-            "Identical data should compare as equal"
-        );
-        assert!(
-            !secure_compare(&data1, &data3),
-            "Different data should compare as not equal"
-        );
-        assert!(
-            !secure_compare(&data1, &data4),
-            "Different length data should compare as not equal"
-        );
     }
 
     #[test]
@@ -1238,14 +965,14 @@ mod tests {
         assert_eq!(signature.len(), 64);
 
         // Verify with public key
-        let valid = xeddsa_verify(&public_key, message, &signature).unwrap();
+        let valid = xeddsa_verify(&public_key, message, &signature).is_ok();
         assert!(
             valid,
             "XEdDSA signature should verify with matching public key"
         );
 
         // Verify fails with wrong message
-        let valid = xeddsa_verify(&public_key, b"wrong message", &signature).unwrap();
+        let valid = xeddsa_verify(&public_key, b"wrong message", &signature).is_ok();
         assert!(
             !valid,
             "XEdDSA signature should not verify with wrong message"
@@ -1253,7 +980,7 @@ mod tests {
 
         // Verify fails with wrong key
         let (_, other_public) = generate_x25519_keypair().unwrap();
-        let valid = xeddsa_verify(&other_public, message, &signature).unwrap();
+        let valid = xeddsa_verify(&other_public, message, &signature).is_ok();
         assert!(!valid, "XEdDSA signature should not verify with wrong key");
     }
 }

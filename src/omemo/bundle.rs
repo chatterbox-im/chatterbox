@@ -26,13 +26,13 @@ impl super::OmemoManager {
             .key_bundle
             .as_ref()
             .ok_or_else(|| anyhow!("Key bundle not initialized"))?;
-        let identity_key = key_bundle.identity_key_pair.public_key.clone();
-        let signed_pre_key = key_bundle.signed_pre_key_pair.public_key.clone();
+        let identity_key = key_bundle.identity_key_pair.public_key.to_vec();
+        let signed_pre_key = key_bundle.signed_pre_key_pair.public_key.to_vec();
         let signed_pre_key_id = key_bundle.signed_pre_key_id;
         let signed_pre_key_signature = key_bundle.signed_pre_key_signature.clone();
         let mut pre_keys = Vec::new();
         for (id, key_pair) in &key_bundle.one_time_pre_key_pairs {
-            pre_keys.push((*id, key_pair.public_key.clone()));
+            pre_keys.push((*id, key_pair.public_key.to_vec()));
         }
         Ok(OmemoBundle {
             identity_key,
@@ -46,7 +46,7 @@ impl super::OmemoManager {
     /// Publish an OMEMO bundle to the server
     pub async fn publish_bundle(&self, bundle: OmemoBundle) -> Result<()> {
         //debug!("Publishing bundle for device {}", self.device_id);
-        let node_name = format!("{}.bundles:{}", OMEMO_NAMESPACE, self.device_id);
+        let node_name = crate::omemo::bundle_node(self.device_id);
         let bundle_xml = self.bundle_to_xml(&bundle)?;
         let item_id = "current";
 
@@ -107,7 +107,7 @@ impl super::OmemoManager {
     /// It ensures proper namespace handling to avoid "invalid item" errors.
     pub fn bundle_to_xml(&self, bundle: &OmemoBundle) -> Result<String> {
         use crate::omemo::crypto::encode_public_key_with_prefix;
-        use xmpp_parsers::Element;
+        use xmpp_parsers::minidom::Element;
 
         // Create the bundle element with the proper namespace
         let mut bundle_elem = Element::builder("bundle", OMEMO_NAMESPACE).build();
@@ -124,7 +124,10 @@ impl super::OmemoManager {
         let signed_prekey_b64 = base64::engine::general_purpose::STANDARD
             .encode(encode_public_key_with_prefix(&bundle.signed_pre_key));
         let signed_prekey_elem = Element::builder("signedPreKeyPublic", OMEMO_NAMESPACE)
-            .attr("signedPreKeyId", bundle.signed_pre_key_id.to_string())
+            .attr(
+                "signedPreKeyId".try_into().unwrap(),
+                bundle.signed_pre_key_id.to_string(),
+            )
             .append(signed_prekey_b64)
             .build();
         bundle_elem.append_child(signed_prekey_elem);
@@ -145,7 +148,7 @@ impl super::OmemoManager {
             let prekey_b64 = base64::engine::general_purpose::STANDARD
                 .encode(encode_public_key_with_prefix(key));
             let prekey_elem = Element::builder("preKeyPublic", OMEMO_NAMESPACE)
-                .attr("preKeyId", id.to_string())
+                .attr("preKeyId".try_into().unwrap(), id.to_string())
                 .append(prekey_b64)
                 .build();
             prekeys_elem.append_child(prekey_elem);
@@ -229,7 +232,7 @@ impl super::OmemoManager {
             );
 
             // In production, return a proper error
-            return Err(OmemoError::NoKeyBundleError(device_id));
+            return Err(OmemoError::NoKeyBundleError(device_id.into()));
         }
 
         // Check for items element
@@ -248,7 +251,7 @@ impl super::OmemoManager {
                 "No items element found in bundle response from device {}",
                 device_id
             );
-            return Err(OmemoError::NoKeyBundleError(device_id));
+            return Err(OmemoError::NoKeyBundleError(device_id.into()));
         }
 
         // Check for item element
@@ -270,7 +273,7 @@ impl super::OmemoManager {
                 "No item element found in bundle response from device {}",
                 device_id
             );
-            return Err(OmemoError::NoKeyBundleError(device_id));
+            return Err(OmemoError::NoKeyBundleError(device_id.into()));
         }
 
         // Check for bundle element
@@ -295,7 +298,7 @@ impl super::OmemoManager {
                 "No bundle element found in bundle response from device {}",
                 device_id
             );
-            return Err(OmemoError::NoKeyBundleError(device_id));
+            return Err(OmemoError::NoKeyBundleError(device_id.into()));
         }
         let bundle_elem = bundle_elem.unwrap();
         let identity_key = bundle_elem
@@ -404,14 +407,14 @@ impl super::OmemoManager {
     /// It ensures proper namespace handling to avoid "invalid item" errors.
     pub fn convert_x3dh_bundle_to_xml(&self, bundle: &protocol::X3DHKeyBundle) -> Result<String> {
         use crate::omemo::crypto::encode_public_key_with_prefix;
-        use xmpp_parsers::Element;
+        use xmpp_parsers::minidom::Element;
 
         // Create the bundle element with the proper namespace
         let mut bundle_elem = Element::builder("bundle", OMEMO_NAMESPACE).build();
 
         // Add the identity key with 0x05 prefix (libsignal interop)
         let identity_key_b64 = base64::engine::general_purpose::STANDARD.encode(
-            encode_public_key_with_prefix(&bundle.identity_key_pair.public_key),
+            encode_public_key_with_prefix(bundle.identity_key_pair.public_key.as_ref()),
         );
         let identity_key_elem = Element::builder("identityKey", OMEMO_NAMESPACE)
             .append(identity_key_b64)
@@ -420,10 +423,13 @@ impl super::OmemoManager {
 
         // Add the signed pre-key with 0x05 prefix and its ID as an attribute
         let signed_prekey_b64 = base64::engine::general_purpose::STANDARD.encode(
-            encode_public_key_with_prefix(&bundle.signed_pre_key_pair.public_key),
+            encode_public_key_with_prefix(bundle.signed_pre_key_pair.public_key.as_ref()),
         );
         let signed_prekey_elem = Element::builder("signedPreKeyPublic", OMEMO_NAMESPACE)
-            .attr("signedPreKeyId", bundle.signed_pre_key_id.to_string())
+            .attr(
+                "signedPreKeyId".try_into().unwrap(),
+                bundle.signed_pre_key_id.to_string(),
+            )
             .append(signed_prekey_b64)
             .build();
         bundle_elem.append_child(signed_prekey_elem);
@@ -442,9 +448,9 @@ impl super::OmemoManager {
         // Add each pre-key with 0x05 prefix and its ID as an attribute
         for (id, key_pair) in &bundle.one_time_pre_key_pairs {
             let prekey_b64 = base64::engine::general_purpose::STANDARD
-                .encode(encode_public_key_with_prefix(&key_pair.public_key));
+                .encode(encode_public_key_with_prefix(key_pair.public_key.as_ref()));
             let prekey_elem = Element::builder("preKeyPublic", OMEMO_NAMESPACE)
-                .attr("preKeyId", id.to_string())
+                .attr("preKeyId".try_into().unwrap(), id.to_string())
                 .append(prekey_b64)
                 .build();
             prekeys_elem.append_child(prekey_elem);
@@ -679,7 +685,7 @@ impl super::OmemoManager {
             "Publishing bundle for device {} with validation",
             self.device_id
         );
-        let node_name = format!("{}.bundles:{}", OMEMO_NAMESPACE, self.device_id);
+        let node_name = crate::omemo::bundle_node(self.device_id);
         let bundle_xml = self.bundle_to_xml(&bundle)?;
 
         // Validate the XML before publishing

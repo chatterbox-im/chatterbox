@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use super::custom_ns;
 use crate::models::{DeliveryStatus, Message};
+use crate::omemo::device_id::DeviceId;
 use crate::omemo::crypto;
 
 #[derive(Debug, Clone)]
@@ -20,6 +21,7 @@ pub struct MAMQueryOptions {
     pub end: Option<chrono::DateTime<chrono::Utc>>,
     pub limit: Option<usize>,
     pub after: Option<String>, // RSM pagination token for continuing a query
+    pub before: Option<String>, // RSM pagination token for loading the previous page
 }
 
 // Result structure with information about pagination
@@ -40,6 +42,7 @@ impl MAMQueryOptions {
             end: None,
             limit: Some(50), // Default limit
             after: None,
+            before: None,
         }
     }
 
@@ -65,6 +68,11 @@ impl MAMQueryOptions {
 
     pub fn with_after(mut self, after: &str) -> Self {
         self.after = Some(after.to_string());
+        self
+    }
+
+    pub fn with_before(mut self, before: &str) -> Self {
+        self.before = Some(before.to_string());
         self
     }
 }
@@ -105,20 +113,21 @@ impl super::XMPPClient {
         };
 
         // Build query element
-        let mut query =
-            xmpp_parsers::Element::builder("query", custom_ns::MAM).attr("queryid", &query_id);
+        let mut query = xmpp_parsers::minidom::Element::builder("query", custom_ns::MAM)
+            .attr("queryid".try_into().unwrap(), &query_id);
 
         // Create the data form
-        let mut x_data =
-            xmpp_parsers::Element::builder("x", "jabber:x:data").attr("type", "submit");
+        let mut x_data = xmpp_parsers::minidom::Element::builder("x", "jabber:x:data")
+            .attr("type".try_into().unwrap(), "submit");
 
         // Add form type field
-        let mut form_type_field = xmpp_parsers::Element::builder("field", "jabber:x:data")
-            .attr("var", "FORM_TYPE")
-            .attr("type", "hidden")
+        let mut form_type_field = xmpp_parsers::minidom::Element::builder("field", "jabber:x:data")
+            .attr("var".try_into().unwrap(), "FORM_TYPE")
+            .attr("type".try_into().unwrap(), "hidden")
             .build();
 
-        let mut value_element = xmpp_parsers::Element::builder("value", "jabber:x:data").build();
+        let mut value_element =
+            xmpp_parsers::minidom::Element::builder("value", "jabber:x:data").build();
         value_element.append_text_node("urn:xmpp:mam:2");
         form_type_field.append_child(value_element);
 
@@ -126,11 +135,12 @@ impl super::XMPPClient {
 
         // Add "with" filter if specified
         if let Some(with_jid) = &options.with {
-            let mut with_field = xmpp_parsers::Element::builder("field", "jabber:x:data")
-                .attr("var", "with")
+            let mut with_field = xmpp_parsers::minidom::Element::builder("field", "jabber:x:data")
+                .attr("var".try_into().unwrap(), "with")
                 .build();
 
-            let mut with_value = xmpp_parsers::Element::builder("value", "jabber:x:data").build();
+            let mut with_value =
+                xmpp_parsers::minidom::Element::builder("value", "jabber:x:data").build();
             with_value.append_text_node(with_jid);
             with_field.append_child(with_value);
 
@@ -141,11 +151,12 @@ impl super::XMPPClient {
         if let Some(start_time) = options.start {
             let start_str = start_time.format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
-            let mut start_field = xmpp_parsers::Element::builder("field", "jabber:x:data")
-                .attr("var", "start")
+            let mut start_field = xmpp_parsers::minidom::Element::builder("field", "jabber:x:data")
+                .attr("var".try_into().unwrap(), "start")
                 .build();
 
-            let mut start_value = xmpp_parsers::Element::builder("value", "jabber:x:data").build();
+            let mut start_value =
+                xmpp_parsers::minidom::Element::builder("value", "jabber:x:data").build();
             start_value.append_text_node(&start_str);
             start_field.append_child(start_value);
 
@@ -156,11 +167,12 @@ impl super::XMPPClient {
         if let Some(end_time) = options.end {
             let end_str = end_time.format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
-            let mut end_field = xmpp_parsers::Element::builder("field", "jabber:x:data")
-                .attr("var", "end")
+            let mut end_field = xmpp_parsers::minidom::Element::builder("field", "jabber:x:data")
+                .attr("var".try_into().unwrap(), "end")
                 .build();
 
-            let mut end_value = xmpp_parsers::Element::builder("value", "jabber:x:data").build();
+            let mut end_value =
+                xmpp_parsers::minidom::Element::builder("value", "jabber:x:data").build();
             end_value.append_text_node(&end_str);
             end_field.append_child(end_value);
 
@@ -169,20 +181,31 @@ impl super::XMPPClient {
 
         // Add Result Set Management (RSM) for pagination
         let mut set =
-            xmpp_parsers::Element::builder("set", "http://jabber.org/protocol/rsm").build();
+            xmpp_parsers::minidom::Element::builder("set", "http://jabber.org/protocol/rsm")
+                .build();
 
         if let Some(limit) = options.limit {
             let mut max_element =
-                xmpp_parsers::Element::builder("max", "http://jabber.org/protocol/rsm").build();
+                xmpp_parsers::minidom::Element::builder("max", "http://jabber.org/protocol/rsm")
+                    .build();
             max_element.append_text_node(&limit.to_string());
             set.append_child(max_element);
         }
 
         if let Some(after) = &options.after {
             let mut after_element =
-                xmpp_parsers::Element::builder("after", "http://jabber.org/protocol/rsm").build();
+                xmpp_parsers::minidom::Element::builder("after", "http://jabber.org/protocol/rsm")
+                    .build();
             after_element.append_text_node(after);
             set.append_child(after_element);
+        }
+
+        if let Some(before) = &options.before {
+            let mut before_element =
+                xmpp_parsers::minidom::Element::builder("before", "http://jabber.org/protocol/rsm")
+                    .build();
+            before_element.append_text_node(before);
+            set.append_child(before_element);
         }
 
         query = query.append(set);
@@ -190,9 +213,9 @@ impl super::XMPPClient {
         let query_element = query.append(x_data.build()).build();
 
         // Create the IQ stanza
-        let iq = xmpp_parsers::Element::builder("iq", "jabber:client")
-            .attr("type", "set")
-            .attr("id", &query_id)
+        let iq = xmpp_parsers::minidom::Element::builder("iq", "jabber:client")
+            .attr("type".try_into().unwrap(), "set")
+            .attr("id".try_into().unwrap(), &query_id)
             .append(query_element)
             .build();
 
@@ -301,7 +324,7 @@ impl super::XMPPClient {
     /// Process a single MAM message stanza received from the collector channel.
     async fn process_mam_message_stanza(
         &self,
-        stanza: &xmpp_parsers::Element,
+        stanza: &xmpp_parsers::minidom::Element,
         query_id: &str,
         archived_messages: &mut Vec<Message>,
     ) {
@@ -318,32 +341,41 @@ impl super::XMPPClient {
                         // our own bare JID) omit the `to` attribute.  Fall back to
                         // our own bare JID so that OMEMO processing is not silently
                         // skipped for such messages.
-                        let our_bare_jid = self.jid.split('/').next().unwrap_or(&self.jid).to_string();
-                        let to = message_stanza.attr("to")
+                        let our_bare_jid =
+                            self.jid.split('/').next().unwrap_or(&self.jid).to_string();
+                        let to = message_stanza
+                            .attr("to")
                             .map(|s| s.to_string())
                             .or_else(|| Some(our_bare_jid));
 
                         let timestamp_str = delay.attr("stamp").unwrap_or("");
                         let timestamp = if !timestamp_str.is_empty() {
                             match chrono::DateTime::parse_from_rfc3339(timestamp_str) {
-                                Ok(dt) => dt.timestamp() as u64,
-                                Err(_) => chrono::Utc::now().timestamp() as u64,
+                                Ok(dt) => dt.timestamp_millis().into(),
+                                Err(_) => chrono::Utc::now().timestamp_millis().into(),
                             }
                         } else {
-                            chrono::Utc::now().timestamp() as u64
+                            chrono::Utc::now().timestamp_millis().into()
                         };
 
-                        let message_id = message_stanza
-                            .attr("id")
-                            .map(|s| s.to_string())
+                        let message_id = super::canonical_msg_id(message_stanza)
                             .unwrap_or_else(|| Uuid::new_v4().to_string());
 
                         if let (Some(from), Some(to)) = (from.clone(), to.clone()) {
-                            let (sender_id, recipient_id) = if from.contains(&self.jid) {
+                            // Compare bare JIDs: archived `from` is bare, self.jid may carry a resource.
+                            let self_bare = self.jid.split('/').next().unwrap_or(&self.jid).to_lowercase();
+                            let from_bare = from.split('/').next().unwrap_or(&from).to_lowercase();
+                            let is_self = from_bare == self_bare;
+
+                            let (sender_id, recipient_id) = if is_self {
                                 ("me".to_string(), to)
                             } else {
-                                (from.clone(), "me".to_string())
+                                (from_bare.clone(), "me".to_string())
                             };
+                            let direction = crate::models::Direction::from_sql(
+                                &sender_id, &recipient_id,
+                                if sender_id == "me" { &recipient_id } else { &sender_id },
+                            );
 
                             // Check for OMEMO encrypted message
                             let has_omemo_v1 =
@@ -351,7 +383,7 @@ impl super::XMPPClient {
                             let has_omemo_axolotl =
                                 message_stanza.has_child("encrypted", custom_ns::OMEMO_V1);
                             if has_omemo_v1 || has_omemo_axolotl {
-                                info!(
+                                debug!(
                                     "Found OMEMO encrypted message in archive from {}",
                                     sender_id
                                 );
@@ -373,10 +405,11 @@ impl super::XMPPClient {
                                                 timestamp,
                                                 delivery_status: DeliveryStatus::Delivered,
                                                 encrypted: true,
+                                                direction: direction.clone(),
                                             });
                                             return;
                                         }
-                                        Ok(None) => {}
+                                        Ok(None) => return, // own-device or no key — skip body fallback too
                                         Err(e) => {
                                             warn!("Failed to decrypt archived message: {}", e);
                                             archived_messages.push(Message {
@@ -390,6 +423,7 @@ impl super::XMPPClient {
                                                 timestamp,
                                                 delivery_status: DeliveryStatus::Delivered,
                                                 encrypted: true,
+                                                direction: direction.clone(),
                                             });
                                             return;
                                         }
@@ -404,6 +438,7 @@ impl super::XMPPClient {
                                         timestamp,
                                         delivery_status: DeliveryStatus::Delivered,
                                         encrypted: true,
+                                        direction: direction.clone(),
                                     });
                                     return;
                                 }
@@ -423,6 +458,7 @@ impl super::XMPPClient {
                                         timestamp,
                                         delivery_status: DeliveryStatus::Delivered,
                                         encrypted: false,
+                                        direction,
                                     });
                                 }
                             }
@@ -464,29 +500,31 @@ impl super::XMPPClient {
         };
 
         // Build query element with minimal parameters for a quick check
-        let mut query =
-            xmpp_parsers::Element::builder("query", custom_ns::MAM).attr("queryid", &query_id);
+        let mut query = xmpp_parsers::minidom::Element::builder("query", custom_ns::MAM)
+            .attr("queryid".try_into().unwrap(), &query_id);
 
-        let mut x_data =
-            xmpp_parsers::Element::builder("x", "jabber:x:data").attr("type", "submit");
+        let mut x_data = xmpp_parsers::minidom::Element::builder("x", "jabber:x:data")
+            .attr("type".try_into().unwrap(), "submit");
 
-        let mut form_type_field = xmpp_parsers::Element::builder("field", "jabber:x:data")
-            .attr("var", "FORM_TYPE")
-            .attr("type", "hidden")
+        let mut form_type_field = xmpp_parsers::minidom::Element::builder("field", "jabber:x:data")
+            .attr("var".try_into().unwrap(), "FORM_TYPE")
+            .attr("type".try_into().unwrap(), "hidden")
             .build();
 
-        let mut value_element = xmpp_parsers::Element::builder("value", "jabber:x:data").build();
+        let mut value_element =
+            xmpp_parsers::minidom::Element::builder("value", "jabber:x:data").build();
         value_element.append_text_node("urn:xmpp:mam:2");
         form_type_field.append_child(value_element);
 
         x_data = x_data.append(form_type_field);
 
         // Add "with" filter
-        let mut with_field = xmpp_parsers::Element::builder("field", "jabber:x:data")
-            .attr("var", "with")
+        let mut with_field = xmpp_parsers::minidom::Element::builder("field", "jabber:x:data")
+            .attr("var".try_into().unwrap(), "with")
             .build();
 
-        let mut with_value = xmpp_parsers::Element::builder("value", "jabber:x:data").build();
+        let mut with_value =
+            xmpp_parsers::minidom::Element::builder("value", "jabber:x:data").build();
         with_value.append_text_node(jid);
         with_field.append_child(with_value);
 
@@ -494,9 +532,11 @@ impl super::XMPPClient {
 
         // Small limit
         let mut set =
-            xmpp_parsers::Element::builder("set", "http://jabber.org/protocol/rsm").build();
+            xmpp_parsers::minidom::Element::builder("set", "http://jabber.org/protocol/rsm")
+                .build();
         let mut max_element =
-            xmpp_parsers::Element::builder("max", "http://jabber.org/protocol/rsm").build();
+            xmpp_parsers::minidom::Element::builder("max", "http://jabber.org/protocol/rsm")
+                .build();
         max_element.append_text_node(&limit.to_string());
         set.append_child(max_element);
 
@@ -504,9 +544,9 @@ impl super::XMPPClient {
 
         let query_element = query.append(x_data.build()).build();
 
-        let iq = xmpp_parsers::Element::builder("iq", "jabber:client")
-            .attr("type", "set")
-            .attr("id", &query_id)
+        let iq = xmpp_parsers::minidom::Element::builder("iq", "jabber:client")
+            .attr("type".try_into().unwrap(), "set")
+            .attr("id".try_into().unwrap(), &query_id)
             .append(query_element)
             .build();
 
@@ -546,7 +586,7 @@ impl super::XMPPClient {
 
     // Helper method for decrypting archived OMEMO messages
     async fn decrypt_archived_omemo_message(
-        message_stanza: &xmpp_parsers::Element,
+        message_stanza: &xmpp_parsers::minidom::Element,
         sender_jid: &str,
         omemo_manager: &Arc<TokioMutex<crate::omemo::OmemoManager>>,
     ) -> Result<Option<String>> {
@@ -620,11 +660,23 @@ impl super::XMPPClient {
             manager.get_device_id()
         };
 
+        // If the sender is our own device, this is an archive echo of a message
+        // WE sent.  The ratchet for the self-session has already advanced; trying
+        // to re-decrypt it will always fail and corrupt the session state.
+        // Skip decryption — we already have the plaintext from when we sent it.
+        if DeviceId::from(sender_device_id) == own_device_id {
+            debug!(
+                "Skipping MAM decryption of own-device message (device {})",
+                sender_device_id
+            );
+            return Ok(None);
+        }
+
         // Look for a key element intended for our device
         let mut key_data = None;
 
         // Try to find a key element for our device
-        // The xmpp_parsers::Element doesn't have a get_children method, so we need to manually
+        // The xmpp_parsers::minidom::Element doesn't have a get_children method, so we need to manually
         // iterate through all children and filter for key elements
         let mut found_key = false;
         for child in header.children() {
@@ -635,7 +687,7 @@ impl super::XMPPClient {
             {
                 if let Some(rid) = child.attr("rid") {
                     match rid.parse::<u32>() {
-                        Ok(device_id) if device_id == own_device_id => {
+                        Ok(device_id) if DeviceId::from(device_id) == own_device_id => {
                             // This key is for our device
                             let key_base64 = child.text();
                             match base64::engine::general_purpose::STANDARD.decode(key_base64) {
@@ -716,9 +768,9 @@ impl super::XMPPClient {
             match manager
                 .decrypt_message(
                     bare_sender_jid,
-                    sender_device_id,
+                    DeviceId::from(sender_device_id),
                     &crate::omemo::protocol::OmemoMessage {
-                        sender_device_id,
+                        sender_device_id: DeviceId::from(sender_device_id),
                         ratchet_key: vec![], // This will be handled by the session
                         previous_counter: 0, // This will be handled by the session
                         counter: 0,          // This will be handled by the session
@@ -739,7 +791,15 @@ impl super::XMPPClient {
             {
                 Ok(content) => content,
                 Err(e) => {
-                    error!("Failed to decrypt OMEMO message: {}", e);
+                    // Ratchet replay errors ("counter too old", "MAC verification failed")
+                    // are expected when MAM re-delivers already-processed messages.
+                    // Log at WARN — these are not bugs, just normal MAM catch-up noise.
+                    // Also reset the failure counter so replays never accumulate into a
+                    // session reset that would destroy a working live-message session.
+                    warn!("Failed to decrypt OMEMO message (likely a MAM replay): {}", e);
+                    // Reuse the guard we already hold — acquiring the same lock again
+                    // from the same task would deadlock on Tokio's async Mutex.
+                    let _ = manager.reset_failure_count(sender_jid, sender_device_id).await;
                     return Err(anyhow!("Failed to decrypt OMEMO message: {}", e));
                 }
             }
@@ -758,7 +818,7 @@ impl super::XMPPClient {
         if let Some(omemo_manager) = omemo_manager {
             let manager = omemo_manager.lock().await;
             // Consider OMEMO fully initialized if we have a device ID and bundle published
-            if manager.get_device_id() > 0 {
+            if manager.get_device_id().get() > 0 {
                 // Additional check to make sure the bundle is published
                 if let Ok(true) = manager.is_bundle_published().await {
                     return true;
@@ -783,7 +843,7 @@ impl super::XMPPClient {
         &self,
         jid: &str,
         initial_result: MAMQueryResult,
-        message_tx: tokio::sync::mpsc::Sender<crate::models::Message>,
+        message_tx: tokio::sync::mpsc::Sender<crate::models::AppEvent>,
         max_pages: usize,
     ) -> Result<()> {
         info!("Starting background history load for {}", jid);
@@ -805,13 +865,16 @@ impl super::XMPPClient {
                         current_result.messages.len(),
                         count
                     ),
-                    timestamp: chrono::Utc::now().timestamp() as u64,
+                    timestamp: chrono::Utc::now().timestamp_millis().into(),
                     delivery_status: DeliveryStatus::Delivered,
                     encrypted: false,
+                    direction: crate::models::Direction::System {
+                        about: crate::jid::BareJid::parse(jid).expect("expected valid JID"),
+                    },
                 };
 
                 // Send this notification to the UI
-                if let Err(e) = message_tx.send(notification).await {
+                if let Err(e) = message_tx.send(crate::models::AppEvent::Chat(notification)).await {
                     error!("Failed to send history loading notification: {}", e);
                 }
             }
@@ -858,20 +921,23 @@ impl super::XMPPClient {
                                     "Loading message history ({}/{} messages)...",
                                     loaded_so_far, count
                                 ),
-                                timestamp: chrono::Utc::now().timestamp() as u64,
+                                timestamp: chrono::Utc::now().timestamp_millis().into(),
                                 delivery_status: DeliveryStatus::Delivered,
                                 encrypted: false,
+                                direction: crate::models::Direction::System {
+                                    about: crate::jid::BareJid::parse(jid).expect("expected valid JID"),
+                                },
                             };
 
                             // Send this notification to the UI
-                            if let Err(e) = message_tx.send(notification).await {
+                            if let Err(e) = message_tx.send(crate::models::AppEvent::Chat(notification)).await {
                                 error!("Failed to send history loading notification: {}", e);
                             }
                         }
 
                         // Send messages to the UI
                         for message in &result.messages {
-                            if let Err(e) = message_tx.send(message.clone()).await {
+                            if let Err(e) = message_tx.send(crate::models::AppEvent::Chat(message.clone())).await {
                                 error!("Failed to send historical message to UI: {}", e);
                                 break;
                             }
@@ -893,12 +959,15 @@ impl super::XMPPClient {
                             sender_id: "[System]".to_string(),
                             recipient_id: jid.to_string(),
                             content: format!("Failed to retrieve full message history: {}", e),
-                            timestamp: chrono::Utc::now().timestamp() as u64,
+                            timestamp: chrono::Utc::now().timestamp_millis().into(),
                             delivery_status: DeliveryStatus::Delivered,
                             encrypted: false,
+                            direction: crate::models::Direction::System {
+                                about: crate::jid::BareJid::parse(jid).expect("expected valid JID"),
+                            },
                         };
 
-                        if let Err(send_e) = message_tx.send(error_notification).await {
+                        if let Err(send_e) = message_tx.send(crate::models::AppEvent::Chat(error_notification)).await {
                             error!("Failed to send error notification: {}", send_e);
                         }
 
@@ -926,12 +995,15 @@ impl super::XMPPClient {
             } else {
                 "Partial message history loaded (not all messages could be retrieved)".to_string()
             },
-            timestamp: chrono::Utc::now().timestamp() as u64,
+            timestamp: chrono::Utc::now().timestamp_millis().into(),
             delivery_status: DeliveryStatus::Delivered,
             encrypted: false,
+            direction: crate::models::Direction::System {
+                about: crate::jid::BareJid::parse(jid).expect("expected valid JID"),
+            },
         };
 
-        if let Err(e) = message_tx.send(completion_notification).await {
+        if let Err(e) = message_tx.send(crate::models::AppEvent::Chat(completion_notification)).await {
             error!("Failed to send history completion notification: {}", e);
         }
 
@@ -991,5 +1063,28 @@ mod tests {
         };
         assert!(result.messages.is_empty());
         assert!(result.complete);
+    }
+
+    // Regression guard for the old `from.contains(&self.jid)` bug.
+    fn mam_is_self(from: &str, self_jid: &str) -> bool {
+        let self_bare = self_jid.split('/').next().unwrap_or(self_jid).to_lowercase();
+        let from_bare = from.split('/').next().unwrap_or(from).to_lowercase();
+        from_bare == self_bare
+    }
+
+    #[test]
+    fn mam_bare_from_matches_full_self_jid() {
+        assert!(mam_is_self("alice@server.example", "alice@server.example/phone"));
+    }
+
+    #[test]
+    fn mam_different_user_is_not_self() {
+        assert!(!mam_is_self("bob@server.example", "alice@server.example/phone"));
+    }
+
+    #[test]
+    fn old_contains_bug_would_have_misclassified() {
+        // from.contains(&full_jid) is false when `from` is bare and `full_jid` has /resource.
+        assert!(!("alice@server.example".contains("alice@server.example/phone")));
     }
 }

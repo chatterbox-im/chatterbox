@@ -8,10 +8,13 @@ use log::debug; // Add the debug import
 use log::info; // Add the log import
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState},
+    widgets::{
+        Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table, TableState,
+    },
     Frame,
 };
 use std::{
+    cell::Cell as StdCell,
     collections::{HashMap, HashSet},
     io,
     sync::{
@@ -110,9 +113,16 @@ pub struct ChatUI {
     help_dialog: Option<HelpDialog>,           // Add this field for help popup
     device_fingerprints_dialog: Option<DeviceFingerprintsDialog>, // Add this field for device fingerprints popup
     friend_request_notification: Option<FriendRequestNotification>, // Add this field for friend request notifications
+    toasts: Vec<Toast>,
     resources: HashMap<String, Vec<String>>, // Map of base JID -> resource JIDs
     connection_status: bool,                 // Track XMPP server connection status
-    message_scroll_offset: Option<usize>, // None = auto-scroll to bottom, Some(n) = n lines scrolled up from bottom
+    sidebar_hidden: bool,                    // Whether the contacts sidebar is hidden
+    message_scroll_offset: StdCell<Option<usize>>, // None = auto-scroll to bottom, Some(n) = n lines scrolled up from bottom
+    max_message_scroll: StdCell<usize>,
+    keep_scroll_at_top: StdCell<bool>,
+    older_history_loading: bool,
+    history_loading_frame: StdCell<usize>,
+    has_older_history: bool,
     unread_contacts: HashSet<String>,     // Contacts with unread messages
     pub history_loaded_contacts: HashSet<String>, // Contacts whose history has been loaded
 }
@@ -160,6 +170,11 @@ struct FriendRequestNotification {
     timestamp: chrono::DateTime<chrono::Utc>, // When the notification was created (for auto-dismiss)
 }
 
+struct Toast {
+    message: String,
+    timestamp: chrono::DateTime<chrono::Utc>,
+}
+
 enum Tab {
     Messages,
     Contacts,
@@ -185,9 +200,16 @@ impl ChatUI {
             help_dialog: None,                       // Initialize to None
             device_fingerprints_dialog: None,        // Initialize to None
             friend_request_notification: None,       // Initialize to None
+            toasts: Vec::new(),
             resources: HashMap::new(),               // Initialize resources map
             connection_status: false,                // Initialize connection status to disconnected
-            message_scroll_offset: None,             // Auto-scroll to bottom by default
+            sidebar_hidden: false,                   // Sidebar visible by default
+            message_scroll_offset: StdCell::new(None), // Auto-scroll to bottom by default
+            max_message_scroll: StdCell::new(0),
+            keep_scroll_at_top: StdCell::new(false),
+            older_history_loading: false,
+            history_loading_frame: StdCell::new(0),
+            has_older_history: true,
             unread_contacts: HashSet::new(),         // No unread messages initially
             history_loaded_contacts: HashSet::new(), // No history loaded yet
         }
@@ -225,14 +247,16 @@ impl ChatUI {
                 existing.timestamp = message.timestamp;
             }
         } else {
-            // Also check for matching content from the same sender within a recent timeframe
-            // This helps deduplicate messages that might have different IDs but are the same message
-            let recent_threshold = chrono::Utc::now().timestamp() as u64 - 10; // Within last 10 seconds
+            // Content-based fallback: if same sender/recipient/content and timestamps are
+            // within 60 seconds of each other, treat as the same message (handles duplicate
+            // SQLite rows that have different IDs, e.g. from wire-id vs carbon-UUID mismatch).
+            let delta_ms: i64 = 60_000;
             if let Some(idx) = self.messages.iter().position(|m| {
                 m.sender_id == message.sender_id
                     && m.recipient_id == message.recipient_id
                     && m.content == message.content
-                    && m.timestamp > recent_threshold
+                    && !m.content.is_empty()
+                    && (m.timestamp.0 - message.timestamp.0).abs() < delta_ms
             }) {
                 // It's likely the same message with a different ID, update status
                 let existing = &mut self.messages[idx];
@@ -280,8 +304,11 @@ impl ChatUI {
     }
 
     pub fn set_active_contact(&mut self, contact: &str) {
-        // Always store the base JID as the active contact
         self.contact = Self::get_base_jid(contact);
+        // Keep the sidebar highlight in sync with the active contact.
+        if let Some(idx) = self.contacts.iter().position(|c| c == &self.contact) {
+            self.current_contact_index = idx;
+        }
     }
 
     pub fn has_active_contact(&self) -> bool {
@@ -398,7 +425,7 @@ impl ChatUI {
     pub fn handle_terminal_event(
         &mut self,
         terminal_event: Event,
-    ) -> Result<Option<(String, String)>> {
+    ) -> Result<Option<crate::commands::UiCommand>> {
         if let Some(focused) = focus_state_from_event(&terminal_event) {
             self.terminal_focused = focused;
             return Ok(None);
@@ -426,7 +453,7 @@ impl ChatUI {
                         format!("OMEMO key for {} has been accepted", contact),
                     ));
 
-                    return Ok(Some((contact, String::from("__KEY_ACCEPTED__"))));
+                    return Ok(Some(crate::commands::UiCommand::KeyAccepted { contact }));
                 }
                 KeyCode::Char('n') | KeyCode::Char('N') => {
                     // Reject the key
@@ -439,7 +466,7 @@ impl ChatUI {
                         format!("OMEMO key for {} has been rejected", contact),
                     ));
 
-                    return Ok(Some((contact, String::from("__KEY_REJECTED__"))));
+                    return Ok(Some(crate::commands::UiCommand::KeyRejected { contact }));
                 }
                 _ => {} // Ignore other keys when popup is active
             }
@@ -460,17 +487,14 @@ impl ChatUI {
                         format!("Removing contact {}...", contact),
                     ));
 
-                    return Ok(Some((
-                        contact,
-                        String::from("__REMOVE_CONTACT_CONFIRMED__"),
-                    )));
+                    return Ok(Some(crate::commands::UiCommand::RemoveContactConfirmed { contact }));
                 }
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                     // Cancel contact removal
                     self.contact_remove_dialog = None;
 
                     // Add system message about cancellation
-                    self.add_message(Message::system("me", "Contact removal cancelled"));
+                    self.add_message(Message::system(self.contact.clone(), "Contact removal cancelled"));
 
                     return Ok(None);
                 }
@@ -495,7 +519,7 @@ impl ChatUI {
                         self.contact_add_dialog = None;
 
                         // Return the new contact JID to be added
-                        return Ok(Some((contact_jid, String::from("__ADD_CONTACT__"))));
+                        return Ok(Some(crate::commands::UiCommand::AddContact { jid: contact_jid }));
                     }
                 }
                 _ => {
@@ -543,12 +567,19 @@ impl ChatUI {
                         let row = &mut dialog.contact_rows[sel];
                         let jid = dialog.contact_jid.clone().unwrap_or_default();
                         let device_id = row.0.clone();
-                        let new_trusted =
-                            !matches!(row.2, TrustLevel::Trusted | TrustLevel::Verified);
-                        row.2 = if new_trusted { TrustLevel::Trusted } else { TrustLevel::Untrusted };
-                        let flag = if new_trusted { "1" } else { "0" };
-                        let signal = format!("__SET_DEVICE_TRUST__:{}:{}:{}", jid, device_id, flag);
-                        return Ok(Some((String::new(), signal)));
+                        let new_level = if matches!(row.2, TrustLevel::Trusted | TrustLevel::Verified) {
+                            TrustLevel::Untrusted
+                        } else {
+                            TrustLevel::Trusted
+                        };
+                        row.2 = new_level.clone();
+                        if let Ok(did) = device_id.parse::<u32>() {
+                            return Ok(Some(crate::commands::UiCommand::SetDeviceTrust {
+                                jid,
+                                device_id: did,
+                                level: new_level,
+                            }));
+                        }
                     } else {
                         // Own device row — skip "this device"
                         let own_idx = sel - n_contact;
@@ -557,12 +588,19 @@ impl ChatUI {
                             if !is_current {
                                 let jid = dialog.own_jid.clone();
                                 let device_id = row.0.clone();
-                                let new_trusted =
-                                    !matches!(row.2, TrustLevel::Trusted | TrustLevel::Verified);
-                                row.2 = if new_trusted { TrustLevel::Trusted } else { TrustLevel::Untrusted };
-                                let flag = if new_trusted { "1" } else { "0" };
-                                let signal = format!("__SET_DEVICE_TRUST__:{}:{}:{}", jid, device_id, flag);
-                                return Ok(Some((String::new(), signal)));
+                                let new_level = if matches!(row.2, TrustLevel::Trusted | TrustLevel::Verified) {
+                                    TrustLevel::Untrusted
+                                } else {
+                                    TrustLevel::Trusted
+                                };
+                                row.2 = new_level.clone();
+                                if let Ok(did) = device_id.parse::<u32>() {
+                                    return Ok(Some(crate::commands::UiCommand::SetDeviceTrust {
+                                        jid,
+                                        device_id: did,
+                                        level: new_level,
+                                    }));
+                                }
                             }
                         }
                     }
@@ -576,7 +614,7 @@ impl ChatUI {
         }
 
         match key.code {
-            KeyCode::Esc => return Ok(Some((String::new(), String::new()))), // Signal to quit
+            KeyCode::Esc => return Ok(Some(crate::commands::UiCommand::Quit)),
             KeyCode::Enter => {
                 if !self.input.value().is_empty() {
                     let message_content = self.input.value().to_string();
@@ -603,19 +641,18 @@ impl ChatUI {
                     // Add the message to UI immediately
                     self.add_message(message);
 
-                    // Check if we're about to send an encrypted message
-                    if self.omemo_enabled {
-                        info!("UI: Preparing encrypted message for {}", recipient_jid);
-                        // Instead of appending to the message content, add it as a separate flag
-                        info!("UI: Using __VERIFY_KEYS__ prefix in recipient field instead of content");
-                        return Ok(Some((
-                            format!("__VERIFY_KEYS__:{}", recipient_jid),
-                            message_content,
-                        )));
-                    } else {
-                        info!("UI: Sending unencrypted message to {}", recipient_jid);
-                        return Ok(Some((recipient_jid, message_content)));
+                    // /plain prefix bypasses OMEMO
+                    if let Some(plain_body) = message_content.strip_prefix("/plain ") {
+                        return Ok(Some(crate::commands::UiCommand::SendPlainMessage {
+                            to: recipient_jid,
+                            body: plain_body.to_string(),
+                        }));
                     }
+
+                    return Ok(Some(crate::commands::UiCommand::SendMessage {
+                        to: recipient_jid,
+                        body: message_content,
+                    }));
                 }
             }
             KeyCode::Tab => {
@@ -637,8 +674,9 @@ impl ChatUI {
 
                 self.add_message(Message::system("me", status_msg));
             }
-            KeyCode::Char('p') | KeyCode::Char('P')
-                if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
+            KeyCode::Char('n') | KeyCode::Char('N')
+                if key.modifiers.contains(event::KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(event::KeyModifiers::SHIFT) =>
             {
                 self.os_notifications_enabled = !self.os_notifications_enabled;
                 let status_msg = if self.os_notifications_enabled {
@@ -648,10 +686,7 @@ impl ChatUI {
                 };
 
                 self.add_message(Message::system("me", status_msg));
-                return Ok(Some((
-                    String::new(),
-                    String::from("__TOGGLE_OS_NOTIFICATIONS__"),
-                )));
+                return Ok(Some(crate::commands::UiCommand::ToggleOsNotifications));
             }
             KeyCode::Char('t') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
                 // Toggle trust for the current contact's OMEMO keys
@@ -660,17 +695,14 @@ impl ChatUI {
 
                     // Request a trust toggle operation from the main app
                     // We'll use a special message format that will be handled in main.rs
-                    return Ok(Some((
-                        current_contact,
-                        String::from("__TOGGLE_OMEMO_TRUST__"),
-                    )));
+                    return Ok(Some(crate::commands::UiCommand::ToggleOmemoTrust { contact: current_contact }));
                 }
             }
             KeyCode::Char('a') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
                 // Show add contact dialog
                 // We'll use the base domain from the current credentials
                 // The server domain will be supplied by main.rs before showing the dialog
-                return Ok(Some((String::new(), String::from("__SHOW_ADD_CONTACT__"))));
+                return Ok(Some(crate::commands::UiCommand::ShowAddContact));
             }
             KeyCode::Char('d') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
                 // Delete/remove the current contact
@@ -678,7 +710,7 @@ impl ChatUI {
                     let current_contact = self.contact.clone();
 
                     // Request contact removal from the main app
-                    return Ok(Some((current_contact, String::from("__REMOVE_CONTACT__"))));
+                    return Ok(Some(crate::commands::UiCommand::RemoveContact { contact: current_contact }));
                 }
             }
             KeyCode::Char('h') | KeyCode::Char('H')
@@ -691,21 +723,20 @@ impl ChatUI {
             KeyCode::Char('f') | KeyCode::Char('F')
                 if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
             {
-                return Ok(Some((
-                    String::new(),
-                    String::from("__SHOW_DEVICE_FINGERPRINTS__"),
-                )));
+                return Ok(Some(crate::commands::UiCommand::ShowDeviceFingerprints));
             }
             KeyCode::Char('m') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
-                return Ok(Some((String::new(), String::from("__ENABLE_CARBONS__"))));
+                return Ok(Some(crate::commands::UiCommand::EnableCarbons));
             }
-            KeyCode::Char('r') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {}
-            // Add test shortcut for friend request notifications (Ctrl+N)
-            KeyCode::Char('n') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
-                return Ok(Some((
-                    String::new(),
-                    String::from("__TEST_FRIEND_REQUEST__"),
-                )));
+            KeyCode::Char('r') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
+                if self.has_active_contact() {
+                    return Ok(Some(crate::commands::UiCommand::RefetchOmemo {
+                        contact: self.contact.clone(),
+                    }));
+                }
+            }
+            KeyCode::Char('s') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
+                self.sidebar_hidden = !self.sidebar_hidden;
             }
             KeyCode::Up => {
                 if let Tab::Contacts = self.active_tab {
@@ -720,15 +751,14 @@ impl ChatUI {
                         // Clear unread status for the newly selected contact
                         if contact_changed {
                             self.unread_contacts.remove(&self.contact);
-                            return Ok(Some((
-                                self.contact.clone(),
-                                String::from("__CONTACT_CHANGED__"),
-                            )));
+                            return Ok(Some(crate::commands::UiCommand::ContactChanged {
+                                contact: self.contact.clone(),
+                            }));
                         }
                     }
                 } else if let Tab::Messages = self.active_tab {
-                    let current = self.message_scroll_offset.unwrap_or(0);
-                    self.message_scroll_offset = Some(current + 3);
+                    self.scroll_messages_up(3);
+                    return Ok(self.request_older_history_if_at_top());
                 }
             }
             KeyCode::Down => {
@@ -743,42 +773,33 @@ impl ChatUI {
                         // Clear unread status for the newly selected contact
                         if contact_changed {
                             self.unread_contacts.remove(&self.contact);
-                            return Ok(Some((
-                                self.contact.clone(),
-                                String::from("__CONTACT_CHANGED__"),
-                            )));
+                            return Ok(Some(crate::commands::UiCommand::ContactChanged {
+                                contact: self.contact.clone(),
+                            }));
                         }
                     }
                 } else if let Tab::Messages = self.active_tab {
-                    if let Some(offset) = self.message_scroll_offset {
-                        if offset <= 3 {
-                            self.message_scroll_offset = None;
-                        } else {
-                            self.message_scroll_offset = Some(offset - 3);
-                        }
-                    }
+                    self.scroll_messages_down(3);
                 }
             }
             KeyCode::PageUp => {
                 // Scroll messages up (Fn+Up on Mac)
-                let current = self.message_scroll_offset.unwrap_or(0);
-                self.message_scroll_offset = Some(current + 10);
+                if let Tab::Messages = self.active_tab {
+                    self.scroll_messages_up(10);
+                    if let Some(command) = self.request_older_history_if_at_top() {
+                        return Ok(Some(command));
+                    }
+                }
             }
             KeyCode::PageDown => {
                 // Scroll messages down (Fn+Down on Mac)
-                if let Some(offset) = self.message_scroll_offset {
-                    if offset <= 10 {
-                        // Back to auto-scroll mode
-                        self.message_scroll_offset = None;
-                    } else {
-                        self.message_scroll_offset = Some(offset - 10);
-                    }
+                if let Tab::Messages = self.active_tab {
+                    self.scroll_messages_down(10);
                 }
-                // If already None (auto-scroll), do nothing
             }
             KeyCode::End => {
                 // Jump back to latest messages
-                self.message_scroll_offset = None;
+                self.message_scroll_offset.set(None);
             }
             _ => {
                 if let Tab::Messages = self.active_tab {
@@ -844,16 +865,49 @@ impl ChatUI {
         Ok(None)
     }
 
+    fn scroll_messages_up(&mut self, lines: usize) {
+        let current = self.message_scroll_offset.get().unwrap_or(0);
+        let max_offset = self.max_message_scroll.get();
+        if max_offset > 0 {
+            self.message_scroll_offset
+                .set(Some(current.saturating_add(lines).min(max_offset)));
+        }
+    }
+
+    fn request_older_history_if_at_top(&mut self) -> Option<crate::commands::UiCommand> {
+        let at_top = !self.messages.is_empty()
+            && self.message_scroll_offset.get().unwrap_or(0) >= self.max_message_scroll.get();
+        if at_top && !self.older_history_loading && self.has_older_history {
+            self.older_history_loading = true;
+            self.history_loading_frame.set(0);
+            return Some(crate::commands::UiCommand::LoadOlderHistory {
+                contact: self.contact.clone(),
+            });
+        }
+        None
+    }
+
+    fn scroll_messages_down(&mut self, lines: usize) {
+        if let Some(offset) = self.message_scroll_offset.get() {
+            if offset <= lines {
+                self.message_scroll_offset.set(None);
+            } else {
+                self.message_scroll_offset.set(Some(offset - lines));
+            }
+        }
+    }
+
     pub fn draw(&self, frame: &mut Frame) {
         let size = frame.area();
 
         // Create a layout with 3 horizontal sections
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(20), // Contacts panel
-                Constraint::Percentage(80), // Chat panel
-            ])
+            .constraints(if self.sidebar_hidden {
+                vec![Constraint::Length(0), Constraint::Percentage(100)]
+            } else {
+                vec![Constraint::Percentage(20), Constraint::Percentage(80)]
+            })
             .split(size);
 
         // Split the right section for messages, input, and help
@@ -923,10 +977,12 @@ impl ChatUI {
                 }
                 let sender_base = Self::get_base_jid(&m.sender_id);
                 let recipient_base = Self::get_base_jid(&m.recipient_id);
-                // Show messages from the active contact, or sent to the active contact, or system messages
+                // Show conversation messages, contact-specific system messages,
+                // and global system messages addressed to "me".
                 sender_base == *active_contact
                     || recipient_base == *active_contact
-                    || m.sender_id == "system"
+                    || (matches!(m.direction, chatterbox::models::Direction::System { .. })
+                        && (recipient_base == *active_contact || recipient_base == "me"))
             })
             .collect();
         let filtered_owned: Vec<Message> = filtered_messages.into_iter().cloned().collect();
@@ -975,12 +1031,12 @@ impl ChatUI {
             ),
             Span::styled(omemo_status_text, omemo_status_style),
             Span::styled(
-                "] | Ctrl+P notifications [",
+                "] | Ctrl+N notifications [",
                 Style::default().fg(Color::Gray),
             ),
             Span::styled(notification_status_text, notification_status_style),
             Span::styled(
-                "] | Ctrl+T trust | Fn+↑/↓ scroll",
+                "] | Ctrl+T trust | Ctrl+S sidebar | Fn+↑/↓ scroll",
                 Style::default().fg(Color::Gray),
             ),
         ];
@@ -1034,6 +1090,11 @@ impl ChatUI {
             // This could spam the logs, so it's commented out, but useful for debugging
             // log::debug!("UI: No friend request notification active during this render");
         }
+
+        // Toasts are deliberately rendered as passive overlays. They do not
+        // change focus or participate in input handling, so the user can keep
+        // typing while one is visible.
+        draw_toasts(frame, &self.toasts, chunks[1]);
     }
 
     pub fn remove_last_message(&mut self) {
@@ -1042,7 +1103,59 @@ impl ChatUI {
 
     pub fn clear_messages(&mut self) {
         self.messages.clear();
-        self.message_scroll_offset = None;
+        self.message_scroll_offset.set(None);
+        self.max_message_scroll.set(0);
+        self.keep_scroll_at_top.set(false);
+        self.older_history_loading = false;
+        self.history_loading_frame.set(0);
+        self.has_older_history = true;
+    }
+
+    pub fn oldest_message_cursor(&self, contact: &str) -> Option<(String, i64)> {
+        let contact = Self::get_base_jid(contact);
+        self.messages
+            .iter()
+            .filter(|message| {
+                !matches!(
+                    message.direction,
+                    chatterbox::models::Direction::System { .. }
+                )
+                    && (Self::get_base_jid(&message.sender_id) == contact
+                        || Self::get_base_jid(&message.recipient_id) == contact)
+            })
+            .min_by_key(|message| message.timestamp.get())
+            .map(|message| (message.id.clone(), message.timestamp.get()))
+    }
+
+    pub fn finish_older_history_load(&mut self, contact: &str, has_older: bool) {
+        if Self::get_base_jid(&self.contact) == Self::get_base_jid(contact) {
+            self.older_history_loading = false;
+            self.history_loading_frame.set(0);
+            self.has_older_history = has_older;
+        }
+    }
+
+    pub fn keep_scroll_at_top(&self) {
+        self.keep_scroll_at_top.set(true);
+    }
+
+    pub fn is_history_loading(&self) -> bool {
+        self.older_history_loading
+    }
+
+    pub fn begin_history_loading(&mut self) {
+        self.older_history_loading = true;
+        self.history_loading_frame.set(0);
+    }
+
+    pub fn finish_local_history_loading(&mut self) {
+        self.older_history_loading = false;
+        self.history_loading_frame.set(0);
+    }
+
+    pub fn advance_history_loading_animation(&self) {
+        self.history_loading_frame
+            .set((self.history_loading_frame.get() + 1) % 8);
     }
 
     pub fn update_contact_status(&mut self, contact_id: &str, status: ContactStatus) {
@@ -1141,6 +1254,10 @@ impl ChatUI {
         self.device_fingerprints_dialog = None;
     }
 
+    pub fn has_pending_input(&self) -> bool {
+        !self.input.value().is_empty()
+    }
+
     // Check and clear friend request notification if it's been shown for enough time
     pub fn clean_friend_request_notifications(&mut self, timeout_secs: i64) -> bool {
         if let Some(notification) = &self.friend_request_notification {
@@ -1161,23 +1278,25 @@ impl ChatUI {
         false
     }
 
-    /// Test the friend request notification UI by artificially triggering a notification
-    ///
-    /// This is a helper method for testing the UI notification system
-    pub fn test_friend_request_notification(&mut self) {
-        // Show a test notification
-        info!("TEST: Artificially showing friend request notification for test@example.com");
-        self.show_friend_request_notification("test@example.com");
-
-        // Also add the test contact to the contacts list
-        self.add_contact("test@example.com");
-
-        // Add a system message to confirm test was triggered
-        self.add_message(Message::system(
-            "me",
-            "TEST: Friend request notification triggered manually",
-        ));
+    pub fn show_toast(&mut self, message: impl Into<String>) {
+        self.toasts.push(Toast {
+            message: message.into(),
+            timestamp: chrono::Utc::now(),
+        });
+        // Keep a burst of background updates from covering the whole corner.
+        if self.toasts.len() > 3 {
+            self.toasts.remove(0);
+        }
     }
+
+    pub fn clean_toasts(&mut self, timeout_secs: i64) -> bool {
+        let before = self.toasts.len();
+        let now = chrono::Utc::now();
+        self.toasts
+            .retain(|toast| (now - toast.timestamp).num_seconds() <= timeout_secs);
+        before != self.toasts.len()
+    }
+
 }
 
 /// Splits a text line into ratatui spans, styling any URLs with cyan + underline
@@ -1224,10 +1343,10 @@ fn draw_messages(f: &mut Frame, messages: &[Message], area: Rect, ui: &ChatUI) {
 
     let wrap_width = area.width.saturating_sub(2) as usize; // Account for borders
 
-    let messages_with_status: Vec<ListItem> = messages
+    let message_lines: Vec<Line<'static>> = messages
         .iter()
         .flat_map(|m| {
-            let datetime = chrono::DateTime::from_timestamp(m.timestamp as i64, 0)
+            let datetime = chrono::DateTime::from_timestamp_millis(m.timestamp.get())
                 .unwrap_or_else(|| chrono::Utc::now());
 
             let now = chrono::Utc::now();
@@ -1237,18 +1356,18 @@ fn draw_messages(f: &mut Frame, messages: &[Message], area: Rect, ui: &ChatUI) {
 
             // Add encryption indicator based on whether this specific message was encrypted
             let encryption_indicator = if m.encrypted { " 🔒" } else { " ❌" };
-            let prefix =
-                if m.sender_id == "me" || m.sender_id.contains("@") && m.recipient_id != "me" {
-                    format!("[{}] You{}: ", timestamp, encryption_indicator)
-                } else if m.sender_id == "system" {
-                    format!("[{}] System: ", timestamp)
-                } else {
-                    format!("[{}] {}{}: ", timestamp, m.sender_id, encryption_indicator)
-                };
+            let prefix = match &m.direction {
+                chatterbox::models::Direction::Outgoing { .. } =>
+                    format!("[{}] You{}: ", timestamp, encryption_indicator),
+                chatterbox::models::Direction::System { .. } =>
+                    format!("[{}] System: ", timestamp),
+                chatterbox::models::Direction::Incoming { from } =>
+                    format!("[{}] {}{}: ", timestamp, from, encryption_indicator),
+            };
 
             // Simplified status indicator using ticks clearly
-            let status_indicator =
-                if m.sender_id == "me" || m.sender_id.contains("@") && m.recipient_id != "me" {
+            let status_indicator = match &m.direction {
+                chatterbox::models::Direction::Outgoing { .. } => {
                     match m.delivery_status {
                         DeliveryStatus::Sending => "", // no tick yet
                         DeliveryStatus::Sent => " ✓",
@@ -1258,9 +1377,9 @@ fn draw_messages(f: &mut Frame, messages: &[Message], area: Rect, ui: &ChatUI) {
                         DeliveryStatus::Failed => " ❌",
                         DeliveryStatus::Unknown => "",
                     }
-                } else {
-                    ""
-                };
+                }
+                _ => "",
+            };
 
             let full_content = format!("{}{}{}", prefix, m.content, status_indicator);
 
@@ -1274,9 +1393,9 @@ fn draw_messages(f: &mut Frame, messages: &[Message], area: Rect, ui: &ChatUI) {
             .map(|l| l.into_owned())
             .collect();
 
-            let style = if m.sender_id == "system" {
+            let style = if matches!(m.direction, chatterbox::models::Direction::System { .. }) {
                 Style::default().fg(Color::Gray)
-            } else if m.sender_id == "me" {
+            } else if matches!(m.direction, chatterbox::models::Direction::Outgoing { .. }) {
                 match m.delivery_status {
                     DeliveryStatus::Failed => Style::default().fg(Color::Red),
                     DeliveryStatus::Delivered | DeliveryStatus::Read => {
@@ -1294,9 +1413,9 @@ fn draw_messages(f: &mut Frame, messages: &[Message], area: Rect, ui: &ChatUI) {
 
             wrapped_lines.into_iter().map(move |line| {
                 if line.contains("http://") || line.contains("https://") {
-                    ListItem::new(Text::from(spans_for_line(&line, style)))
+                    spans_for_line(&line, style)
                 } else {
-                    ListItem::new(Text::from(line)).style(style)
+                    Line::from(line).style(style)
                 }
             })
         })
@@ -1304,75 +1423,134 @@ fn draw_messages(f: &mut Frame, messages: &[Message], area: Rect, ui: &ChatUI) {
 
     // Add connection status icon to the title
     let connection_icon = if ui.is_connected() { "🔌 " } else { "❌ " };
-    let scroll_indicator = if ui.message_scroll_offset.is_some() {
+    let scroll_indicator = if ui.message_scroll_offset.get().is_some() {
         " [scrolled - Fn+End to jump to latest]"
     } else {
         ""
     };
     let title = format!("{}Messages{}", connection_icon, scroll_indicator);
+    let loading_indicator = if ui.older_history_loading {
+        const BAR: [&str; 8] = [
+            "[>       ]",
+            "[=>      ]",
+            "[==>     ]",
+            "[===>    ]",
+            "[ ===>   ]",
+            "[  ===>  ]",
+            "[   ===> ]",
+            "[    ===>]",
+        ];
+        format!(" {} Loading history", BAR[ui.history_loading_frame.get()])
+    } else {
+        String::new()
+    };
+    let title = format!("{}{}", title, loading_indicator);
 
-    // Create a ListState to control the scroll position
-    let mut list_state = ListState::default();
+    // Scroll by rendered terminal lines, rather than message indices. This
+    // keeps long wrapped messages and short messages equally scrollable.
+    let viewport_height = chunks[0].height.saturating_sub(2) as usize;
+    let max_scroll = message_lines.len().saturating_sub(viewport_height);
+    ui.max_message_scroll.set(max_scroll);
+    let scroll_from_bottom = if ui.keep_scroll_at_top.get() {
+        ui.message_scroll_offset.set(Some(max_scroll));
+        ui.keep_scroll_at_top.set(false);
+        max_scroll
+    } else {
+        ui.message_scroll_offset.get().unwrap_or(0).min(max_scroll)
+    };
+    let scroll_from_top = max_scroll.saturating_sub(scroll_from_bottom);
 
-    // Set the selected item based on scroll offset
-    if !messages_with_status.is_empty() {
-        let last = messages_with_status.len() - 1;
-        let selected = match ui.message_scroll_offset {
-            None => last, // Auto-scroll to bottom
-            Some(lines_from_bottom) => last.saturating_sub(lines_from_bottom),
-        };
-        list_state.select(Some(selected));
-    }
-
-    let messages_list = List::new(messages_with_status)
+    let messages_widget = Paragraph::new(Text::from(message_lines))
         .block(Block::default().borders(Borders::ALL).title(title))
-        .highlight_style(Style::default()); // Use default style to make selection invisible
+        .scroll((scroll_from_top.min(u16::MAX as usize) as u16, 0));
+    f.render_widget(messages_widget, chunks[0]);
 
-    // Render the widget with state to allow scrolling to the selected (last) message
-    f.render_stateful_widget(messages_list, chunks[0], &mut list_state);
+    // Typing indicator row (chunks[1]) ----------------------------------------
+    let typing_text = {
+        let base = ChatUI::get_base_jid(&ui.contact);
+        if let Some((status, _)) = ui.typing_states.get(&base) {
+            let display = base.split('@').next().unwrap_or(&base);
+            match status {
+                TypingStatus::Composing => {
+                    // Animate the trailing dots: cycle through 1-3 every ~400 ms.
+                    let dots_phase =
+                        (chrono::Utc::now().timestamp_subsec_millis() / 400) % 3 + 1;
+                    let dots = ".".repeat(dots_phase as usize);
+                    Some((
+                        format!(" ✍  {} is typing{}", display, dots),
+                        Style::default().fg(Color::DarkGray),
+                    ))
+                }
+                TypingStatus::Paused => Some((
+                    format!(" ✍  {} has paused", display),
+                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+                )),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    };
+    if let Some((text, style)) = typing_text {
+        f.render_widget(Paragraph::new(text).style(style), chunks[1]);
+    }
 }
 
 fn draw_key_confirmation(f: &mut Frame, key_conf: &KeyConfirmation, area: Rect) {
-    // Calculate popup size and position (centered)
-    let popup_width = 60.min(area.width - 4);
-    let popup_height = 10.min(area.height - 4);
-
-    let popup_x = (area.width - popup_width) / 2;
-    let popup_y = (area.height - popup_height) / 2;
-
-    let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
-
-    // Create popup with border
-    let popup_block = Block::default()
-        .title("Unrecognized OMEMO Key")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow));
-
-    f.render_widget(Clear, popup_area); // Clear the area first
-    f.render_widget(popup_block, popup_area);
-
-    // Create inner area for content
-    let inner_area = popup_area.inner(Margin {
-        vertical: 1,
-        horizontal: 2,
-    });
-
-    // Format the content
     let device_info = key_conf
         .device_id
         .as_ref()
         .map_or(String::new(), |id| format!(" (Device ID: {})", id));
 
-    let content = vec![
+    // Size the popup to fit the fingerprint line (border=2, h-margins=4 → 6 overhead cols).
+    let fingerprint_line = format!("Key fingerprint: {}", key_conf.fingerprint);
+    let desired_popup_width = (fingerprint_line.len() as u16 + 6).max(44);
+    let max_popup_width = area.width.saturating_sub(4);
+    let popup_width = desired_popup_width.min(max_popup_width);
+
+    // When the terminal is too narrow to show the fingerprint on one line, split it in two.
+    let inner_width = popup_width.saturating_sub(6) as usize;
+    let fingerprint_lines: Vec<String> = if fingerprint_line.len() <= inner_width {
+        vec![fingerprint_line]
+    } else {
+        // Split the hex-colon string at roughly the midpoint on a colon boundary.
+        let fp = &key_conf.fingerprint;
+        let mid = fp.len() / 2;
+        let split = fp[..mid].rfind(':').map(|i| i + 1).unwrap_or(mid);
+        vec![
+            "Key fingerprint:".to_string(),
+            format!("  {}", &fp[..split.saturating_sub(1)]),
+            format!("  {}", &fp[split..]),
+        ]
+    };
+
+    let mut content: Vec<String> = vec![
         format!("Contact: {}{}", key_conf.contact, device_info),
         "".to_string(),
-        format!("Key fingerprint: {}", key_conf.fingerprint),
-        "".to_string(),
-        "Do you want to accept this key?".to_string(),
-        "Press [Y] to accept or [N] to reject".to_string(),
     ];
+    content.extend(fingerprint_lines);
+    content.push("".to_string());
+    content.push("Do you want to accept this key?".to_string());
+    content.push("Press [Y] to accept or [N] to reject".to_string());
 
-    // Display content as a list
+    let popup_height = (content.len() as u16 + 2).min(area.height.saturating_sub(4));
+    let popup_x = (area.width - popup_width) / 2;
+    let popup_y = (area.height - popup_height) / 2;
+    let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
+
+    let popup_block = Block::default()
+        .title("Unrecognized OMEMO Key")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+
+    f.render_widget(Clear, popup_area);
+    f.render_widget(popup_block, popup_area);
+
+    let inner_area = popup_area.inner(Margin {
+        vertical: 1,
+        horizontal: 2,
+    });
+
     let content_list = List::new(
         content
             .iter()
@@ -1454,11 +1632,7 @@ fn draw_add_contact_dialog(f: &mut Frame, dialog: &ContactAddDialog, area: Rect)
     ));
 }
 
-fn draw_contact_remove_dialog(
-    f: &mut Frame,
-    dialog: &ContactRemoveDialog,
-    area: Rect,
-) {
+fn draw_contact_remove_dialog(f: &mut Frame, dialog: &ContactRemoveDialog, area: Rect) {
     // Calculate popup size and position (centered)
     let popup_width = 60.min(area.width - 4); // Increased from 50 to 60
     let popup_height = 8.min(area.height - 4); // Increased from 6 to 8
@@ -1538,6 +1712,8 @@ fn draw_help_dialog(f: &mut Frame, area: Rect) {
         ("General", ""),
         ("ESC", "Quit application"),
         ("Tab", "Switch between Messages and Contacts"),
+        ("Ctrl+S", "Toggle sidebar (contacts panel) visibility"),
+        ("Ctrl+H", "Show this help dialog"),
         ("", ""),
         ("Contacts Navigation", ""),
         (
@@ -1564,16 +1740,7 @@ fn draw_help_dialog(f: &mut Frame, area: Rect) {
             "Ctrl+R",
             "Force OMEMO device list re-fetch for active contact",
         ),
-        ("Ctrl+P", "Toggle OS notifications"),
-        ("", ""),
-        ("Debug", ""),
-        (
-            "Ctrl+N",
-            "Test friend request notification popup (for debugging)",
-        ),
-        ("", ""),
-        ("Help", ""),
-        ("Ctrl+H", "Show this help dialog"),
+        ("Ctrl+N", "Toggle OS notifications"),
         ("", ""),
         ("Press any key to close this dialog", ""),
     ];
@@ -1613,19 +1780,15 @@ fn draw_help_dialog(f: &mut Frame, area: Rect) {
     f.render_widget(shortcuts_list, inner_area);
 }
 
-fn draw_device_fingerprints_dialog(
-    f: &mut Frame,
-    dialog: &DeviceFingerprintsDialog,
-    area: Rect,
-) {
+fn draw_device_fingerprints_dialog(f: &mut Frame, dialog: &DeviceFingerprintsDialog, area: Rect) {
     // ── popup geometry ────────────────────────────────────────────────────────
     let popup_width = 84u16.min(area.width.saturating_sub(4));
     let contact_rows = dialog.contact_rows.len() as u16;
     let own_rows = dialog.own_rows.len() as u16;
     // header + contact section header + table header + rows + gap + own section
     // header + table header + rows + footer
-    let popup_height = (4 + contact_rows.max(1) + 4 + own_rows.max(1) + 4)
-        .min(area.height.saturating_sub(4));
+    let popup_height =
+        (4 + contact_rows.max(1) + 4 + own_rows.max(1) + 4).min(area.height.saturating_sub(4));
     let popup_x = (area.width.saturating_sub(popup_width)) / 2;
     let popup_y = (area.height.saturating_sub(popup_height)) / 2;
     let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
@@ -1637,7 +1800,10 @@ fn draw_device_fingerprints_dialog(
         .border_style(Style::default().fg(Color::Blue));
     f.render_widget(outer_block, popup_area);
 
-    let inner = popup_area.inner(Margin { vertical: 1, horizontal: 1 });
+    let inner = popup_area.inner(Margin {
+        vertical: 1,
+        horizontal: 1,
+    });
 
     // ── helper: format a fingerprint to fit in `w` chars ─────────────────────
     fn fmt_fp(fp: &str, w: usize) -> String {
@@ -1659,7 +1825,9 @@ fn draw_device_fingerprints_dialog(
     // ── trust slider helper ───────────────────────────────────────────────────
     fn trust_cell(trust: &TrustLevel) -> (String, Color) {
         match trust {
-            TrustLevel::Trusted | TrustLevel::Verified => ("────● Trusted".to_string(), Color::Green),
+            TrustLevel::Trusted | TrustLevel::Verified => {
+                ("────● Trusted".to_string(), Color::Green)
+            }
             TrustLevel::Untrusted => ("●──── Blocked".to_string(), Color::Red),
             TrustLevel::Undecided => ("──?── Unknown".to_string(), Color::Yellow),
         }
@@ -1691,10 +1859,7 @@ fn draw_device_fingerprints_dialog(
     let header_style = Style::default()
         .fg(Color::Magenta)
         .add_modifier(Modifier::BOLD);
-    let contact_title = dialog
-        .contact_jid
-        .as_deref()
-        .unwrap_or("Contact devices");
+    let contact_title = dialog.contact_jid.as_deref().unwrap_or("Contact devices");
     let contact_rows_rendered: Vec<Row> = if dialog.contact_rows.is_empty() {
         vec![Row::new(vec![
             Cell::from(""),
@@ -1711,10 +1876,7 @@ fn draw_device_fingerprints_dialog(
                 Row::new(vec![
                     Cell::from(dev.as_str()),
                     Cell::from(fmt_fp(fp, fp_width)),
-                    Cell::from(Span::styled(
-                        trust_text,
-                        Style::default().fg(trust_color),
-                    )),
+                    Cell::from(Span::styled(trust_text, Style::default().fg(trust_color))),
                 ])
             })
             .collect()
@@ -1727,12 +1889,13 @@ fn draw_device_fingerprints_dialog(
     }
 
     let contact_table = Table::new(contact_rows_rendered, widths)
-        .header(
-            Row::new(vec!["Device", "Fingerprint", "Trust"]).style(header_style),
-        )
+        .header(Row::new(vec!["Device", "Fingerprint", "Trust"]).style(header_style))
         .block(
             Block::default()
-                .title(Span::styled(contact_title, Style::default().fg(Color::Magenta)))
+                .title(Span::styled(
+                    contact_title,
+                    Style::default().fg(Color::Magenta),
+                ))
                 .borders(Borders::NONE),
         )
         .row_highlight_style(
@@ -1752,8 +1915,7 @@ fn draw_device_fingerprints_dialog(
     let own_rows_rendered: Vec<Row> = if dialog.own_rows.is_empty() {
         vec![Row::new(vec![
             Cell::from(""),
-            Cell::from("No own devices found")
-                .style(Style::default().fg(Color::DarkGray)),
+            Cell::from("No own devices found").style(Style::default().fg(Color::DarkGray)),
             Cell::from(""),
         ])]
     } else {
@@ -1767,7 +1929,9 @@ fn draw_device_fingerprints_dialog(
                     dev.clone()
                 };
                 let dev_style = if *is_current {
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
                 };
@@ -1795,9 +1959,7 @@ fn draw_device_fingerprints_dialog(
     }
 
     let own_table = Table::new(own_rows_rendered, widths)
-        .header(
-            Row::new(vec!["Device", "Fingerprint", "Trust"]).style(own_header_style),
-        )
+        .header(Row::new(vec!["Device", "Fingerprint", "Trust"]).style(own_header_style))
         .block(
             Block::default()
                 .title(Span::styled(
@@ -1880,6 +2042,43 @@ fn draw_friend_request_notification(
     f.render_widget(content_list, inner_area);
 }
 
+fn draw_toasts(f: &mut Frame, toasts: &[Toast], area: Rect) {
+    if toasts.is_empty() || area.width < 12 || area.height < 5 {
+        return;
+    }
+
+    let width = 44.min(area.width.saturating_sub(2));
+    let right = area.x + area.width;
+    let mut y = area.y + 1;
+
+    // Draw newest first, stacked downward from the top-right corner.
+    for toast in toasts.iter().rev() {
+        let lines = wrap(&toast.message, Options::new(width.saturating_sub(4) as usize));
+        let height = (lines.len() as u16 + 2).min(area.height.saturating_sub(1));
+        if height < 3 || y + height > area.y + area.height {
+            break;
+        }
+
+        let toast_area = Rect::new(right - width, y, width, height);
+        let text = lines
+            .into_iter()
+            .map(|line| Line::from(line.into_owned()))
+            .collect::<Vec<_>>();
+        let widget = Paragraph::new(text)
+            .block(
+                Block::default()
+                    .title("Status")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Cyan)),
+            )
+            .style(Style::default().fg(Color::Gray));
+
+        f.render_widget(Clear, toast_area);
+        f.render_widget(widget, toast_area);
+        y += height + 1;
+    }
+}
+
 pub fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -1888,6 +2087,7 @@ pub fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
     // Up/Down arrow key sequences without consuming mouse button events, so
     // normal text selection still works.
     io::Write::write_all(&mut stdout, b"\x1b[?1007h")?;
+    io::Write::flush(&mut stdout)?;
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
     Ok(terminal)

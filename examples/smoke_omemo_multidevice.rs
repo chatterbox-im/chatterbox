@@ -2,6 +2,7 @@
 // These tests verify OMEMO encryption works properly in multi-device scenarios
 
 // Import common test utilities
+#[path = "../tests/common/mod.rs"]
 mod common;
 use common::{get_test_credentials, get_test_recipient, setup_logging, wait_for_message};
 
@@ -11,8 +12,6 @@ use log::{error, info, warn};
 use tokio::time::Duration as TokioDuration;
 
 /// Test OMEMO multi-device encryption functionality
-#[tokio::test]
-#[ignore = "requires live XMPP server"]
 async fn test_omemo_multi_device_encryption() -> Result<()> {
     // Setup logging for the test
     setup_logging();
@@ -235,8 +234,6 @@ async fn test_omemo_multi_device_encryption() -> Result<()> {
 }
 
 /// Test OMEMO multi-device encryption functionality more thoroughly
-#[tokio::test]
-#[ignore = "requires live XMPP server"]
 async fn test_omemo_multi_device_encryption_enhanced() -> Result<()> {
     // Setup logging for the test
     setup_logging();
@@ -432,8 +429,9 @@ async fn test_omemo_multi_device_encryption_enhanced() -> Result<()> {
     };
 
     // Verify both clients can see each other's device IDs
-    let client1_sees_client2 = devices_from_client1.contains(&device_id2);
-    let client2_sees_client1 = devices_from_client2.contains(&device_id1);
+    use chatterbox::omemo::device_id::DeviceId;
+    let client1_sees_client2 = devices_from_client1.contains(&DeviceId::from(device_id2));
+    let client2_sees_client1 = devices_from_client2.contains(&DeviceId::from(device_id1));
 
     if client1_sees_client2 && client2_sees_client1 {
         info!(
@@ -478,7 +476,7 @@ async fn test_omemo_multi_device_encryption_enhanced() -> Result<()> {
                     "Contact {} has no OMEMO devices, using default ID 1",
                     test_contact
                 );
-                vec![1]
+                vec![DeviceId::from(1u32)]
             } else {
                 info!("Contact {} has devices: {:?}", test_contact, devices);
                 devices
@@ -486,7 +484,7 @@ async fn test_omemo_multi_device_encryption_enhanced() -> Result<()> {
         }
         Err(e) => {
             warn!("Failed to get contact devices: {}", e);
-            vec![1]
+            vec![DeviceId::from(1u32)]
         }
     };
 
@@ -685,5 +683,12 @@ async fn test_omemo_multi_device_encryption_enhanced() -> Result<()> {
     let _ = client2.disconnect().await;
 
     info!("Enhanced OMEMO multi-device encryption test completed");
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    test_omemo_multi_device_encryption().await?;
+    test_omemo_multi_device_encryption_enhanced().await?;
     Ok(())
 }

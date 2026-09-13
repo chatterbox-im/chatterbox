@@ -14,12 +14,11 @@ use uuid::Uuid;
 
 // Import the core xmpp libraries
 #[allow(unused_imports)]
-use tokio_xmpp::AsyncClient as XMPPAsyncClient;
+use tokio_xmpp::Client as XMPPAsyncClient;
 
 // Import our submodules - making them public
 pub mod chat_states;
 pub mod connection;
-pub mod coordinator;
 pub mod delivery_receipts;
 pub mod discovery;
 mod event_loop;
@@ -36,7 +35,6 @@ pub mod transport;
 
 // Re-export our submodules
 pub use chat_states::*;
-pub use coordinator::{spawn_coordinator, CoordinatorCommand, CoordinatorHandle};
 pub use discovery::ServiceDiscovery;
 pub use presence::*;
 
@@ -55,6 +53,47 @@ pub mod custom_ns {
     pub const CARBONS: &str = "urn:xmpp:carbons:2";
     pub const FORWARD: &str = "urn:xmpp:forward:0";
     pub const HINTS: &str = "urn:xmpp:hints";
+    pub const SID: &str = "urn:xmpp:sid:0"; // XEP-0359
+}
+
+/// Stable message identity: XEP-0359 <origin-id> takes precedence over the wire `id` attribute.
+pub fn canonical_msg_id(element: &xmpp_parsers::minidom::Element) -> Option<String> {
+    element
+        .get_child("origin-id", custom_ns::SID)
+        .and_then(|e| e.attr("id"))
+        .or_else(|| element.attr("id"))
+        .map(|s| s.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(xml: &str) -> xmpp_parsers::minidom::Element {
+        xml.parse().unwrap()
+    }
+
+    #[test]
+    fn canonical_id_prefers_origin_id_over_wire_id() {
+        let elem = parse(
+            "<message id='wire' xmlns='jabber:client'>\
+             <origin-id xmlns='urn:xmpp:sid:0' id='stable'/>\
+             </message>",
+        );
+        assert_eq!(canonical_msg_id(&elem), Some("stable".to_string()));
+    }
+
+    #[test]
+    fn canonical_id_falls_back_to_wire_id() {
+        let elem = parse("<message id='wire' xmlns='jabber:client'/>");
+        assert_eq!(canonical_msg_id(&elem), Some("wire".to_string()));
+    }
+
+    #[test]
+    fn canonical_id_none_when_both_absent() {
+        let elem = parse("<message xmlns='jabber:client'/>");
+        assert_eq!(canonical_msg_id(&elem), None);
+    }
 }
 
 // XEP namespaces (core and extensions)
@@ -66,7 +105,6 @@ const NS_JABBER_CLIENT: &str = "jabber:client";
 #[derive(Clone, Default)]
 pub(crate) struct LateState {
     pub omemo_manager: Option<Arc<TokioMutex<crate::omemo::OmemoManager>>>,
-    pub pubsub_responses: Option<crate::xmpp::omemo_integration::PubSubResponses>,
     pub jid: String,
     pub typing_tx: Option<mpsc::Sender<(String, crate::xmpp::chat_states::TypingStatus)>>,
 }
@@ -79,13 +117,12 @@ pub struct XMPPClient {
     pub(crate) jid: String,
     /// Channel-based stanza sender — stanzas are forwarded to the transport actor.
     pub(crate) stanza_tx: Option<transport::StanzaTx>,
-    pub(crate) msg_tx: mpsc::Sender<Message>,
+    pub(crate) msg_tx: mpsc::Sender<crate::models::AppEvent>,
     pub(crate) pending_receipts: Arc<TokioMutex<HashMap<String, PendingMessage>>>,
     pub(crate) connected: bool,
     pub(crate) omemo_manager: Option<Arc<TokioMutex<crate::omemo::OmemoManager>>>,
     pub(crate) carbons_enabled: Arc<AtomicBool>,
     pub(crate) iq_registry: Arc<TokioMutex<iq_registry::IqResponseRegistry>>,
-    pub(crate) pubsub_responses: Option<crate::xmpp::omemo_integration::PubSubResponses>,
     /// Watch channel sender for publishing late-bound state to the event loop.
     /// `Some` on the real client, `None` on temporary clones.
     pub(crate) late_state_tx: Option<LateStateTx>,
@@ -107,7 +144,7 @@ pub enum ClientState {
 
 // Core XMPPClient implementation
 impl XMPPClient {
-    pub fn new() -> (Self, mpsc::Receiver<Message>) {
+    pub fn new() -> (Self, mpsc::Receiver<crate::models::AppEvent>) {
         let (msg_tx, msg_rx) = mpsc::channel(100);
         let pending_receipts = Arc::new(TokioMutex::new(HashMap::new()));
         let (late_state_tx, _) = watch::channel(LateState::default());
@@ -122,7 +159,6 @@ impl XMPPClient {
                 omemo_manager: None,
                 carbons_enabled: Arc::new(AtomicBool::new(true)),
                 iq_registry: Arc::new(TokioMutex::new(iq_registry::IqResponseRegistry::new())),
-                pubsub_responses: None,
                 late_state_tx: Some(late_state_tx),
                 typing_tx: None,
                 omemo_dir: None,
@@ -158,9 +194,12 @@ impl XMPPClient {
                 timestamp: pending.timestamp,
                 delivery_status: new_status,
                 encrypted: false,
+                direction: crate::models::Direction::Outgoing {
+                    to: crate::jid::BareJid::parse(&pending.to).expect("expected valid JID"),
+                },
             };
 
-            match self.msg_tx.send(ui_message).await {
+            match self.msg_tx.send(crate::models::AppEvent::Chat(ui_message)).await {
                 Ok(_) => debug!("Sent message status update to UI"),
                 Err(e) => error!("Failed to send message status update to UI: {}", e),
             }
@@ -178,7 +217,7 @@ impl XMPPClient {
     }
 
     /// Send a stanza via the transport channel.
-    pub(crate) fn send_stanza(&self, stanza: xmpp_parsers::Element) -> anyhow::Result<()> {
+    pub(crate) fn send_stanza(&self, stanza: xmpp_parsers::minidom::Element) -> anyhow::Result<()> {
         let tx = self
             .stanza_tx
             .as_ref()
@@ -194,9 +233,9 @@ impl XMPPClient {
     pub(crate) async fn send_iq_and_await(
         &self,
         iq_type: &str,
-        child: xmpp_parsers::Element,
+        child: xmpp_parsers::minidom::Element,
         timeout_secs: u64,
-    ) -> Result<xmpp_parsers::Element> {
+    ) -> Result<xmpp_parsers::minidom::Element> {
         let id = Uuid::new_v4().to_string();
 
         let rx = {
@@ -204,9 +243,9 @@ impl XMPPClient {
             registry.register(id.clone())
         };
 
-        let iq = xmpp_parsers::Element::builder("iq", "jabber:client")
-            .attr("type", iq_type)
-            .attr("id", &id)
+        let iq = xmpp_parsers::minidom::Element::builder("iq", "jabber:client")
+            .attr("type".try_into().unwrap(), iq_type)
+            .attr("id".try_into().unwrap(), &id)
             .append(child)
             .build();
 
@@ -232,7 +271,7 @@ impl XMPPClient {
     }
 
     // Get a clone of the message sender channel
-    pub fn get_message_sender(&self) -> mpsc::Sender<Message> {
+    pub fn get_message_sender(&self) -> mpsc::Sender<crate::models::AppEvent> {
         self.msg_tx.clone()
     }
 
@@ -251,7 +290,6 @@ impl XMPPClient {
             omemo_manager: self.omemo_manager.clone(),
             carbons_enabled: self.carbons_enabled.clone(),
             iq_registry: self.iq_registry.clone(),
-            pubsub_responses: self.pubsub_responses.clone(),
             late_state_tx: None, // clones don't publish state
             typing_tx: self.typing_tx.clone(),
             omemo_dir: self.omemo_dir.clone(),
@@ -280,7 +318,10 @@ impl XMPPClient {
     }
 
     /// Process an OMEMO message carbon (sent or received via XEP-0280)
-    pub async fn process_omemo_carbon(&self, stanza: &xmpp_parsers::Element) -> Result<()> {
+    pub async fn process_omemo_carbon(
+        &self,
+        stanza: &xmpp_parsers::minidom::Element,
+    ) -> Result<()> {
         self.process_carbon(stanza).await
     }
 
@@ -328,21 +369,22 @@ pub fn publish_late_state(client: &XMPPClient) {
     if let Some(ref tx) = client.late_state_tx {
         let state = LateState {
             omemo_manager: client.omemo_manager.clone(),
-            pubsub_responses: client.pubsub_responses.clone(),
             jid: client.jid.clone(),
             typing_tx: client.typing_tx.clone(),
         };
         let _ = tx.send(state);
         info!(
-            "Published late state to event loop (OMEMO: {}, PubSub: {})",
-            client.omemo_manager.is_some(),
-            client.pubsub_responses.is_some()
+            "Published late state to event loop (OMEMO: {})",
+            client.omemo_manager.is_some()
         );
     }
 }
 
 /// Verify OMEMO stanza structure for security
-pub fn verify_omemo_stanza(stanza: &xmpp_parsers::Element, _content: &str) -> Result<(), String> {
+pub fn verify_omemo_stanza(
+    stanza: &xmpp_parsers::minidom::Element,
+    _content: &str,
+) -> Result<(), String> {
     debug!("Verifying OMEMO stanza structure for security compliance");
 
     let mut missing_elements = Vec::new();
