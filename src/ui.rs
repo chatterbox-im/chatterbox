@@ -120,6 +120,8 @@ pub struct ChatUI {
     message_scroll_offset: StdCell<Option<usize>>, // None = auto-scroll to bottom, Some(n) = n lines scrolled up from bottom
     max_message_scroll: StdCell<usize>,
     keep_scroll_at_top: StdCell<bool>,
+    selected_message_id: Option<String>,
+    replying_to: Option<ReplyTarget>,
     older_history_loading: bool,
     history_loading_frame: StdCell<usize>,
     has_older_history: bool,
@@ -175,6 +177,11 @@ struct Toast {
     timestamp: chrono::DateTime<chrono::Utc>,
 }
 
+struct ReplyTarget {
+    sender: String,
+    content: String,
+}
+
 enum Tab {
     Messages,
     Contacts,
@@ -207,6 +214,8 @@ impl ChatUI {
             message_scroll_offset: StdCell::new(None), // Auto-scroll to bottom by default
             max_message_scroll: StdCell::new(0),
             keep_scroll_at_top: StdCell::new(false),
+            selected_message_id: None,
+            replying_to: None,
             older_history_loading: false,
             history_loading_frame: StdCell::new(0),
             has_older_history: true,
@@ -304,7 +313,12 @@ impl ChatUI {
     }
 
     pub fn set_active_contact(&mut self, contact: &str) {
-        self.contact = Self::get_base_jid(contact);
+        let contact = Self::get_base_jid(contact);
+        if self.contact != contact {
+            self.selected_message_id = None;
+            self.replying_to = None;
+        }
+        self.contact = contact;
         // Keep the sidebar highlight in sync with the active contact.
         if let Some(idx) = self.contacts.iter().position(|c| c == &self.contact) {
             self.current_contact_index = idx;
@@ -614,17 +628,40 @@ impl ChatUI {
         }
 
         match key.code {
-            KeyCode::Esc => return Ok(Some(crate::commands::UiCommand::Quit)),
+            KeyCode::Esc => {
+                if self.selected_message_id.take().is_some() {
+                    return Ok(None);
+                }
+                if self.replying_to.take().is_some() {
+                    return Ok(None);
+                }
+                return Ok(Some(crate::commands::UiCommand::Quit));
+            }
             KeyCode::Enter => {
+                if self.begin_reply_to_selected_message() {
+                    return Ok(None);
+                }
+
                 if !self.input.value().is_empty() {
-                    let message_content = self.input.value().to_string();
+                    let raw_input = self.input.value().to_string();
+                    let (send_plaintext, response_content) =
+                        if let Some(plain_body) = raw_input.strip_prefix("/plain ") {
+                            (true, plain_body)
+                        } else {
+                            (false, raw_input.as_str())
+                        };
+                    let message_content = if let Some(reply) = self.replying_to.take() {
+                        quoted_reply_body(&reply.content, response_content)
+                    } else {
+                        response_content.to_string()
+                    };
                     let recipient_jid = self.contact.clone();
 
                     // Clear input field immediately
                     self.input = Input::default();
 
                     // When creating a new message:
-                    let message = if self.omemo_enabled {
+                    let message = if self.omemo_enabled && !send_plaintext {
                         Message::outgoing_encrypted(
                             Uuid::new_v4().to_string(),
                             recipient_jid.clone(),
@@ -642,10 +679,10 @@ impl ChatUI {
                     self.add_message(message);
 
                     // /plain prefix bypasses OMEMO
-                    if let Some(plain_body) = message_content.strip_prefix("/plain ") {
+                    if send_plaintext {
                         return Ok(Some(crate::commands::UiCommand::SendPlainMessage {
                             to: recipient_jid,
-                            body: plain_body.to_string(),
+                            body: message_content,
                         }));
                     }
 
@@ -656,6 +693,7 @@ impl ChatUI {
                 }
             }
             KeyCode::Tab => {
+                self.selected_message_id = None;
                 self.active_tab = match self.active_tab {
                     Tab::Messages => Tab::Contacts,
                     Tab::Contacts => Tab::Messages,
@@ -757,8 +795,7 @@ impl ChatUI {
                         }
                     }
                 } else if let Tab::Messages = self.active_tab {
-                    self.scroll_messages_up(3);
-                    return Ok(self.request_older_history_if_at_top());
+                    self.select_message_for_reply(-1);
                 }
             }
             KeyCode::Down => {
@@ -779,12 +816,13 @@ impl ChatUI {
                         }
                     }
                 } else if let Tab::Messages = self.active_tab {
-                    self.scroll_messages_down(3);
+                    self.select_message_for_reply(1);
                 }
             }
             KeyCode::PageUp => {
                 // Scroll messages up (Fn+Up on Mac)
                 if let Tab::Messages = self.active_tab {
+                    self.selected_message_id = None;
                     self.scroll_messages_up(10);
                     if let Some(command) = self.request_older_history_if_at_top() {
                         return Ok(Some(command));
@@ -794,15 +832,18 @@ impl ChatUI {
             KeyCode::PageDown => {
                 // Scroll messages down (Fn+Down on Mac)
                 if let Tab::Messages = self.active_tab {
+                    self.selected_message_id = None;
                     self.scroll_messages_down(10);
                 }
             }
             KeyCode::End => {
                 // Jump back to latest messages
+                self.selected_message_id = None;
                 self.message_scroll_offset.set(None);
             }
             _ => {
                 if let Tab::Messages = self.active_tab {
+                    self.selected_message_id = None;
                     // Option+Left/Right for word navigation (macOS style)
                     if key.modifiers.contains(event::KeyModifiers::ALT) {
                         match key.code {
@@ -863,6 +904,78 @@ impl ChatUI {
             }
         }
         Ok(None)
+    }
+
+    fn message_is_in_active_conversation(&self, message: &Message) -> bool {
+        if self.contact.is_empty() {
+            return true;
+        }
+
+        let sender_base = Self::get_base_jid(&message.sender_id);
+        let recipient_base = Self::get_base_jid(&message.recipient_id);
+        sender_base == self.contact
+            || recipient_base == self.contact
+            || (matches!(
+                message.direction,
+                chatterbox::models::Direction::System { .. }
+            ) && (recipient_base == self.contact || recipient_base == "me"))
+    }
+
+    fn selectable_message_ids(&self) -> Vec<&str> {
+        self.messages
+            .iter()
+            .filter(|message| {
+                self.message_is_in_active_conversation(message)
+                    && !matches!(
+                        message.direction,
+                        chatterbox::models::Direction::System { .. }
+                    )
+            })
+            .map(|message| message.id.as_str())
+            .collect()
+    }
+
+    fn select_message_for_reply(&mut self, direction: isize) {
+        let message_ids = self.selectable_message_ids();
+        if message_ids.is_empty() {
+            self.selected_message_id = None;
+            return;
+        }
+
+        let selected_index = self
+            .selected_message_id
+            .as_deref()
+            .and_then(|selected| message_ids.iter().position(|id| *id == selected));
+        let next_index = match selected_index {
+            None => message_ids.len() - 1,
+            Some(index) if direction < 0 => index.saturating_sub(1),
+            Some(index) => (index + 1).min(message_ids.len() - 1),
+        };
+        self.selected_message_id = Some(message_ids[next_index].to_string());
+    }
+
+    fn begin_reply_to_selected_message(&mut self) -> bool {
+        let Some(selected_id) = self.selected_message_id.take() else {
+            return false;
+        };
+        let Some(message) = self
+            .messages
+            .iter()
+            .find(|message| message.id == selected_id)
+        else {
+            return false;
+        };
+
+        let sender = match &message.direction {
+            chatterbox::models::Direction::Outgoing { .. } => "You".to_string(),
+            chatterbox::models::Direction::Incoming { from } => from.to_string(),
+            chatterbox::models::Direction::System { .. } => return false,
+        };
+        self.replying_to = Some(ReplyTarget {
+            sender,
+            content: message.content.clone(),
+        });
+        true
     }
 
     fn scroll_messages_up(&mut self, lines: usize) {
@@ -967,30 +1080,26 @@ impl ChatUI {
         frame.render_widget(contacts_list, chunks[0]);
 
         // Draw messages (filtered to active contact only)
-        let active_contact = &self.contact;
         let filtered_messages: Vec<&Message> = self
             .messages
             .iter()
-            .filter(|m| {
-                if active_contact.is_empty() {
-                    return true; // Show all if no contact selected
-                }
-                let sender_base = Self::get_base_jid(&m.sender_id);
-                let recipient_base = Self::get_base_jid(&m.recipient_id);
-                // Show conversation messages, contact-specific system messages,
-                // and global system messages addressed to "me".
-                sender_base == *active_contact
-                    || recipient_base == *active_contact
-                    || (matches!(m.direction, chatterbox::models::Direction::System { .. })
-                        && (recipient_base == *active_contact || recipient_base == "me"))
-            })
+            .filter(|message| self.message_is_in_active_conversation(message))
             .collect();
         let filtered_owned: Vec<Message> = filtered_messages.into_iter().cloned().collect();
         draw_messages(frame, &filtered_owned, chat_chunks[0], self);
 
         // Draw input box
+        let input_title = if let Some(reply) = &self.replying_to {
+            format!(
+                "Replying to {}: {} (Esc cancels)",
+                reply.sender,
+                single_line_preview(&reply.content, 40)
+            )
+        } else {
+            "Message".to_string()
+        };
         let input_block = Block::default()
-            .title("Message")
+            .title(input_title)
             .borders(Borders::ALL)
             .border_style(match self.active_tab {
                 Tab::Messages => Style::default().fg(Color::Yellow),
@@ -1036,7 +1145,7 @@ impl ChatUI {
             ),
             Span::styled(notification_status_text, notification_status_style),
             Span::styled(
-                "] | Ctrl+T trust | Ctrl+S sidebar | Fn+↑/↓ scroll",
+                "] | ↑/↓ reply | Fn+↑/↓ scroll",
                 Style::default().fg(Color::Gray),
             ),
         ];
@@ -1103,6 +1212,8 @@ impl ChatUI {
 
     pub fn clear_messages(&mut self) {
         self.messages.clear();
+        self.selected_message_id = None;
+        self.replying_to = None;
         self.message_scroll_offset.set(None);
         self.max_message_scroll.set(0);
         self.keep_scroll_at_top.set(false);
@@ -1332,6 +1443,37 @@ fn spans_for_line(text: &str, base_style: Style) -> Line<'static> {
     Line::from(spans)
 }
 
+fn quoted_reply_body(quoted_content: &str, response_content: &str) -> String {
+    let quote = quoted_content
+        .lines()
+        .map(|line| {
+            if line.is_empty() {
+                ">".to_string()
+            } else {
+                format!("> {}", line)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let quote = if quote.is_empty() {
+        ">".to_string()
+    } else {
+        quote
+    };
+    format!("{}\n\n{}", quote, response_content)
+}
+
+fn single_line_preview(content: &str, max_chars: usize) -> String {
+    let flattened = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = flattened.chars();
+    let preview = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{}…", preview)
+    } else {
+        preview
+    }
+}
+
 fn draw_messages(f: &mut Frame, messages: &[Message], area: Rect, ui: &ChatUI) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -1343,83 +1485,102 @@ fn draw_messages(f: &mut Frame, messages: &[Message], area: Rect, ui: &ChatUI) {
 
     let wrap_width = area.width.saturating_sub(2) as usize; // Account for borders
 
-    let message_lines: Vec<Line<'static>> = messages
-        .iter()
-        .flat_map(|m| {
-            let datetime = chrono::DateTime::from_timestamp_millis(m.timestamp.get())
-                .unwrap_or_else(|| chrono::Utc::now());
+    let mut message_lines: Vec<Line<'static>> = Vec::new();
+    let mut selected_line_range = None;
+    for message in messages {
+        let message_start = message_lines.len();
+        let datetime = chrono::DateTime::from_timestamp_millis(message.timestamp.get())
+            .unwrap_or_else(|| chrono::Utc::now());
 
-            let now = chrono::Utc::now();
-            let _is_today = datetime.date_naive() == now.date_naive();
+        let now = chrono::Utc::now();
+        let _is_today = datetime.date_naive() == now.date_naive();
 
-            let timestamp = datetime.format("%Y-%m-%d %H:%M").to_string();
+        let timestamp = datetime.format("%Y-%m-%d %H:%M").to_string();
 
-            // Add encryption indicator based on whether this specific message was encrypted
-            let encryption_indicator = if m.encrypted { " 🔒" } else { " ❌" };
-            let prefix = match &m.direction {
-                chatterbox::models::Direction::Outgoing { .. } =>
-                    format!("[{}] You{}: ", timestamp, encryption_indicator),
-                chatterbox::models::Direction::System { .. } =>
-                    format!("[{}] System: ", timestamp),
-                chatterbox::models::Direction::Incoming { from } =>
-                    format!("[{}] {}{}: ", timestamp, from, encryption_indicator),
-            };
+        // Add encryption indicator based on whether this specific message was encrypted
+        let encryption_indicator = if message.encrypted { " 🔒" } else { " ❌" };
+        let prefix = match &message.direction {
+            chatterbox::models::Direction::Outgoing { .. } => {
+                format!("[{}] You{}: ", timestamp, encryption_indicator)
+            }
+            chatterbox::models::Direction::System { .. } => {
+                format!("[{}] System: ", timestamp)
+            }
+            chatterbox::models::Direction::Incoming { from } => {
+                format!("[{}] {}{}: ", timestamp, from, encryption_indicator)
+            }
+        };
 
-            // Simplified status indicator using ticks clearly
-            let status_indicator = match &m.direction {
-                chatterbox::models::Direction::Outgoing { .. } => {
-                    match m.delivery_status {
-                        DeliveryStatus::Sending => "", // no tick yet
-                        DeliveryStatus::Sent => " ✓",
-                        DeliveryStatus::Delivered => " ✓✓",
-                        DeliveryStatus::Read => " ✓✓✓",
-                        DeliveryStatus::Stored => " 📥",
-                        DeliveryStatus::Failed => " ❌",
-                        DeliveryStatus::Unknown => "",
-                    }
-                }
-                _ => "",
-            };
+        // Simplified status indicator using ticks clearly
+        let status_indicator = match &message.direction {
+            chatterbox::models::Direction::Outgoing { .. } => match message.delivery_status {
+                DeliveryStatus::Sending => "", // no tick yet
+                DeliveryStatus::Sent => " ✓",
+                DeliveryStatus::Delivered => " ✓✓",
+                DeliveryStatus::Read => " ✓✓✓",
+                DeliveryStatus::Stored => " 📥",
+                DeliveryStatus::Failed => " ❌",
+                DeliveryStatus::Unknown => "",
+            },
+            _ => "",
+        };
 
-            let full_content = format!("{}{}{}", prefix, m.content, status_indicator);
+        let selected = ui.selected_message_id.as_deref() == Some(message.id.as_str());
+        let selection_marker = if selected { "▶ " } else { "" };
+        let full_content = format!(
+            "{}{}{}{}",
+            selection_marker, prefix, message.content, status_indicator
+        );
 
-            // Use textwrap to wrap the content. NoHyphenation prevents URLs from
-            // being broken at hyphens, which would defeat terminal URL detection.
-            let wrapped_lines: Vec<String> = wrap(
-                &full_content,
-                Options::new(wrap_width).word_splitter(WordSplitter::NoHyphenation),
-            )
-            .into_iter()
-            .map(|l| l.into_owned())
-            .collect();
-
-            let style = if matches!(m.direction, chatterbox::models::Direction::System { .. }) {
-                Style::default().fg(Color::Gray)
-            } else if matches!(m.direction, chatterbox::models::Direction::Outgoing { .. }) {
-                match m.delivery_status {
-                    DeliveryStatus::Failed => Style::default().fg(Color::Red),
-                    DeliveryStatus::Delivered | DeliveryStatus::Read => {
-                        Style::default().fg(Color::Green)
-                    }
-                    DeliveryStatus::Sent | DeliveryStatus::Sending => {
-                        Style::default().fg(Color::Blue)
-                    }
-                    DeliveryStatus::Stored => Style::default().fg(Color::Yellow),
-                    _ => Style::default(),
-                }
-            } else {
-                Style::default()
-            };
-
-            wrapped_lines.into_iter().map(move |line| {
-                if line.contains("http://") || line.contains("https://") {
-                    spans_for_line(&line, style)
-                } else {
-                    Line::from(line).style(style)
-                }
-            })
-        })
+        // Use textwrap to wrap the content. NoHyphenation prevents URLs from
+        // being broken at hyphens, which would defeat terminal URL detection.
+        let wrapped_lines: Vec<String> = wrap(
+            &full_content,
+            Options::new(wrap_width).word_splitter(WordSplitter::NoHyphenation),
+        )
+        .into_iter()
+        .map(|line| line.into_owned())
         .collect();
+
+        let style = if matches!(
+            message.direction,
+            chatterbox::models::Direction::System { .. }
+        ) {
+            Style::default().fg(Color::Gray)
+        } else if matches!(
+            message.direction,
+            chatterbox::models::Direction::Outgoing { .. }
+        ) {
+            match message.delivery_status {
+                DeliveryStatus::Failed => Style::default().fg(Color::Red),
+                DeliveryStatus::Delivered | DeliveryStatus::Read => {
+                    Style::default().fg(Color::Green)
+                }
+                DeliveryStatus::Sent | DeliveryStatus::Sending => Style::default().fg(Color::Blue),
+                DeliveryStatus::Stored => Style::default().fg(Color::Yellow),
+                _ => Style::default(),
+            }
+        } else {
+            Style::default()
+        };
+        let line_style = if selected {
+            style.bg(Color::DarkGray).add_modifier(Modifier::BOLD)
+        } else {
+            style
+        };
+
+        message_lines.extend(wrapped_lines.into_iter().map(|line| {
+            if line.contains("http://") || line.contains("https://") {
+                spans_for_line(&line, line_style)
+            } else {
+                Line::from(line).style(line_style)
+            }
+        }));
+
+        if selected {
+            selected_line_range = Some((message_start, message_lines.len()));
+        }
+    }
 
     // Add connection status icon to the title
     let connection_icon = if ui.is_connected() { "🔌 " } else { "❌ " };
@@ -1428,7 +1589,15 @@ fn draw_messages(f: &mut Frame, messages: &[Message], area: Rect, ui: &ChatUI) {
     } else {
         ""
     };
-    let title = format!("{}Messages{}", connection_icon, scroll_indicator);
+    let selection_indicator = if ui.selected_message_id.is_some() {
+        " [↑/↓ select, Enter reply, Esc cancel]"
+    } else {
+        ""
+    };
+    let title = format!(
+        "{}Messages{}{}",
+        connection_icon, scroll_indicator, selection_indicator
+    );
     let loading_indicator = if ui.older_history_loading {
         const BAR: [&str; 8] = [
             "[>       ]",
@@ -1458,7 +1627,18 @@ fn draw_messages(f: &mut Frame, messages: &[Message], area: Rect, ui: &ChatUI) {
     } else {
         ui.message_scroll_offset.get().unwrap_or(0).min(max_scroll)
     };
-    let scroll_from_top = max_scroll.saturating_sub(scroll_from_bottom);
+    let mut scroll_from_top = max_scroll.saturating_sub(scroll_from_bottom);
+    if let Some((selected_start, selected_end)) = selected_line_range {
+        if selected_start < scroll_from_top {
+            scroll_from_top = selected_start;
+        } else if selected_end > scroll_from_top + viewport_height {
+            scroll_from_top = selected_end.saturating_sub(viewport_height);
+        }
+
+        let adjusted_from_bottom = max_scroll.saturating_sub(scroll_from_top);
+        ui.message_scroll_offset
+            .set((adjusted_from_bottom > 0).then_some(adjusted_from_bottom));
+    }
 
     let messages_widget = Paragraph::new(Text::from(message_lines))
         .block(Block::default().borders(Borders::ALL).title(title))
@@ -1685,7 +1865,7 @@ fn draw_contact_remove_dialog(f: &mut Frame, dialog: &ContactRemoveDialog, area:
 fn draw_help_dialog(f: &mut Frame, area: Rect) {
     // Calculate popup size and position (centered)
     let popup_width = 80.min(area.width - 4);
-    let popup_height = 28.min(area.height - 4);
+    let popup_height = 30.min(area.height - 4);
 
     let popup_x = (area.width - popup_width) / 2;
     let popup_y = (area.height - popup_height) / 2;
@@ -1710,7 +1890,7 @@ fn draw_help_dialog(f: &mut Frame, area: Rect) {
     // Create the shortcuts list
     let shortcuts = vec![
         ("General", ""),
-        ("ESC", "Quit application"),
+        ("ESC", "Cancel selection/reply, otherwise quit"),
         ("Tab", "Switch between Messages and Contacts"),
         ("Ctrl+S", "Toggle sidebar (contacts panel) visibility"),
         ("Ctrl+H", "Show this help dialog"),
@@ -1726,7 +1906,9 @@ fn draw_help_dialog(f: &mut Frame, area: Rect) {
         ("Ctrl+D", "Delete/remove current contact"),
         ("", ""),
         ("Messages", ""),
-        ("Enter", "Send message (when Messages tab is active)"),
+        ("Enter", "Choose selected reply or send composed message"),
+        ("↑/↓", "Select a message to quote in a reply"),
+        ("Fn+↑/↓", "Scroll message history"),
         ("", ""),
         ("Security", ""),
         ("Ctrl+O", "Toggle OMEMO encryption for current conversation"),
@@ -2111,5 +2293,133 @@ fn focus_state_from_event(event: &Event) -> Option<bool> {
         Event::FocusGained => Some(true),
         Event::FocusLost => Some(false),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyEvent, KeyModifiers};
+    use ratatui::backend::TestBackend;
+
+    fn key(code: KeyCode, modifiers: KeyModifiers) -> Event {
+        Event::Key(KeyEvent::new(code, modifiers))
+    }
+
+    fn chat_ui_with_messages() -> ChatUI {
+        let mut ui = ChatUI::new();
+        ui.set_active_contact("friend@example.com");
+        ui.add_message(Message::incoming_encrypted(
+            "first",
+            "friend@example.com",
+            "first message",
+        ));
+        ui.add_message(Message::outgoing_encrypted(
+            "second",
+            "friend@example.com",
+            "second message",
+        ));
+        ui
+    }
+
+    #[test]
+    fn page_up_still_scrolls_messages() {
+        let mut ui = chat_ui_with_messages();
+        ui.max_message_scroll.set(20);
+
+        let command = ui
+            .handle_terminal_event(key(KeyCode::PageUp, KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(command.is_none());
+        assert_eq!(ui.message_scroll_offset.get(), Some(10));
+        assert!(ui.selected_message_id.is_none());
+    }
+
+    #[test]
+    fn arrows_select_messages_for_reply() {
+        let mut ui = chat_ui_with_messages();
+
+        ui.handle_terminal_event(key(KeyCode::Up, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(ui.selected_message_id.as_deref(), Some("second"));
+
+        ui.handle_terminal_event(key(KeyCode::Up, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(ui.selected_message_id.as_deref(), Some("first"));
+
+        ui.handle_terminal_event(key(KeyCode::Down, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(ui.selected_message_id.as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn selected_message_has_a_visible_marker() {
+        let mut ui = chat_ui_with_messages();
+        ui.handle_terminal_event(key(KeyCode::Up, KeyModifiers::NONE))
+            .unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+
+        terminal.draw(|frame| ui.draw(frame)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let rendered = buffer
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("▶ "));
+    }
+
+    #[test]
+    fn selected_message_is_quoted_when_reply_is_sent() {
+        let mut ui = chat_ui_with_messages();
+        ui.handle_terminal_event(key(KeyCode::Up, KeyModifiers::NONE))
+            .unwrap();
+        ui.handle_terminal_event(key(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        ui.input = Input::new("my response".to_string());
+
+        let command = ui
+            .handle_terminal_event(key(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+
+        match command {
+            Some(crate::commands::UiCommand::SendMessage { to, body }) => {
+                assert_eq!(to, "friend@example.com");
+                assert_eq!(body, "> second message\n\nmy response");
+            }
+            other => panic!("unexpected command: {:?}", other),
+        }
+        assert!(ui.replying_to.is_none());
+        assert!(ui.input.value().is_empty());
+    }
+
+    #[test]
+    fn quoted_reply_preserves_multiline_quote_formatting() {
+        assert_eq!(
+            quoted_reply_body("line one\n\nline three", "reply"),
+            "> line one\n>\n> line three\n\nreply"
+        );
+    }
+
+    #[test]
+    fn escape_cancels_reply_before_quitting() {
+        let mut ui = chat_ui_with_messages();
+        ui.handle_terminal_event(key(KeyCode::Up, KeyModifiers::NONE))
+            .unwrap();
+        ui.handle_terminal_event(key(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+
+        let cancel = ui
+            .handle_terminal_event(key(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert!(cancel.is_none());
+        assert!(ui.replying_to.is_none());
+
+        let quit = ui
+            .handle_terminal_event(key(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert!(matches!(quit, Some(crate::commands::UiCommand::Quit)));
     }
 }
