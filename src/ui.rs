@@ -453,6 +453,12 @@ impl ChatUI {
             return Ok(None);
         }
 
+        // Ctrl+C should always cleanly terminate the app, just like Esc, regardless
+        // of any dialog or popup that might currently be open.
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(event::KeyModifiers::CONTROL) {
+            return Ok(Some(crate::commands::UiCommand::Quit));
+        }
+
         // Handle key confirmation popup if active
         if self.key_confirmation.is_some() {
             match key.code {
@@ -2419,6 +2425,28 @@ mod tests {
 
         let quit = ui
             .handle_terminal_event(key(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert!(matches!(quit, Some(crate::commands::UiCommand::Quit)));
+    }
+
+    #[test]
+    fn ctrl_c_quits_immediately() {
+        let mut ui = chat_ui_with_messages();
+
+        let quit = ui
+            .handle_terminal_event(key(KeyCode::Char('c'), KeyModifiers::CONTROL))
+            .unwrap();
+        assert!(matches!(quit, Some(crate::commands::UiCommand::Quit)));
+    }
+
+    #[test]
+    fn ctrl_c_quits_even_with_dialog_open() {
+        let mut ui = chat_ui_with_messages();
+        ui.show_help_dialog();
+        assert!(ui.help_dialog.is_some());
+
+        let quit = ui
+            .handle_terminal_event(key(KeyCode::Char('c'), KeyModifiers::CONTROL))
             .unwrap();
         assert!(matches!(quit, Some(crate::commands::UiCommand::Quit)));
     }
