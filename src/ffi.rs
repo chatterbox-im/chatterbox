@@ -120,6 +120,15 @@ static LOG_BUFFER: Lazy<StdMutex<VecDeque<String>>> =
 static LOG_FILE: Lazy<StdMutex<Option<std::fs::File>>> =
     Lazy::new(|| StdMutex::new(None));
 
+fn push_log_buffer(line: String) {
+    if let Ok(mut buf) = LOG_BUFFER.lock() {
+        if buf.len() == LOG_BUFFER_CAP {
+            buf.pop_front();
+        }
+        buf.push_back(line);
+    }
+}
+
 /// Open (and truncate) the persistent log file at `path`.  Call this once at
 /// app startup, before `connect()`.  All subsequent log lines will be written
 /// to that file AND to the in-memory buffer.  Any lines already in the buffer
@@ -154,7 +163,12 @@ pub fn set_log_file(path: String) {
             }
         }
         Err(e) => {
-            eprintln!("ChatterboxLogger: failed to open log file '{}': {}", path, e);
+            push_log_buffer(format!(
+                "{} [ERROR] chatterbox::ffi — Failed to open log file '{}': {}",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
+                path,
+                e
+            ));
         }
     }
 }
@@ -172,14 +186,7 @@ impl log::Log for ChatterboxLogger {
     }
 
     fn log(&self, record: &log::Record) {
-        static LOG_CALL_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        if LOG_CALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 20 {
-            eprintln!("LOGGER_DEBUG: log called level={} target={} msg={}",
-                      record.level(), record.target(), record.args());
-        }
-
         if !self.enabled(record.metadata()) {
-            eprintln!("LOGGER_DEBUG: NOT enabled, returning early");
             return;
         }
         // Forward to env_logger so Xcode console output is unchanged.
@@ -194,32 +201,29 @@ impl log::Log for ChatterboxLogger {
         );
 
         // Append to in-memory ring buffer.
-        if let Ok(mut buf) = LOG_BUFFER.try_lock() {
-            if buf.len() == LOG_BUFFER_CAP {
-                buf.pop_front();
-            }
-            buf.push_back(line.clone());
-        }
+        push_log_buffer(line.clone());
 
         // Append to the persistent log file.  try_lock avoids stalling when
         // the logger is called from within set_log_file() itself.
-        match LOG_FILE.try_lock() {
+        let file_error = match LOG_FILE.try_lock() {
             Ok(mut guard) => {
                 if let Some(ref mut file) = *guard {
                     use std::io::Write;
-                    if let Err(e) = writeln!(file, "{}", line) {
-                        eprintln!("LOGGER_DEBUG: file write error: {}", e);
-                    }
-                    if let Err(e) = file.flush() {
-                        eprintln!("LOGGER_DEBUG: file flush error: {}", e);
-                    }
+                    writeln!(file, "{}", line)
+                        .and_then(|_| file.flush())
+                        .err()
                 } else {
-                    eprintln!("LOGGER_DEBUG: LOG_FILE is None");
+                    None
                 }
             }
-            Err(e) => {
-                eprintln!("LOGGER_DEBUG: LOG_FILE try_lock failed: {:?}", e);
-            }
+            Err(_) => None,
+        };
+        if let Some(error) = file_error {
+            push_log_buffer(format!(
+                "{} [ERROR] chatterbox::ffi — Failed to write log file: {}",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
+                error
+            ));
         }
     }
 
@@ -292,8 +296,6 @@ impl ChatterboxClient {
             )
             .build();
             let max_level = inner.filter();
-            eprintln!("FFI_DEBUG: Logger initialized max_level={:?} RUST_LOG={:?}",
-                      max_level, std::env::var("RUST_LOG"));
             let logger = ChatterboxLogger { inner };
             // session header so exported logs are easy to orientate
             if let Ok(mut buf) = LOG_BUFFER.try_lock() {
@@ -473,28 +475,18 @@ impl ChatterboxClient {
     /// Send an OMEMO-encrypted (or plaintext-fallback) message to `to_jid`.
     /// Returns the stored `FfiMessage` so the caller can display it immediately.
     pub async fn send_message(&self, to_jid: String, body: String) -> Result<FfiMessage, FfiError> {
-        eprintln!("FFI_DEBUG: send_message called to_jid={}", to_jid);
         let inner = Arc::clone(&self.inner);
         RUNTIME.spawn(async move {
-            eprintln!("FFI_DEBUG: send_message task started to_jid={}", to_jid);
-
             // Extract shared references — inner MUST NOT be held across OMEMO
             // encrypt because other FFI calls (get_fingerprints etc.) would
             // block for the entire send duration (up to 15-45 s).
             let (xmpp, store) = {
                 let mut guard = inner.lock().await;
-                eprintln!("FFI_DEBUG: send_message inner locked");
-                let state = guard.as_mut().ok_or_else(|| {
-                    eprintln!("FFI_DEBUG: inner state is NONE!");
-                    FfiError::NotConnected
-                })?;
+                let state = guard.as_mut().ok_or(FfiError::NotConnected)?;
                 (Arc::clone(&state.xmpp), state.store.clone())
             }; // inner lock released here
 
-            eprintln!("FFI_DEBUG: send_message got xmpp Arc");
-
             let msg_id = Uuid::new_v4().to_string();
-            eprintln!("FFI_DEBUG: send_message msg_id={}", msg_id);
             // Milliseconds, matching every other producer of `Message` and the
             // `timestamp * 1000` migration in `storage.rs`.  Writing seconds
             // here put mixed units in one table: freshly sent messages rendered
@@ -506,14 +498,9 @@ impl ChatterboxClient {
                     .as_millis() as i64
             );
 
-            eprintln!("FFI_DEBUG: send_message calling send_message_with_id (no lock held)");
             xmpp.send_message_with_id(&to_jid, &body, &msg_id)
                 .await
-                .map_err(|e| {
-                    eprintln!("FFI_DEBUG: send_message_with_id error: {}", e);
-                    FfiError::Send { reason: e.to_string() }
-                })?;
-            eprintln!("FFI_DEBUG: send_message_with_id returned ok");
+                .map_err(|e| FfiError::Send { reason: e.to_string() })?;
 
             let record = Message {
                 id: msg_id,
@@ -564,30 +551,18 @@ impl ChatterboxClient {
 
     /// Fetch the roster (contact list) from the server.
     pub async fn get_contacts(&self) -> Result<Vec<FfiContact>, FfiError> {
-        eprintln!("FFI_DEBUG: get_contacts called");
         let inner = Arc::clone(&self.inner);
         RUNTIME.spawn(async move {
-            eprintln!("FFI_DEBUG: get_contacts task started");
             let xmpp = {
                 let guard = inner.lock().await;
-                eprintln!("FFI_DEBUG: get_contacts inner locked");
-                let state = guard.as_ref().ok_or_else(|| {
-                    eprintln!("FFI_DEBUG: get_contacts inner state NONE!");
-                    FfiError::NotConnected
-                })?;
+                let state = guard.as_ref().ok_or(FfiError::NotConnected)?;
                 Arc::clone(&state.xmpp)
             };
-            eprintln!("FFI_DEBUG: get_contacts got xmpp Arc");
-            eprintln!("FFI_DEBUG: get_contacts calling get_roster (no lock held)");
             let jids = xmpp
                 .get_roster()
                 .await
-                .map_err(|e| {
-                    eprintln!("FFI_DEBUG: get_roster error: {}", e);
-                    FfiError::Roster { reason: e.to_string() }
-                })?
+                .map_err(|e| FfiError::Roster { reason: e.to_string() })?
                 .unwrap_or_default();
-            eprintln!("FFI_DEBUG: get_roster returned {} contacts: {:?}", jids.len(), jids);
             Ok(jids
                 .into_iter()
                 .map(|jid| FfiContact {
