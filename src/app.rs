@@ -1517,13 +1517,8 @@ async fn handle_refetch_omemo(chat_ui: &mut ChatUI, xmpp_client: &mut XMPPClient
         jid
     );
 
-    if let Some(omemo_manager) = xmpp_client.get_omemo_manager() {
-        match omemo_manager
-            .lock()
-            .await
-            .get_device_ids_for_test(jid)
-            .await
-        {
+    if xmpp_client.is_omemo_enabled().await {
+        match xmpp_client.force_refresh_device_list_for_user(jid).await {
             Ok(device_ids) if !device_ids.is_empty() => {
                 chat_ui.add_message(create_system_message(
                     jid,
@@ -1535,7 +1530,10 @@ async fn handle_refetch_omemo(chat_ui: &mut ChatUI, xmpp_client: &mut XMPPClient
                 ));
                 info!("DEBUG: OMEMO device IDs for {}: {:?}", jid, device_ids);
                 for device_id in device_ids {
-                    match xmpp_client.get_device_fingerprint(jid, device_id).await {
+                    match xmpp_client
+                        .get_device_fingerprint_for_verification(jid, device_id)
+                        .await
+                    {
                         Ok(fingerprint) => {
                             chat_ui.add_message(create_system_message(
                                 jid,
@@ -1556,6 +1554,16 @@ async fn handle_refetch_omemo(chat_ui: &mut ChatUI, xmpp_client: &mut XMPPClient
                             );
                         }
                     }
+                }
+                if let Err(e) = xmpp_client.check_omemo_keys_for_contact(jid).await {
+                    error!(
+                        "Failed to request OMEMO key verification for {}: {}",
+                        jid, e
+                    );
+                    chat_ui.add_message(create_system_message(
+                        jid,
+                        &format!("Failed to request OMEMO key verification: {}", e),
+                    ));
                 }
             }
             Ok(_) => {

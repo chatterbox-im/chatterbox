@@ -446,7 +446,7 @@ impl XMPPClient {
             return Err(anyhow!("Failed to process key verification: {}", e));
         }
 
-        Ok(())
+        self.check_omemo_keys_for_contact(contact).await
     }
 
     /// Check OMEMO keys for a contact and request verification if needed.
@@ -535,6 +535,20 @@ impl XMPPClient {
         }
     }
 
+    /// Fetch a user's device list from the server, bypassing cached IDs.
+    pub async fn force_refresh_device_list_for_user(&self, jid: &str) -> Result<Vec<DeviceId>> {
+        let omemo_manager = self
+            .omemo_manager
+            .as_ref()
+            .ok_or_else(|| anyhow!("OMEMO manager not initialized"))?;
+        let bare_jid = BareJid::parse(jid)?;
+        let manager = omemo_manager.lock().await;
+        manager
+            .force_refresh_device_list(&bare_jid)
+            .await
+            .map_err(|e| anyhow!("Failed to refresh device list: {}", e))
+    }
+
     /// Get fingerprint for a device
     pub async fn get_device_fingerprint(&self, jid: &str, device_id: DeviceId) -> Result<String> {
         if let Some(omemo_manager) = &self.omemo_manager {
@@ -545,6 +559,30 @@ impl XMPPClient {
             }
         } else {
             Err(anyhow!("OMEMO manager not initialized"))
+        }
+    }
+
+    /// Get a fingerprint and queue undecided keys for interactive verification.
+    pub async fn get_device_fingerprint_for_verification(
+        &self,
+        jid: &str,
+        device_id: DeviceId,
+    ) -> Result<String> {
+        let omemo_manager = self
+            .omemo_manager
+            .as_ref()
+            .ok_or_else(|| anyhow!("OMEMO manager not initialized"))?;
+        let manager = omemo_manager.lock().await;
+        let jid = BareJid::parse(jid)?;
+        let level = manager
+            .get_device_trust_level(jid.as_str(), device_id)
+            .await?;
+        if level == crate::omemo::storage::TrustLevel::Undecided {
+            queue_undecided_key(&manager, &jid, device_id).await
+        } else {
+            Ok(manager
+                .get_device_fingerprint(jid.as_str(), device_id)
+                .await?)
         }
     }
 
@@ -673,7 +711,26 @@ impl XMPPClient {
     }
 }
 
-/// Find the first unverified device for `contact` and prompt the user via the UI.
+async fn queue_undecided_key(
+    manager: &crate::omemo::OmemoManager,
+    jid: &BareJid,
+    device_id: DeviceId,
+) -> Result<String> {
+    let fingerprint = manager
+        .get_device_fingerprint(jid.as_str(), device_id)
+        .await?;
+    if device_id == manager.get_device_id() && *jid == BareJid::parse(&manager.local_jid)? {
+        return Ok(fingerprint);
+    }
+    let storage = manager.get_storage();
+    storage
+        .lock()
+        .await
+        .store_pending_device_verification(jid, device_id, &fingerprint)?;
+    Ok(fingerprint)
+}
+
+/// Queue undecided keys for `contact` and show the first pending verification.
 /// Single source of truth used by both the XMPP handler and the coordinator.
 pub(crate) async fn prompt_first_untrusted_key(
     omemo_manager: &mut crate::omemo::OmemoManager,
@@ -684,10 +741,8 @@ pub(crate) async fn prompt_first_untrusted_key(
         return Ok(());
     }
 
-    let storage = crate::omemo::storage::OmemoStorage::new_default()?;
-    if let Ok(Some(_)) = storage.get_pending_device_verification(&BareJid::parse(contact).expect("expected valid JID")) {
-        return Ok(());
-    }
+    let jid = BareJid::parse(contact)?;
+    let storage = omemo_manager.get_storage();
 
     let device_ids = match tokio::time::timeout(
         Duration::from_secs(10),
@@ -709,80 +764,404 @@ pub(crate) async fn prompt_first_untrusted_key(
     info!("Found {} OMEMO devices for {}", device_ids.len(), contact);
 
     for device_id in device_ids {
-        let trusted = match tokio::time::timeout(
+        let level = match tokio::time::timeout(
             Duration::from_secs(8),
-            omemo_manager.is_device_identity_trusted(contact, device_id),
+            omemo_manager.get_device_trust_level(contact, device_id),
         )
         .await
         {
-            Ok(Ok(t)) => t,
+            Ok(Ok(level)) => level,
             Ok(Err(e)) => {
                 warn!("Failed to check trust for {}:{}: {}", contact, device_id, e);
-                false
+                continue;
             }
             Err(_) => {
                 warn!(
-                    "Timeout checking trust for {}:{}, assuming not trusted",
+                    "Timeout checking trust for {}:{}, skipping",
                     contact, device_id
                 );
-                false
+                continue;
             }
         };
 
-        if !trusted {
-            let fingerprint = match tokio::time::timeout(
-                Duration::from_secs(8),
-                omemo_manager.get_device_fingerprint(contact, device_id),
-            )
-            .await
-            {
-                Ok(Ok(fp)) => fp,
-                Ok(Err(e)) => {
-                    warn!(
-                        "Failed to get fingerprint for {}:{}: {}",
-                        contact, device_id, e
-                    );
-                    continue;
-                }
-                Err(_) => {
-                    warn!(
-                        "Timeout getting fingerprint for {}:{}, skipping",
-                        contact, device_id
-                    );
-                    continue;
-                }
-            };
+        if level != crate::omemo::storage::TrustLevel::Undecided {
+            continue;
+        }
 
-            if storage.is_device_trusted(&BareJid::parse(contact).expect("expected valid JID"), device_id)? {
-                let _ = tokio::time::timeout(
-                    Duration::from_secs(5),
-                    omemo_manager.trust_device_identity(contact, device_id),
-                )
-                .await;
-                continue;
+        match tokio::time::timeout(
+            Duration::from_secs(8),
+            queue_undecided_key(omemo_manager, &jid, device_id),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
+                warn!(
+                    "Failed to queue key verification for {}:{}: {}",
+                    contact, device_id, e
+                );
             }
-
-            // Skip devices the user has already explicitly rejected — don't re-prompt.
-            if storage.get_trust_level(&BareJid::parse(contact).expect("expected valid JID"), device_id)?
-                == crate::omemo::storage::TrustLevel::Untrusted
-            {
-                continue;
+            Err(_) => {
+                warn!(
+                    "Timeout queuing key verification for {}:{}, skipping",
+                    contact, device_id
+                );
             }
+        }
+    }
 
-            let _ = storage.store_pending_device_verification(&BareJid::parse(contact).expect("expected valid JID"), device_id, &fingerprint);
-            info!("Requesting verification for untrusted device {}:{} with fingerprint {}", contact, device_id, fingerprint);
-
-            let event = crate::models::AppEvent::KeyVerifyRequest {
-                sender: contact.to_string(),
-                fingerprint,
-                device_id: Some(device_id.get()),
-            };
-            if let Err(e) = msg_tx.send(event).await {
-                error!("Failed to send key verification request to UI: {}", e);
-            }
-            break;
+    let pending = storage.lock().await.get_pending_device_verification(&jid)?;
+    if let Some((device_id, fingerprint)) = pending {
+        info!(
+            "Requesting verification for {}:{} with fingerprint {}",
+            jid, device_id, fingerprint
+        );
+        let event = crate::models::AppEvent::KeyVerifyRequest {
+            sender: jid.to_string(),
+            fingerprint,
+            device_id: Some(device_id.get()),
+        };
+        if let Err(e) = msg_tx.send(event).await {
+            error!("Failed to send key verification request to UI: {}", e);
+            return Err(anyhow!(
+                "Failed to send key verification request to UI: {}",
+                e
+            ));
         }
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::AppEvent;
+    use crate::omemo::storage::{DeviceListEntry, OmemoStorage, TrustLevel};
+    use crate::omemo::test_support::RecordingPubSub;
+    use crate::omemo::OmemoManager;
+    use tempfile::TempDir;
+    use tokio::sync::mpsc;
+
+    async fn client_with_omemo(
+        jid: &str,
+        device_id: u32,
+        pubsub: Arc<RecordingPubSub>,
+    ) -> (XMPPClient, mpsc::Receiver<AppEvent>, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let mut storage = OmemoStorage::new(Some(dir.path().to_path_buf())).unwrap();
+        storage.store_device_id(DeviceId::from(device_id)).unwrap();
+        let manager = OmemoManager::new(storage, jid.to_string(), None, pubsub)
+            .await
+            .unwrap();
+        let (mut client, rx) = XMPPClient::new();
+        client.jid = jid.to_string();
+        client.omemo_manager = Some(Arc::new(TokioMutex::new(manager)));
+        (client, rx, dir)
+    }
+
+    async fn publish_peer_bundle(pubsub: &RecordingPubSub, peer: &XMPPClient) -> String {
+        let manager = peer.get_omemo_manager().unwrap();
+        let manager = manager.lock().await;
+        let bundle = manager.key_bundle.as_ref().unwrap();
+        pubsub
+            .add_bundle(&peer.jid, manager.device_id.get(), bundle)
+            .await;
+        manager.generate_standard_fingerprint(bundle.identity_key_pair.public_key.as_ref())
+    }
+
+    fn assert_key_request(
+        rx: &mut mpsc::Receiver<AppEvent>,
+        jid: &str,
+        device_id: u32,
+        fingerprint: &str,
+    ) {
+        match rx.try_recv().expect("expected a key verification popup") {
+            AppEvent::KeyVerifyRequest {
+                sender,
+                device_id: requested_device_id,
+                fingerprint: requested_fingerprint,
+            } => {
+                assert_eq!(sender, jid);
+                assert_eq!(requested_device_id, Some(device_id));
+                assert_eq!(requested_fingerprint, fingerprint);
+            }
+            event => panic!("expected key verification, got {:?}", event),
+        }
+    }
+
+    #[tokio::test]
+    async fn forced_device_refresh_bypasses_cache_and_allows_fingerprint_lookup() {
+        let pubsub = RecordingPubSub::new();
+        let (client, _rx, _dir) = client_with_omemo("alice@example.com", 1, pubsub.clone()).await;
+        let (peer, _peer_rx, _peer_dir) =
+            client_with_omemo("bob@example.com", 2, pubsub.clone()).await;
+        let device_id = DeviceId::from(2u32);
+        let expected_fingerprint = publish_peer_bundle(&pubsub, &peer).await;
+        pubsub
+            .add_device_list("bob@example.com", &[device_id.get()])
+            .await;
+
+        let manager = client.get_omemo_manager().unwrap();
+        let storage = manager.lock().await.get_storage();
+        storage
+            .lock()
+            .await
+            .save_device_list(&DeviceListEntry {
+                jid: "bob@example.com".to_string(),
+                device_ids: vec![DeviceId::from(0u32)],
+                last_update: 0,
+            })
+            .unwrap();
+
+        let device_ids = tokio::time::timeout(Duration::from_secs(2), async {
+            match client
+                .force_refresh_device_list_for_user("Bob@Example.com/desktop")
+                .await
+            {
+                Ok(ids) => {
+                    let fingerprint = client
+                        .get_device_fingerprint("bob@example.com", device_id)
+                        .await
+                        .unwrap();
+                    assert_eq!(fingerprint, expected_fingerprint);
+                    ids
+                }
+                Err(e) => panic!("device refresh failed: {}", e),
+            }
+        })
+        .await
+        .expect("fingerprint lookup must not deadlock after a device refresh");
+
+        assert_eq!(device_ids, vec![device_id]);
+        assert_eq!(
+            storage
+                .lock()
+                .await
+                .load_device_list(&BareJid::parse("bob@example.com").unwrap())
+                .unwrap()
+                .device_ids,
+            device_ids
+        );
+    }
+
+    #[tokio::test]
+    async fn forced_device_refresh_clears_stale_cached_devices() {
+        let pubsub = RecordingPubSub::new();
+        let (client, _rx, _dir) = client_with_omemo("alice@example.com", 1, pubsub.clone()).await;
+        let jid = BareJid::parse("bob@example.com").unwrap();
+        let manager = client.get_omemo_manager().unwrap();
+        let storage = manager.lock().await.get_storage();
+        storage
+            .lock()
+            .await
+            .save_device_list(&DeviceListEntry {
+                jid: jid.to_string(),
+                device_ids: vec![DeviceId::from(42u32)],
+                last_update: 0,
+            })
+            .unwrap();
+        pubsub.add_device_list(jid.as_str(), &[]).await;
+
+        let device_ids = client
+            .force_refresh_device_list_for_user(jid.as_str())
+            .await
+            .unwrap();
+
+        assert!(device_ids.is_empty());
+        assert!(storage
+            .lock()
+            .await
+            .load_device_list(&jid)
+            .unwrap()
+            .device_ids
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn refreshed_keys_prompt_once_and_preserve_decisions() {
+        for decision in [TrustLevel::Trusted, TrustLevel::Untrusted] {
+            let pubsub = RecordingPubSub::new();
+            let (client, mut rx, _dir) =
+                client_with_omemo("alice@example.com", 1, pubsub.clone()).await;
+            let (peer, _peer_rx, _peer_dir) =
+                client_with_omemo("bob@example.com", 2, pubsub.clone()).await;
+            let fingerprint = publish_peer_bundle(&pubsub, &peer).await;
+            let jid = BareJid::parse("bob@example.com").unwrap();
+            let manager = client.get_omemo_manager().unwrap();
+            let storage = manager.lock().await.get_storage();
+            storage
+                .lock()
+                .await
+                .set_trust_level(&jid, DeviceId::from(3u32), TrustLevel::Verified)
+                .unwrap();
+            storage
+                .lock()
+                .await
+                .set_trust_level(&jid, DeviceId::from(4u32), TrustLevel::Untrusted)
+                .unwrap();
+            pubsub.add_device_list(jid.as_str(), &[3, 4]).await;
+            client
+                .check_omemo_keys_for_contact(jid.as_str())
+                .await
+                .unwrap();
+            assert!(rx.try_recv().is_err());
+
+            pubsub.add_device_list(jid.as_str(), &[2, 3, 4]).await;
+            client
+                .force_refresh_device_list_for_user(jid.as_str())
+                .await
+                .unwrap();
+            assert_eq!(
+                client
+                    .get_device_fingerprint_for_verification(jid.as_str(), DeviceId::from(2u32))
+                    .await
+                    .unwrap(),
+                fingerprint
+            );
+            client
+                .check_omemo_keys_for_contact(jid.as_str())
+                .await
+                .unwrap();
+
+            assert_key_request(&mut rx, jid.as_str(), 2, &fingerprint);
+            assert!(rx.try_recv().is_err());
+            client
+                .handle_key_verification_response(jid.as_str(), decision)
+                .await
+                .unwrap();
+            assert!(matches!(rx.try_recv().unwrap(), AppEvent::Chat(_)));
+            assert!(rx.try_recv().is_err());
+
+            client
+                .force_refresh_device_list_for_user(jid.as_str())
+                .await
+                .unwrap();
+            client
+                .get_device_fingerprint_for_verification(jid.as_str(), DeviceId::from(2u32))
+                .await
+                .unwrap();
+            client
+                .check_omemo_keys_for_contact(jid.as_str())
+                .await
+                .unwrap();
+            assert!(rx.try_recv().is_err());
+            let storage = storage.lock().await;
+            assert_eq!(
+                storage.get_trust_level(&jid, DeviceId::from(2u32)).unwrap(),
+                decision
+            );
+            assert_eq!(
+                storage.get_trust_level(&jid, DeviceId::from(3u32)).unwrap(),
+                TrustLevel::Verified
+            );
+            assert_eq!(
+                storage.get_trust_level(&jid, DeviceId::from(4u32)).unwrap(),
+                TrustLevel::Untrusted
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn key_verifications_advance_through_pending_devices() {
+        let pubsub = RecordingPubSub::new();
+        let (client, mut rx, _dir) =
+            client_with_omemo("alice@example.com", 1, pubsub.clone()).await;
+        let (peer, _peer_rx, _peer_dir) =
+            client_with_omemo("bob@example.com", 2, pubsub.clone()).await;
+        let (other_peer, _other_rx, _other_dir) =
+            client_with_omemo("bob@example.com", 3, pubsub.clone()).await;
+        let fingerprint = publish_peer_bundle(&pubsub, &peer).await;
+        let other_fingerprint = publish_peer_bundle(&pubsub, &other_peer).await;
+        pubsub.add_device_list("bob@example.com", &[3, 2]).await;
+
+        for id in [3u32, 2] {
+            client
+                .get_device_fingerprint_for_verification("bob@example.com", DeviceId::from(id))
+                .await
+                .unwrap();
+        }
+        client
+            .check_omemo_keys_for_contact("bob@example.com")
+            .await
+            .unwrap();
+        assert_key_request(&mut rx, "bob@example.com", 2, &fingerprint);
+        assert!(rx.try_recv().is_err());
+
+        client
+            .handle_key_verification_response("bob@example.com", TrustLevel::Trusted)
+            .await
+            .unwrap();
+        assert!(matches!(rx.try_recv().unwrap(), AppEvent::Chat(_)));
+        assert_key_request(&mut rx, "bob@example.com", 3, &other_fingerprint);
+        assert!(rx.try_recv().is_err());
+
+        client
+            .handle_key_verification_response("bob@example.com", TrustLevel::Untrusted)
+            .await
+            .unwrap();
+        assert!(matches!(rx.try_recv().unwrap(), AppEvent::Chat(_)));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn saved_key_change_requests_are_shown_even_when_untrusted() {
+        let pubsub = RecordingPubSub::new();
+        let (client, mut rx, _dir) =
+            client_with_omemo("alice@example.com", 1, pubsub.clone()).await;
+        let jid = BareJid::parse("bob@example.com").unwrap();
+        let manager = client.get_omemo_manager().unwrap();
+        let storage = manager.lock().await.get_storage();
+        storage
+            .lock()
+            .await
+            .set_trust_level(&jid, DeviceId::from(2u32), TrustLevel::Untrusted)
+            .unwrap();
+        storage
+            .lock()
+            .await
+            .store_pending_device_verification(&jid, DeviceId::from(2u32), "changed fingerprint")
+            .unwrap();
+        pubsub.add_device_list(jid.as_str(), &[2]).await;
+
+        client
+            .check_omemo_keys_for_contact(jid.as_str())
+            .await
+            .unwrap();
+
+        assert_key_request(&mut rx, jid.as_str(), 2, "changed fingerprint");
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn other_own_devices_require_verification_but_this_device_does_not() {
+        let pubsub = RecordingPubSub::new();
+        let (client, mut rx, _dir) =
+            client_with_omemo("alice@example.com", 1, pubsub.clone()).await;
+        let (peer, _peer_rx, _peer_dir) =
+            client_with_omemo("alice@example.com", 2, pubsub.clone()).await;
+        publish_peer_bundle(&pubsub, &client).await;
+        let fingerprint = publish_peer_bundle(&pubsub, &peer).await;
+        pubsub.add_device_list("alice@example.com", &[1, 2]).await;
+
+        for id in [1u32, 2] {
+            client
+                .get_device_fingerprint_for_verification("alice@example.com", DeviceId::from(id))
+                .await
+                .unwrap();
+        }
+        client
+            .check_omemo_keys_for_contact("alice@example.com")
+            .await
+            .unwrap();
+
+        assert_key_request(&mut rx, "alice@example.com", 2, &fingerprint);
+        assert!(rx.try_recv().is_err());
+        client
+            .handle_key_verification_response("alice@example.com", TrustLevel::Trusted)
+            .await
+            .unwrap();
+        assert!(matches!(rx.try_recv().unwrap(), AppEvent::Chat(_)));
+        assert!(rx.try_recv().is_err());
+    }
 }

@@ -465,8 +465,10 @@ impl crate::xmpp::XMPPClient {
             }
         };
 
-        let storage = crate::omemo::storage::OmemoStorage::new_default()?;
-        let device_id = match storage.get_pending_device_verification(&BareJid::parse(contact).expect("expected valid JID")) {
+        let jid = BareJid::parse(contact)?;
+        let mut guard = omemo_manager.lock().await;
+        let storage = guard.get_storage();
+        let device_id = match storage.lock().await.get_pending_device_verification(&jid) {
             Ok(Some((device_id, _fingerprint))) => device_id,
             Ok(None) => {
                 warn!("No pending verification found for {}, cannot process response", contact);
@@ -478,16 +480,10 @@ impl crate::xmpp::XMPPClient {
             }
         };
 
-        if let Err(e) = storage.set_trust_level(&BareJid::parse(contact).expect("expected valid JID"), device_id, level.clone()) {
-            error!("Failed to set device trust in database: {}", e);
-        }
-
         let result = if level.is_trusted() {
-            let mut guard = omemo_manager.lock().await;
             guard.trust_device_identity(contact, device_id).await
                 .map_err(|e| anyhow!("Failed to mark device as trusted: {}", e))
         } else {
-            let guard = omemo_manager.lock().await;
             guard.untrust_device_identity(contact, device_id).await
                 .map_err(|e| anyhow!("Failed to mark device as untrusted: {}", e))
         };
@@ -497,10 +493,16 @@ impl crate::xmpp::XMPPClient {
             return result;
         }
 
-        info!("Successfully marked device {}:{} as {}", contact, device_id, level.as_str());
-        if let Err(e) = storage.remove_pending_device_verification(&BareJid::parse(contact).expect("expected valid JID"), device_id) {
-            warn!("Failed to remove pending verification: {}", e);
-        }
+        info!(
+            "Successfully marked device {}:{} as {}",
+            contact,
+            device_id,
+            level.as_str()
+        );
+        storage
+            .lock()
+            .await
+            .remove_pending_device_verification(&jid, device_id)?;
         Ok(())
     }
 
