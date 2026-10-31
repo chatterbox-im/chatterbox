@@ -1126,9 +1126,11 @@ impl ChatUI {
                 _ => Style::default(),
             });
 
+        let (input_scroll, input_cursor) = input_scroll_and_cursor(&self.input, chat_chunks[1]);
         let input_widget = Paragraph::new(self.input.value())
             .block(input_block)
-            .style(Style::default());
+            .style(Style::default())
+            .scroll((0, input_scroll));
         frame.render_widget(input_widget, chat_chunks[1]);
 
         // Draw help line
@@ -1175,12 +1177,7 @@ impl ChatUI {
 
         // Set cursor position
         if matches!(self.active_tab, Tab::Messages) && !self.quit_confirmation {
-            frame.set_cursor_position((
-                // Put cursor past the end of the input text
-                chat_chunks[1].x + self.input.cursor() as u16 + 1,
-                // Put cursor at the start of the input line
-                chat_chunks[1].y + 1,
-            ));
+            frame.set_cursor_position(input_cursor);
         }
 
         // Draw key confirmation popup if active
@@ -1496,6 +1493,24 @@ fn single_line_preview(content: &str, max_chars: usize) -> String {
     } else {
         preview
     }
+}
+
+/// For a single-line `input` drawn in a bordered box occupying `area`, returns
+/// the horizontal scroll for its `Paragraph` and the screen position for the
+/// cursor, so text wider than the box scrolls instead of running off-screen.
+/// Both are measured in terminal columns, so wide characters (emoji, CJK) fit.
+fn input_scroll_and_cursor(input: &Input, area: Rect) -> (u16, Position) {
+    // Two columns for the borders, plus one so the cursor fits after the last character.
+    let visible_width = area.width.saturating_sub(3) as usize;
+    let scroll = input.visual_scroll(visible_width);
+    let cursor_column = input
+        .visual_cursor()
+        .saturating_sub(scroll)
+        .min(visible_width) as u16;
+    (
+        scroll.min(u16::MAX as usize) as u16,
+        Position::new(area.x + 1 + cursor_column, area.y + 1),
+    )
 }
 
 fn draw_messages(f: &mut Frame, messages: &[Message], area: Rect, ui: &ChatUI) {
@@ -1846,17 +1861,16 @@ fn draw_add_contact_dialog(f: &mut Frame, dialog: &ContactAddDialog, area: Rect)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Blue));
 
+    let (input_scroll, input_cursor) = input_scroll_and_cursor(&dialog.input, chunks[1]);
     let input_widget = Paragraph::new(dialog.input.value())
         .block(input_block)
-        .style(Style::default());
+        .style(Style::default())
+        .scroll((0, input_scroll));
 
     f.render_widget(input_widget, chunks[1]);
 
     // Set cursor position in the input field
-    f.set_cursor_position((
-        chunks[1].x + dialog.input.cursor() as u16 + 1,
-        chunks[1].y + 1,
-    ));
+    f.set_cursor_position(input_cursor);
 }
 
 fn draw_contact_remove_dialog(f: &mut Frame, dialog: &ContactRemoveDialog, area: Rect) {
@@ -2583,5 +2597,65 @@ mod tests {
                 .unwrap();
             assert!(matches!(quit, Some(crate::commands::UiCommand::Quit)));
         }
+    }
+
+    /// The cursor's row in the last drawn frame, split into the text before the
+    /// cursor and the text from the cursor onwards.
+    fn row_split_at_cursor(terminal: &mut Terminal<TestBackend>) -> (String, String) {
+        let cursor = terminal.get_cursor_position().unwrap();
+        let buffer = terminal.backend().buffer();
+        let width = buffer.area.width;
+        let row = |columns: std::ops::Range<u16>| {
+            columns
+                .map(|x| buffer[(x, cursor.y)].symbol())
+                .collect::<String>()
+        };
+        (row(0..cursor.x.min(width)), row(cursor.x.min(width)..width))
+    }
+
+    #[test]
+    fn long_input_scrolls_to_keep_the_cursor_visible() {
+        for in_add_contact_dialog in [false, true] {
+            let mut ui = chat_ui_with_messages();
+            if in_add_contact_dialog {
+                ui.show_add_contact_dialog("example.com");
+            }
+            for c in format!("start{}end", "-".repeat(100)).chars() {
+                ui.handle_terminal_event(key(KeyCode::Char(c), KeyModifiers::NONE))
+                    .unwrap();
+            }
+            let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+
+            terminal.draw(|frame| ui.draw(frame)).unwrap();
+            let (before, after) = row_split_at_cursor(&mut terminal);
+            assert!(before.ends_with("---end"), "{before:?}");
+            assert!(!before.contains("start"), "{before:?}");
+            assert!(after.starts_with(" │"), "{after:?}");
+
+            ui.handle_terminal_event(key(KeyCode::Home, KeyModifiers::NONE))
+                .unwrap();
+            terminal.draw(|frame| ui.draw(frame)).unwrap();
+            let (before, after) = row_split_at_cursor(&mut terminal);
+            assert!(before.ends_with('│'), "{before:?}");
+            assert!(after.starts_with("start---"), "{after:?}");
+        }
+    }
+
+    #[test]
+    fn input_cursor_is_measured_in_terminal_columns() {
+        // Each emoji is one character but two terminal columns wide.
+        let short = Input::new("😀😀".to_string());
+        assert_eq!(
+            input_scroll_and_cursor(&short, Rect::new(0, 0, 12, 3)),
+            (0, Position::new(5, 1))
+        );
+
+        // 16 columns of text with room for 9: scrolling 7 columns would split
+        // an emoji, so it scrolls 8 and the cursor follows the fourth visible emoji.
+        let long = Input::new("😀".repeat(8));
+        assert_eq!(
+            input_scroll_and_cursor(&long, Rect::new(0, 0, 12, 3)),
+            (8, Position::new(9, 1))
+        );
     }
 }
