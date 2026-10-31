@@ -10,7 +10,7 @@ use chatterbox::omemo::storage::TrustLevel;
 /// updating both producer and consumer — the compiler enforces it.
 #[derive(Debug)]
 pub enum UiCommand {
-    /// User pressed Esc — exit the event loop.
+    /// Exit the event loop after quit confirmation or Ctrl+C.
     Quit,
     /// User pressed Enter with text in the input box (OMEMO-encrypted path).
     SendMessage { to: String, body: String },

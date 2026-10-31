@@ -8,9 +8,7 @@ use log::debug; // Add the debug import
 use log::info; // Add the log import
 use ratatui::{
     prelude::*,
-    widgets::{
-        Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table, TableState,
-    },
+    widgets::{Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table, TableState, Wrap},
     Frame,
 };
 use std::{
@@ -107,6 +105,7 @@ pub struct ChatUI {
     omemo_enabled: bool, // Track if OMEMO encryption is enabled
     os_notifications_enabled: bool,
     terminal_focused: bool,
+    quit_confirmation: bool,
     key_confirmation: Option<KeyConfirmation>, // Add this field for key confirmation popup
     contact_add_dialog: Option<ContactAddDialog>, // Add this field for adding new contacts
     contact_remove_dialog: Option<ContactRemoveDialog>, // Add this field for remove confirmation
@@ -201,6 +200,7 @@ impl ChatUI {
             omemo_enabled: true, // Default to enabled
             os_notifications_enabled: false,
             terminal_focused: true,
+            quit_confirmation: false,
             key_confirmation: None,                  // Initialize to None
             contact_add_dialog: None,                // Initialize to None
             contact_remove_dialog: None,             // Initialize to None
@@ -453,10 +453,23 @@ impl ChatUI {
             return Ok(None);
         }
 
-        // Ctrl+C should always cleanly terminate the app, just like Esc, regardless
-        // of any dialog or popup that might currently be open.
+        // Ctrl+C quits immediately, even when a confirmation or other dialog is open.
         if key.code == KeyCode::Char('c') && key.modifiers.contains(event::KeyModifiers::CONTROL) {
             return Ok(Some(crate::commands::UiCommand::Quit));
+        }
+
+        if self.quit_confirmation {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    self.quit_confirmation = false;
+                    return Ok(Some(crate::commands::UiCommand::Quit));
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    self.quit_confirmation = false;
+                }
+                _ => {}
+            }
+            return Ok(None);
         }
 
         // Handle key confirmation popup if active
@@ -641,7 +654,8 @@ impl ChatUI {
                 if self.replying_to.take().is_some() {
                     return Ok(None);
                 }
-                return Ok(Some(crate::commands::UiCommand::Quit));
+                self.quit_confirmation = true;
+                return Ok(None);
             }
             KeyCode::Enter => {
                 if self.begin_reply_to_selected_message() {
@@ -1141,7 +1155,7 @@ impl ChatUI {
 
         let help_spans = vec![
             Span::styled(
-                " ESC quit | TAB switch | Ctrl+H help | Ctrl+A add | Ctrl+O OMEMO [",
+                " ESC confirm quit | TAB switch | Ctrl+H help | Ctrl+A add | Ctrl+O OMEMO [",
                 Style::default().fg(Color::Gray),
             ),
             Span::styled(omemo_status_text, omemo_status_style),
@@ -1160,7 +1174,7 @@ impl ChatUI {
         frame.render_widget(help, chat_chunks[2]);
 
         // Set cursor position
-        if let Tab::Messages = self.active_tab {
+        if matches!(self.active_tab, Tab::Messages) && !self.quit_confirmation {
             frame.set_cursor_position((
                 // Put cursor past the end of the input text
                 chat_chunks[1].x + self.input.cursor() as u16 + 1,
@@ -1210,6 +1224,10 @@ impl ChatUI {
         // change focus or participate in input handling, so the user can keep
         // typing while one is visible.
         draw_toasts(frame, &self.toasts, chunks[1]);
+
+        if self.quit_confirmation {
+            draw_quit_confirmation(frame, size);
+        }
     }
 
     pub fn remove_last_message(&mut self) {
@@ -1682,6 +1700,29 @@ fn draw_messages(f: &mut Frame, messages: &[Message], area: Rect, ui: &ChatUI) {
     }
 }
 
+fn draw_quit_confirmation(frame: &mut Frame, area: Rect) {
+    let width = 40.min(area.width);
+    let height = 5.min(area.height);
+    let popup_area = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    );
+    let prompt = Paragraph::new("Do you want to quit? Y/N")
+        .block(
+            Block::default()
+                .title("Confirm Quit")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Red)),
+        )
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: true });
+
+    frame.render_widget(Clear, popup_area);
+    frame.render_widget(prompt, popup_area);
+}
+
 fn draw_key_confirmation(f: &mut Frame, key_conf: &KeyConfirmation, area: Rect) {
     let device_info = key_conf
         .device_id
@@ -1896,7 +1937,7 @@ fn draw_help_dialog(f: &mut Frame, area: Rect) {
     // Create the shortcuts list
     let shortcuts = vec![
         ("General", ""),
-        ("ESC", "Cancel selection/reply, otherwise quit"),
+        ("ESC", "Cancel selection/reply, otherwise confirm quit"),
         ("Tab", "Switch between Messages and Contacts"),
         ("Ctrl+S", "Toggle sidebar (contacts panel) visibility"),
         ("Ctrl+H", "Show this help dialog"),
@@ -2410,6 +2451,84 @@ mod tests {
     }
 
     #[test]
+    fn escape_opens_quit_confirmation_popup() {
+        let mut ui = chat_ui_with_messages();
+
+        let command = ui
+            .handle_terminal_event(key(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert!(command.is_none());
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        terminal.draw(|frame| ui.draw(frame)).unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Do you want to quit? Y/N"));
+    }
+
+    #[test]
+    fn quit_confirmation_accepts_yes_case_insensitively() {
+        for answer in ['y', 'Y'] {
+            let mut ui = chat_ui_with_messages();
+            ui.handle_terminal_event(key(KeyCode::Esc, KeyModifiers::NONE))
+                .unwrap();
+
+            let command = ui
+                .handle_terminal_event(key(KeyCode::Char(answer), KeyModifiers::NONE))
+                .unwrap();
+
+            assert!(matches!(command, Some(crate::commands::UiCommand::Quit)));
+            assert!(!ui.quit_confirmation);
+        }
+    }
+
+    #[test]
+    fn quit_confirmation_cancels_without_changing_the_draft() {
+        for answer in [KeyCode::Char('n'), KeyCode::Char('N'), KeyCode::Esc] {
+            let mut ui = chat_ui_with_messages();
+            ui.input = Input::new("unsent draft".to_string());
+            ui.handle_terminal_event(key(KeyCode::Esc, KeyModifiers::NONE))
+                .unwrap();
+
+            for ignored in [KeyCode::Char('x'), KeyCode::Enter, KeyCode::Tab] {
+                let command = ui
+                    .handle_terminal_event(key(ignored, KeyModifiers::NONE))
+                    .unwrap();
+                assert!(command.is_none());
+                assert!(ui.quit_confirmation);
+            }
+
+            let command = ui
+                .handle_terminal_event(key(answer, KeyModifiers::NONE))
+                .unwrap();
+            assert!(command.is_none());
+            assert!(!ui.quit_confirmation);
+            assert_eq!(ui.input.value(), "unsent draft");
+            assert!(matches!(ui.active_tab, Tab::Messages));
+        }
+    }
+
+    #[test]
+    fn quit_confirmation_takes_priority_over_a_new_key_prompt() {
+        let mut ui = chat_ui_with_messages();
+        ui.handle_terminal_event(key(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        ui.show_key_confirmation("friend@example.com", "fingerprint", None);
+
+        let command = ui
+            .handle_terminal_event(key(KeyCode::Char('y'), KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(matches!(command, Some(crate::commands::UiCommand::Quit)));
+        assert!(ui.key_confirmation.is_some());
+    }
+
+    #[test]
     fn escape_cancels_reply_before_quitting() {
         let mut ui = chat_ui_with_messages();
         ui.handle_terminal_event(key(KeyCode::Up, KeyModifiers::NONE))
@@ -2422,9 +2541,16 @@ mod tests {
             .unwrap();
         assert!(cancel.is_none());
         assert!(ui.replying_to.is_none());
+        assert!(!ui.quit_confirmation);
+
+        let confirm = ui
+            .handle_terminal_event(key(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert!(confirm.is_none());
+        assert!(ui.quit_confirmation);
 
         let quit = ui
-            .handle_terminal_event(key(KeyCode::Esc, KeyModifiers::NONE))
+            .handle_terminal_event(key(KeyCode::Char('y'), KeyModifiers::NONE))
             .unwrap();
         assert!(matches!(quit, Some(crate::commands::UiCommand::Quit)));
     }
@@ -2441,13 +2567,21 @@ mod tests {
 
     #[test]
     fn ctrl_c_quits_even_with_dialog_open() {
-        let mut ui = chat_ui_with_messages();
-        ui.show_help_dialog();
-        assert!(ui.help_dialog.is_some());
+        for quit_dialog in [false, true] {
+            let mut ui = chat_ui_with_messages();
+            if quit_dialog {
+                ui.handle_terminal_event(key(KeyCode::Esc, KeyModifiers::NONE))
+                    .unwrap();
+                assert!(ui.quit_confirmation);
+            } else {
+                ui.show_help_dialog();
+                assert!(ui.help_dialog.is_some());
+            }
 
-        let quit = ui
-            .handle_terminal_event(key(KeyCode::Char('c'), KeyModifiers::CONTROL))
-            .unwrap();
-        assert!(matches!(quit, Some(crate::commands::UiCommand::Quit)));
+            let quit = ui
+                .handle_terminal_event(key(KeyCode::Char('c'), KeyModifiers::CONTROL))
+                .unwrap();
+            assert!(matches!(quit, Some(crate::commands::UiCommand::Quit)));
+        }
     }
 }
