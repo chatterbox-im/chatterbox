@@ -978,7 +978,7 @@ impl OmemoManager {
         let key = (remote_jid.clone(), DeviceId::from(remote_device_id));
 
         warn!(
-            "Aggressively resetting OMEMO session with {}:{} due to repeated failures",
+            "Resetting OMEMO session with {}:{}",
             remote_jid, remote_device_id
         );
 

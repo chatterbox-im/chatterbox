@@ -81,31 +81,22 @@ impl XMPPClient {
         // so the event loop can decrypt incoming messages
         crate::xmpp::publish_late_state(self);
 
-        // Force refresh device lists after initialization to ensure fresh data
-        info!("Forcing device list refresh for known contacts to avoid stale data");
+        info!("Refreshing OMEMO device lists and key bundles for known contacts");
         tokio::spawn({
             let client = self.clone();
             async move {
                 // Give the server time to process our publications
                 tokio::time::sleep(Duration::from_secs(2)).await;
 
-                // Get our contact list and refresh their device lists
                 if let Ok(Some(contacts)) = client.get_roster().await {
                     for contact_jid in contacts {
-                        if let Some(omemo_manager) = &client.omemo_manager {
-                            let manager_guard = omemo_manager.lock().await;
-                            if let Err(e) =
-                                manager_guard.get_device_ids_for_test(&contact_jid).await
-                            {
-                                warn!("Failed to refresh device list for {}: {}", contact_jid, e);
-                            } else {
-                                info!("Successfully refreshed device list for {}", contact_jid);
-                            }
+                        if let Err(e) = client.refresh_omemo_keys_for_contact(&contact_jid).await {
+                            warn!("Failed to refresh OMEMO keys for {}: {}", contact_jid, e);
                         }
                         tokio::time::sleep(Duration::from_millis(500)).await;
                     }
                 } else {
-                    warn!("Failed to get contact list for device list refresh");
+                    warn!("Failed to get contact list for OMEMO key refresh");
                 }
             }
         });
@@ -549,6 +540,41 @@ impl XMPPClient {
             .map_err(|e| anyhow!("Failed to refresh device list: {}", e))
     }
 
+    async fn refresh_omemo_keys_for_contact(&self, jid: &str) -> Result<()> {
+        let bare_jid = BareJid::parse(jid)?;
+        let omemo_manager = self
+            .omemo_manager
+            .as_ref()
+            .ok_or_else(|| anyhow!("OMEMO manager not initialized"))?;
+        let mut manager = omemo_manager.lock().await;
+        let device_ids = manager.force_refresh_device_list(&bare_jid).await?;
+
+        for device_id in device_ids {
+            match manager
+                .fetch_device_identity_from_server(&bare_jid, device_id)
+                .await
+            {
+                Ok((_, key_changed)) => {
+                    if key_changed {
+                        manager
+                            .pending_trust_restorations
+                            .remove(&(bare_jid.clone(), device_id));
+                        manager.reset_session(&bare_jid, device_id.get()).await?;
+                    }
+                    info!("Refreshed OMEMO key bundle for {}:{}", bare_jid, device_id);
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to refresh OMEMO key bundle for {}:{}: {}",
+                        bare_jid, device_id, e
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Get fingerprint for a device
     pub async fn get_device_fingerprint(&self, jid: &str, device_id: DeviceId) -> Result<String> {
         if let Some(omemo_manager) = &self.omemo_manager {
@@ -888,6 +914,184 @@ mod tests {
             }
             event => panic!("expected key verification, got {:?}", event),
         }
+    }
+
+    #[tokio::test]
+    async fn startup_key_refresh_updates_bundles_and_discovers_new_devices() {
+        let pubsub = RecordingPubSub::new();
+        let (client, _rx, _dir) = client_with_omemo("alice@example.com", 1, pubsub.clone()).await;
+        let (peer, _peer_rx, _peer_dir) =
+            client_with_omemo("bob@example.com", 2, pubsub.clone()).await;
+        let (other_peer, _other_rx, _other_dir) =
+            client_with_omemo("bob@example.com", 3, pubsub.clone()).await;
+        let jid = BareJid::parse("bob@example.com").unwrap();
+        let device_id = DeviceId::from(2u32);
+        let fingerprint = publish_peer_bundle(&pubsub, &peer).await;
+        let other_fingerprint = publish_peer_bundle(&pubsub, &other_peer).await;
+        pubsub.add_device_list(jid.as_str(), &[2]).await;
+        client.get_device_ids_for_user(jid.as_str()).await.unwrap();
+
+        let manager = client.get_omemo_manager().unwrap();
+        let storage = {
+            let mut manager = manager.lock().await;
+            manager
+                .get_or_create_session(jid.as_str(), device_id)
+                .await
+                .unwrap();
+            manager.get_storage()
+        };
+        storage
+            .lock()
+            .await
+            .set_trust_level(&jid, device_id, TrustLevel::Verified)
+            .unwrap();
+
+        let signed_prekey_id = {
+            let peer_manager = peer.get_omemo_manager().unwrap();
+            let mut peer_manager = peer_manager.lock().await;
+            peer_manager.prekey_rotation_config.max_signed_prekey_age = 0;
+            peer_manager.prekey_rotation_config.last_rotation = 0;
+            peer_manager.check_and_rotate_prekeys().await.unwrap();
+            peer_manager.key_bundle.as_ref().unwrap().signed_pre_key_id
+        };
+        publish_peer_bundle(&pubsub, &peer).await;
+        pubsub.add_device_list(jid.as_str(), &[2, 3]).await;
+
+        client
+            .refresh_omemo_keys_for_contact(jid.as_str())
+            .await
+            .unwrap();
+
+        let manager = manager.lock().await;
+        assert!(manager.sessions.contains_key(&(jid.clone(), device_id)));
+        let mut storage = storage.lock().await;
+        assert_eq!(
+            storage.load_device_list(&jid).unwrap().device_ids,
+            vec![device_id, DeviceId::from(3u32)]
+        );
+        let identity = storage.load_device_identity(&jid, device_id).unwrap();
+        assert_eq!(identity.signed_pre_key.id, signed_prekey_id);
+        assert_eq!(
+            manager.generate_standard_fingerprint(&identity.identity_key),
+            fingerprint
+        );
+        assert_eq!(
+            storage.get_trust_level(&jid, device_id).unwrap(),
+            TrustLevel::Verified
+        );
+        let other_identity = storage
+            .load_device_identity(&jid, DeviceId::from(3u32))
+            .unwrap();
+        assert_eq!(
+            manager.generate_standard_fingerprint(&other_identity.identity_key),
+            other_fingerprint
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_key_refresh_resets_sessions_for_changed_identities() {
+        let pubsub = RecordingPubSub::new();
+        let (client, _rx, _dir) = client_with_omemo("alice@example.com", 1, pubsub.clone()).await;
+        let (peer, _peer_rx, _peer_dir) =
+            client_with_omemo("bob@example.com", 2, pubsub.clone()).await;
+        let jid = BareJid::parse("bob@example.com").unwrap();
+        let device_id = DeviceId::from(2u32);
+        let old_fingerprint = publish_peer_bundle(&pubsub, &peer).await;
+        pubsub.add_device_list(jid.as_str(), &[2]).await;
+        let manager = client.get_omemo_manager().unwrap();
+        let storage = {
+            let mut manager = manager.lock().await;
+            manager
+                .get_or_create_session(jid.as_str(), device_id)
+                .await
+                .unwrap();
+            manager
+                .pending_trust_restorations
+                .insert((jid.clone(), device_id));
+            manager.get_storage()
+        };
+        storage
+            .lock()
+            .await
+            .set_trust_level(&jid, device_id, TrustLevel::Verified)
+            .unwrap();
+
+        let (replacement_peer, _replacement_rx, _replacement_dir) =
+            client_with_omemo("bob@example.com", 2, pubsub.clone()).await;
+        let fingerprint = publish_peer_bundle(&pubsub, &replacement_peer).await;
+        assert_ne!(old_fingerprint, fingerprint);
+
+        client
+            .refresh_omemo_keys_for_contact(jid.as_str())
+            .await
+            .unwrap();
+
+        let manager = manager.lock().await;
+        assert!(!manager.sessions.contains_key(&(jid.clone(), device_id)));
+        assert!(!manager
+            .pending_trust_restorations
+            .contains(&(jid.clone(), device_id)));
+        let storage = storage.lock().await;
+        assert!(!storage
+            .load_all_sessions()
+            .unwrap()
+            .contains_key(&format!("{}:{}", jid, device_id)));
+        assert_eq!(
+            storage.get_trust_level(&jid, device_id).unwrap(),
+            TrustLevel::Untrusted
+        );
+        assert_eq!(
+            storage.get_pending_device_verification(&jid).unwrap(),
+            Some((device_id, fingerprint))
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_key_refresh_keeps_cached_keys_and_continues_after_bundle_failure() {
+        let pubsub = RecordingPubSub::new();
+        let (client, _rx, _dir) = client_with_omemo("alice@example.com", 1, pubsub.clone()).await;
+        let (peer, _peer_rx, _peer_dir) =
+            client_with_omemo("bob@example.com", 2, pubsub.clone()).await;
+        let jid = BareJid::parse("bob@example.com").unwrap();
+        let device_id = DeviceId::from(2u32);
+        let fingerprint = publish_peer_bundle(&pubsub, &peer).await;
+        client
+            .get_device_fingerprint(jid.as_str(), device_id)
+            .await
+            .unwrap();
+        for node in crate::omemo::bundle_node_variants(device_id) {
+            pubsub
+                .responses
+                .lock()
+                .await
+                .remove(&format!("{}|{}", jid, node));
+        }
+        let (other_peer, _other_rx, _other_dir) =
+            client_with_omemo("bob@example.com", 3, pubsub.clone()).await;
+        let other_fingerprint = publish_peer_bundle(&pubsub, &other_peer).await;
+        pubsub.add_device_list(jid.as_str(), &[2, 3]).await;
+
+        client
+            .refresh_omemo_keys_for_contact(jid.as_str())
+            .await
+            .unwrap();
+
+        let manager = client.get_omemo_manager().unwrap();
+        let manager = manager.lock().await;
+        let storage = manager.get_storage();
+        let mut storage = storage.lock().await;
+        let identity = storage.load_device_identity(&jid, device_id).unwrap();
+        assert_eq!(
+            manager.generate_standard_fingerprint(&identity.identity_key),
+            fingerprint
+        );
+        let other_identity = storage
+            .load_device_identity(&jid, DeviceId::from(3u32))
+            .unwrap();
+        assert_eq!(
+            manager.generate_standard_fingerprint(&other_identity.identity_key),
+            other_fingerprint
+        );
     }
 
     #[tokio::test]

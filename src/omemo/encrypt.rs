@@ -173,7 +173,7 @@ impl OmemoManager {
             .fetch_device_identity_from_server(&bare_jid, remote_device_id)
             .await
         {
-            Ok(identity) => identity,
+            Ok((identity, _)) => identity,
             Err(e) => {
                 warn!(
                     "Failed to fetch fresh bundle for {} of {}:{}: {} — falling back to cache",
@@ -199,7 +199,7 @@ impl OmemoManager {
                 // Cached bundle may be stale; re-fetch and verify the fresh one.
                 warn!("Signed prekey verification failed for {}:{} with cached bundle, re-fetching from server", bare_jid, remote_device_id);
                 match self.fetch_device_identity_from_server(&bare_jid, remote_device_id).await {
-                    Ok(fresh) => fresh.verify().map_err(|e| OmemoError::ProtocolError(
+                    Ok((fresh, _)) => fresh.verify().map_err(|e| OmemoError::ProtocolError(
                         format!("Signed prekey signature invalid for {}:{} even after re-fetch — possible MITM: {}", bare_jid, remote_device_id, e)
                     ))?,
                     Err(e) => return Err(OmemoError::ProtocolError(
@@ -317,14 +317,15 @@ impl OmemoManager {
         // If not in storage, fetch from server
         self.fetch_device_identity_from_server(remote_jid, device_id)
             .await
+            .map(|(identity, _)| identity)
     }
 
-    /// Fetch a device identity directly from the server, bypassing and replacing the cache
-    async fn fetch_device_identity_from_server(
+    /// Fetch a fresh device identity and report whether its pinned identity key changed.
+    pub(crate) async fn fetch_device_identity_from_server(
         &self,
         remote_jid: &BareJid,
         device_id: DeviceId,
-    ) -> Result<DeviceIdentity, OmemoError> {
+    ) -> Result<(DeviceIdentity, bool), OmemoError> {
         info!(
             "Fetching device bundle from server for {}:{}",
             remote_jid, device_id
@@ -370,7 +371,7 @@ impl OmemoManager {
             );
         }
 
-        Ok(identity)
+        Ok((identity, key_changed))
     }
 
     /// Encrypt a message for a recipient
