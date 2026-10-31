@@ -159,7 +159,8 @@ impl XMPPClient {
                 pending_receipts,
                 connected: false,
                 omemo_manager: None,
-                carbons_enabled: Arc::new(AtomicBool::new(true)),
+                // Off until the server confirms an <enable/> request.
+                carbons_enabled: Arc::new(AtomicBool::new(false)),
                 iq_registry: Arc::new(TokioMutex::new(iq_registry::IqResponseRegistry::new())),
                 transport_shutdown: Arc::new(StdMutex::new(None)),
                 late_state_tx: Some(late_state_tx),

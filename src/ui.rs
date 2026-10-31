@@ -104,6 +104,7 @@ pub struct ChatUI {
     typing_states: HashMap<String, (TypingStatus, chrono::DateTime<chrono::Utc>)>, // Contact -> (Status, Timestamp)
     omemo_enabled: bool, // Track if OMEMO encryption is enabled
     os_notifications_enabled: bool,
+    carbons_enabled: bool,
     terminal_focused: bool,
     quit_confirmation: bool,
     key_confirmation: Option<KeyConfirmation>, // Add this field for key confirmation popup
@@ -199,6 +200,7 @@ impl ChatUI {
             typing_states: HashMap::new(),
             omemo_enabled: true, // Default to enabled
             os_notifications_enabled: false,
+            carbons_enabled: false,
             terminal_focused: true,
             quit_confirmation: false,
             key_confirmation: None,                  // Initialize to None
@@ -783,8 +785,10 @@ impl ChatUI {
             {
                 return Ok(Some(crate::commands::UiCommand::ShowDeviceFingerprints));
             }
-            KeyCode::Char('m') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
-                return Ok(Some(crate::commands::UiCommand::EnableCarbons));
+            KeyCode::Char('p') | KeyCode::Char('P')
+                if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
+            {
+                return Ok(Some(crate::commands::UiCommand::ToggleCarbons));
             }
             KeyCode::Char('r') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
                 if self.has_active_contact() {
@@ -1362,6 +1366,11 @@ impl ChatUI {
         self.os_notifications_enabled = enabled;
     }
 
+    /// Sets the message carbons state shown in the top-right corner.
+    pub fn set_carbons_enabled(&mut self, enabled: bool) {
+        self.carbons_enabled = enabled;
+    }
+
     /// Returns whether the terminal currently reports keyboard focus.
     pub fn is_terminal_focused(&self) -> bool {
         self.terminal_focused
@@ -1419,6 +1428,10 @@ impl ChatUI {
         if self.toasts.len() > 3 {
             self.toasts.remove(0);
         }
+    }
+
+    pub fn remove_last_toast(&mut self) {
+        self.toasts.pop();
     }
 
     pub fn clean_toasts(&mut self, timeout_secs: i64) -> bool {
@@ -1679,8 +1692,29 @@ fn draw_messages(f: &mut Frame, messages: &[Message], area: Rect, ui: &ChatUI) {
             .set((adjusted_from_bottom > 0).then_some(adjusted_from_bottom));
     }
 
+    let (carbons_status, carbons_style) = if ui.carbons_enabled {
+        ("enabled", Style::default().fg(Color::Green))
+    } else {
+        ("disabled", Style::default().fg(Color::Red))
+    };
+    let carbons_indicator = Line::from(vec![
+        Span::styled("Ctrl+P carbons [", Style::default().fg(Color::Gray)),
+        Span::styled(carbons_status, carbons_style),
+        Span::styled("]", Style::default().fg(Color::Gray)),
+    ])
+    .right_aligned();
+    // ratatui draws left titles over right ones, so only show the indicator
+    // when it fits beside the left title (which grows while scrolling etc.).
+    let title_room = chunks[0].width.saturating_sub(2) as usize;
+    let show_carbons =
+        Line::from(title.as_str()).width() + 1 + carbons_indicator.width() <= title_room;
+    let mut messages_block = Block::default().borders(Borders::ALL).title(title);
+    if show_carbons {
+        messages_block = messages_block.title_top(carbons_indicator);
+    }
+
     let messages_widget = Paragraph::new(Text::from(message_lines))
-        .block(Block::default().borders(Borders::ALL).title(title))
+        .block(messages_block)
         .scroll((scroll_from_top.min(u16::MAX as usize) as u16, 0));
     f.render_widget(messages_widget, chunks[0]);
 
@@ -1975,8 +2009,8 @@ fn draw_help_dialog(f: &mut Frame, area: Rect) {
         ("Ctrl+O", "Toggle OMEMO encryption for current conversation"),
         ("Ctrl+T", "Toggle trust for current contact's OMEMO keys"),
         (
-            "Ctrl+M",
-            "Enable Message Carbons protocol (sync messages between devices)",
+            "Ctrl+P",
+            "Toggle Message Carbons (sync messages between devices)",
         ),
         ("Ctrl+F", "Show device fingerprints dialog"),
         (
@@ -2656,6 +2690,44 @@ mod tests {
         assert_eq!(
             input_scroll_and_cursor(&long, Rect::new(0, 0, 12, 3)),
             (8, Position::new(9, 1))
+        );
+    }
+
+    #[test]
+    fn ctrl_p_toggles_message_carbons() {
+        let mut ui = chat_ui_with_messages();
+
+        let command = ui
+            .handle_terminal_event(key(KeyCode::Char('p'), KeyModifiers::CONTROL))
+            .unwrap();
+        assert!(matches!(
+            command,
+            Some(crate::commands::UiCommand::ToggleCarbons)
+        ));
+    }
+
+    #[test]
+    fn carbons_state_is_shown_in_the_top_right_corner() {
+        let top_row = |ui: &ChatUI, width: u16| {
+            let mut terminal = Terminal::new(TestBackend::new(width, 20)).unwrap();
+            terminal.draw(|frame| ui.draw(frame)).unwrap();
+            let buffer = terminal.backend().buffer();
+            (0..width).map(|x| buffer[(x, 0)].symbol()).collect::<String>()
+        };
+        let mut ui = chat_ui_with_messages();
+
+        let row = top_row(&ui, 100);
+        assert!(row.ends_with("Ctrl+P carbons [disabled]┐"), "{row:?}");
+
+        ui.set_carbons_enabled(true);
+        let row = top_row(&ui, 100);
+        assert!(row.ends_with("Ctrl+P carbons [enabled]┐"), "{row:?}");
+
+        // Too narrow to fit beside the panel title: hidden rather than overlapping it.
+        let row = top_row(&ui, 40);
+        assert!(
+            row.contains("Messages") && !row.contains("carbons"),
+            "{row:?}"
         );
     }
 }

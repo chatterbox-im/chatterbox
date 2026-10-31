@@ -44,6 +44,8 @@ pub async fn run_app(
         }
     };
     chat_ui.set_os_notifications_enabled(app_settings.os_notifications_enabled);
+    // The connection has already tried to enable carbons by this point.
+    chat_ui.set_carbons_enabled(xmpp_client.is_carbons_enabled());
 
     // Draw UI early
     terminal.draw(|f| chat_ui.draw(f))?;
@@ -1112,8 +1114,8 @@ async fn handle_user_command(
             }
         }
 
-        UiCommand::EnableCarbons => {
-            handle_enable_carbons(chat_ui, terminal, xmpp_client).await;
+        UiCommand::ToggleCarbons => {
+            handle_toggle_carbons(chat_ui, terminal, xmpp_client).await;
         }
 
         UiCommand::RefetchOmemo { contact } => {
@@ -1477,33 +1479,38 @@ async fn handle_remove_contact(
     }
 }
 
-async fn handle_enable_carbons(
+async fn handle_toggle_carbons(
     chat_ui: &mut ChatUI,
     terminal: &mut crate::ui::Terminal<crate::ui::CrosstermBackend<io::Stdout>>,
     xmpp_client: &mut XMPPClient,
 ) {
-    info!("Enabling message carbons");
-    chat_ui.add_message(create_system_message("me", "Enabling message carbons..."));
+    let enable = !xmpp_client.is_carbons_enabled();
+    let (verb, progress, done) = if enable {
+        ("enable", "Enabling", "enabled")
+    } else {
+        ("disable", "Disabling", "disabled")
+    };
+    info!("{} message carbons", progress);
+    chat_ui.show_toast(format!("{} message carbons...", progress));
     let _ = terminal.draw(|f| chat_ui.draw(f));
 
-    match xmpp_client.enable_carbons().await {
+    let result = if enable {
+        xmpp_client.enable_carbons().await
+    } else {
+        xmpp_client.disable_carbons().await
+    };
+    chat_ui.remove_last_toast();
+    match result {
         Ok(_) => {
-            info!("Successfully enabled message carbons");
-            chat_ui.remove_last_message();
-            chat_ui.add_message(create_system_message(
-                "me",
-                "Message carbons enabled successfully",
-            ));
+            info!("Message carbons {}", done);
+            chat_ui.show_toast(format!("Message carbons {}", done));
         }
         Err(e) => {
-            error!("Failed to enable message carbons: {}", e);
-            chat_ui.remove_last_message();
-            chat_ui.add_message(create_system_message(
-                "me",
-                &format!("Failed to enable message carbons: {}", e),
-            ));
+            error!("Failed to {} message carbons: {}", verb, e);
+            chat_ui.show_toast(format!("Failed to {} message carbons: {}", verb, e));
         }
     }
+    chat_ui.set_carbons_enabled(xmpp_client.is_carbons_enabled());
 }
 
 async fn handle_refetch_omemo(chat_ui: &mut ChatUI, xmpp_client: &mut XMPPClient, recipient: &str) {

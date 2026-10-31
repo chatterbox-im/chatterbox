@@ -43,13 +43,9 @@ impl super::XMPPClient {
                 Ok(true)
             }
             Err(e) => {
-                // Soft failure — assume success on timeout
-                warn!(
-                    "Failed to disable message carbons ({}), assuming success",
-                    e
-                );
-                self.set_carbons_enabled(false);
-                Ok(true)
+                // Unconfirmed, so the server may still be sending carbons.
+                error!("Failed to disable message carbons: {}", e);
+                Err(e)
             }
         }
     }
@@ -630,5 +626,15 @@ mod tests {
             .build();
         assert!(!stanza.has_child("sent", custom_ns::CARBONS));
         assert!(!stanza.has_child("received", custom_ns::CARBONS));
+    }
+
+    // An unconfirmed disable must not make the client report carbons as off.
+    #[tokio::test]
+    async fn test_failed_disable_keeps_carbons_enabled() {
+        let (client, _rx) = crate::xmpp::XMPPClient::new();
+        client.set_carbons_enabled(true);
+
+        assert!(client.disable_carbons().await.is_err());
+        assert!(client.is_carbons_enabled());
     }
 }

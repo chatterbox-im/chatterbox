@@ -91,6 +91,7 @@ impl XMPPClient {
             msg_tx_clone,
             pending_receipts_clone,
             iq_registry_clone,
+            self.carbons_enabled.clone(),
             late_state_rx,
             Some(online_tx),
         ));
