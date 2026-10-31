@@ -5,7 +5,7 @@
 //! No mutex contention, no poll-sleep-retry — events arrive instantly.
 
 use log::{debug, error, info, warn};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex as TokioMutex};
 
@@ -27,6 +27,7 @@ impl XMPPClient {
         msg_tx: mpsc::Sender<crate::models::AppEvent>,
         pending_receipts: Arc<TokioMutex<std::collections::HashMap<String, PendingMessage>>>,
         iq_registry: Arc<TokioMutex<crate::xmpp::iq_registry::IqResponseRegistry>>,
+        carbons_enabled: Arc<AtomicBool>,
         late_state: LateStateRx,
         online_tx: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
     ) {
@@ -205,6 +206,7 @@ impl XMPPClient {
                                     omemo_manager,
                                     carbons_enabled: Arc::new(AtomicBool::new(true)),
                                     iq_registry: iq_registry_clone,
+                                    transport_shutdown: Arc::new(std::sync::Mutex::new(None)),
                                     late_state_tx: None,
                                     typing_tx: None,
                                     omemo_dir: None,
@@ -272,6 +274,7 @@ impl XMPPClient {
                                         omemo_manager: state.omemo_manager.clone(),
                                         carbons_enabled: Arc::new(AtomicBool::new(true)),
                                         iq_registry: iq_registry_clone2,
+                                        transport_shutdown: Arc::new(std::sync::Mutex::new(None)),
                                         late_state_tx: None,
                                         typing_tx: None,
                                         omemo_dir: None,
@@ -429,14 +432,18 @@ impl XMPPClient {
                         iq_registry.lock().await.cancel_all();
                         reconnecting = false;
                         info!("Reconnected to XMPP server as {}", bound_jid);
-                        let iq_id = uuid::Uuid::new_v4().to_string();
-                        let carbons_iq = Element::builder("iq", "jabber:client")
-                            .attr("type".try_into().unwrap(), "set")
-                            .attr("id".try_into().unwrap(), &iq_id)
-                            .append(Element::builder("enable", custom_ns::CARBONS).build())
-                            .build();
-                        if let Err(e) = transport::send_stanza(&stanza_tx, carbons_iq) {
-                            warn!("Failed to re-enable carbons after reconnect: {}", e);
+                        // Restore carbons only if they were on; the user may
+                        // have turned them off.
+                        if carbons_enabled.load(Ordering::SeqCst) {
+                            let iq_id = uuid::Uuid::new_v4().to_string();
+                            let carbons_iq = Element::builder("iq", "jabber:client")
+                                .attr("type".try_into().unwrap(), "set")
+                                .attr("id".try_into().unwrap(), &iq_id)
+                                .append(Element::builder("enable", custom_ns::CARBONS).build())
+                                .build();
+                            if let Err(e) = transport::send_stanza(&stanza_tx, carbons_iq) {
+                                warn!("Failed to re-enable carbons after reconnect: {}", e);
+                            }
                         }
                         if let Err(e) = transport::send_stanza(
                             &stanza_tx,
@@ -551,14 +558,20 @@ mod tests {
     use tokio::time::timeout;
     use tokio_xmpp::Event as XMPPEvent;
 
-    /// Minimal event loop harness: returns (event sender, stanza receiver,
-    /// message receiver, online oneshot receiver).
-    fn spawn_loop() -> (
+    /// (event sender, stanza receiver, message receiver, online oneshot receiver)
+    type LoopHarness = (
         mpsc::UnboundedSender<XMPPEvent>,
         mpsc::UnboundedReceiver<xmpp_parsers::minidom::Element>,
         mpsc::Receiver<crate::models::AppEvent>,
         oneshot::Receiver<Result<(), String>>,
-    ) {
+    );
+
+    /// Minimal event loop harness, with message carbons enabled.
+    fn spawn_loop() -> LoopHarness {
+        spawn_loop_with_carbons(true)
+    }
+
+    fn spawn_loop_with_carbons(carbons_enabled: bool) -> LoopHarness {
         let (stanza_tx, stanza_rx) = mpsc::unbounded_channel::<xmpp_parsers::minidom::Element>();
         let (event_tx, event_rx) = mpsc::unbounded_channel::<XMPPEvent>();
         let (msg_tx, msg_rx) = mpsc::channel::<crate::models::AppEvent>(16);
@@ -576,6 +589,7 @@ mod tests {
             msg_tx,
             pending_receipts,
             iq_registry,
+            Arc::new(AtomicBool::new(carbons_enabled)),
             late_rx,
             Some(online_tx),
         ));
@@ -702,6 +716,32 @@ mod tests {
             content2.contains("Reconnected"),
             "expected 'Reconnected' in UI message, got: {:?}",
             content2
+        );
+    }
+
+    // Carbons switched off by the user must stay off after a reconnect.
+    #[tokio::test]
+    async fn test_reconnect_does_not_enable_carbons_when_disabled() {
+        let (event_tx, mut stanzas, _msgs, online_rx) = spawn_loop_with_carbons(false);
+
+        event_tx.send(online("als@example.org/r1")).unwrap();
+        timeout(Duration::from_secs(1), online_rx)
+            .await
+            .unwrap()
+            .unwrap()
+            .expect("initial Online should give Ok(())");
+        event_tx.send(disconnected()).unwrap();
+        event_tx.send(online("als@example.org/r2")).unwrap();
+
+        let first = timeout(Duration::from_secs(1), stanzas.recv())
+            .await
+            .expect("timed out waiting for presence")
+            .expect("stanza channel closed");
+        assert_eq!(
+            first.name(),
+            "presence",
+            "no carbons IQ expected before presence, got <{}>",
+            first.name()
         );
     }
 

@@ -10,7 +10,7 @@ use chatterbox::omemo::storage::TrustLevel;
 /// updating both producer and consumer — the compiler enforces it.
 #[derive(Debug)]
 pub enum UiCommand {
-    /// User pressed Esc — exit the event loop.
+    /// Exit the event loop after quit confirmation or Ctrl+C.
     Quit,
     /// User pressed Enter with text in the input box (OMEMO-encrypted path).
     SendMessage { to: String, body: String },
@@ -38,10 +38,10 @@ pub enum UiCommand {
     ContactChanged { contact: String },
     /// User reached the top of a conversation and requested older history.
     LoadOlderHistory { contact: String },
-    /// User pressed Ctrl-P — toggle OS notifications.
+    /// User pressed Ctrl-N — toggle OS notifications.
     ToggleOsNotifications,
-    /// User pressed Ctrl-M — enable XEP-0280 message carbons.
-    EnableCarbons,
+    /// User pressed Ctrl-P — turn XEP-0280 message carbons on or off.
+    ToggleCarbons,
     /// Re-fetch OMEMO device list for the active contact.
     RefetchOmemo { contact: String },
 }

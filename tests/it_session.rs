@@ -81,6 +81,105 @@ async fn initialize_client_publishes_device_list_and_bundle() {
     );
 }
 
+#[tokio::test]
+async fn startup_fetches_published_keys_despite_cached_device_list() {
+    use chatterbox::jid::BareJid;
+    use chatterbox::omemo::device_id::DeviceId;
+    use chatterbox::omemo::storage::{DeviceListEntry, OmemoStorage, TrustLevel};
+    use tempfile::TempDir;
+    use tokio::time::{sleep, timeout, Duration};
+
+    let server = FakeServer::new();
+    let peer_jid = BareJid::parse("bob@example.com").unwrap();
+    let device_id = DeviceId::from(2u32);
+    let bob_dir = TempDir::new().unwrap();
+    OmemoStorage::new(Some(bob_dir.path().to_path_buf()))
+        .unwrap()
+        .store_device_id(device_id)
+        .unwrap();
+    let (mut bob, _bob_msgs) = XMPPClient::new();
+    bob.omemo_dir = Some(bob_dir.path().to_path_buf());
+    bob.connect_with_transport(
+        server.register(peer_jid.as_str()),
+        peer_jid.to_string(),
+        "example.com",
+    )
+    .await
+    .unwrap();
+    bob.initialize_client().await.unwrap();
+
+    let (mut cached_identity, expected_fingerprint) = {
+        let manager = bob.get_omemo_manager().unwrap();
+        let manager = manager.lock().await;
+        let fingerprint = manager
+            .get_device_fingerprint(peer_jid.as_str(), device_id)
+            .await
+            .unwrap();
+        let item = server
+            .pep_node(peer_jid.as_str(), &chatterbox::omemo::bundle_node(device_id))
+            .unwrap();
+        let identity = manager
+            .parse_device_bundle_response(&format!("<items>{item}</items>"), device_id)
+            .unwrap();
+        (identity, fingerprint)
+    };
+    let expected_identity_key = cached_identity.identity_key.clone();
+    cached_identity.identity_key[0] ^= 1;
+
+    let alice_dir = TempDir::new().unwrap();
+    let mut cache = OmemoStorage::new(Some(alice_dir.path().to_path_buf())).unwrap();
+    cache
+        .save_device_list(&DeviceListEntry {
+            jid: peer_jid.to_string(),
+            device_ids: vec![DeviceId::from(42u32)],
+            last_update: 0,
+        })
+        .unwrap();
+    cache
+        .save_fetched_identity(&peer_jid, &cached_identity, "old fingerprint")
+        .unwrap();
+    cache
+        .set_trust_level(&peer_jid, device_id, TrustLevel::Verified)
+        .unwrap();
+    server.set_roster("alice@example.com", &[peer_jid.as_str()]);
+
+    let (mut alice, _alice_msgs) = XMPPClient::new();
+    alice.omemo_dir = Some(alice_dir.path().to_path_buf());
+    alice
+        .connect_with_transport(
+            server.register("alice@example.com"),
+            "alice@example.com".to_string(),
+            "example.com",
+        )
+        .await
+        .unwrap();
+    alice.initialize_client().await.unwrap();
+
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let devices = cache.load_device_list(&peer_jid).unwrap().device_ids;
+            let identity = cache.load_device_identity(&peer_jid, device_id).unwrap();
+            if devices == vec![device_id] && identity.identity_key == expected_identity_key {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("startup must refresh both cached device IDs and published keys");
+
+    assert_eq!(
+        cache.get_trust_level(&peer_jid, device_id).unwrap(),
+        TrustLevel::Untrusted
+    );
+    assert_eq!(
+        cache.get_pending_device_verification(&peer_jid).unwrap(),
+        Some((device_id, expected_fingerprint))
+    );
+    alice.shutdown().await.unwrap();
+    bob.shutdown().await.unwrap();
+}
+
 /// Two connected, initialized clients can establish an OMEMO session:
 /// alice encrypts a message → it is delivered to bob → bob decrypts it.
 #[tokio::test]

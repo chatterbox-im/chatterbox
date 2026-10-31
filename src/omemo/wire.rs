@@ -13,7 +13,7 @@
 //! PreKeySignalMessage (serialized):
 //!   version_byte (0x33) || protobuf(PreKeySignalMessage)
 
-use log::{debug, warn};
+use log::debug;
 
 /// Current Signal protocol version byte: current=3, max=3 → 0x33
 const VERSION_BYTE: u8 = 0x33;
@@ -350,7 +350,7 @@ impl SignalMessage {
                             offset += 4;
                         }
                         _ => {
-                            warn!("Unknown wire type {} in SignalMessage", wire_type);
+                            debug!("Unknown wire type {} in SignalMessage", wire_type);
                             return None;
                         }
                     }
@@ -494,7 +494,7 @@ impl PreKeySignalMessage {
                             offset += 4;
                         }
                         _ => {
-                            warn!("Unknown wire type {} in PreKeySignalMessage", wire_type);
+                            debug!("Unknown wire type {} in PreKeySignalMessage", wire_type);
                             return None;
                         }
                     }

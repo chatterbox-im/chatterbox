@@ -55,6 +55,54 @@ mod tests {
         assert_eq!(dec, "still works");
     }
 
+    #[tokio::test]
+    async fn archived_mac_failure_preserves_active_session() {
+        let alice_jid = "alice@example.com";
+        let bob_jid = "bob@example.com";
+        let alice_did = DeviceId::from(1u32);
+        let bob_did = DeviceId::from(2u32);
+
+        let (mut alice, _ad, mut bob, _bd, _ps) =
+            make_pair(alice_jid, 1, bob_jid, 2).await;
+
+        let first = alice.encrypt_message(bob_jid, "first").await.unwrap();
+        bob.decrypt_message(alice_jid, alice_did, &first)
+            .await
+            .unwrap();
+
+        let mut replay = alice.encrypt_message(bob_jid, "archived").await.unwrap();
+        let encrypted_key = replay
+            .encrypted_keys
+            .get_mut(&bob_did)
+            .expect("message must contain Bob's encrypted key");
+        *encrypted_key.last_mut().expect("encrypted key must not be empty") ^= 0xFF;
+
+        let error = bob
+            .decrypt_archived_message(alice_jid, alice_did, &replay)
+            .await
+            .expect_err("corrupted archived message must fail");
+        assert!(
+            error.to_string().contains("MAC verification failed"),
+            "expected MAC failure, got: {error}"
+        );
+
+        let session_key = (bjid(alice_jid), alice_did);
+        assert!(
+            matches!(
+                bob.sessions.get(&session_key),
+                Some(OmemoSessionState::Active(_))
+            ),
+            "archived replay failure must preserve the active session"
+        );
+
+        let next = alice.encrypt_message(bob_jid, "next").await.unwrap();
+        let plaintext = bob
+            .decrypt_message(alice_jid, alice_did, &next)
+            .await
+            .expect("live traffic must continue after an archived replay failure");
+        assert_eq!(plaintext, "next");
+    }
+
     // ── AEAD failure increments recovery_attempt ──────────────────────────────
 
     /// handle_aead_decryption_failure increments the attempt counter each call.
@@ -107,7 +155,7 @@ mod tests {
         let msg = alice.encrypt_message(bob_jid, "stale").await.unwrap();
 
         // Bob rotates the SPK past history depth so the message can no longer decrypt.
-        bob.prekey_rotation_config.check_interval = 0;
+        bob.prekey_rotation_config.max_signed_prekey_age = 0;
         for _ in 0..8 {
             bob.prekey_rotation_config.last_rotation = 0;
             bob.check_and_rotate_prekeys().await.unwrap();
@@ -123,4 +171,3 @@ mod tests {
         );
     }
 }
-

@@ -44,7 +44,10 @@ fn count_unsafe_lines() -> u32 {
                         .map(|s| {
                             s.lines()
                                 .filter(|l| {
-                                    l.contains("unsafe") && !l.contains("forbid(unsafe_code)")
+                                    let code = l.split("//").next().unwrap_or("");
+                                    code.contains("unsafe")
+                                        && !l.contains("forbid(unsafe_code)")
+                                        && !l.contains("deny(unsafe_code)")
                                 })
                                 .count() as u32
                         })
