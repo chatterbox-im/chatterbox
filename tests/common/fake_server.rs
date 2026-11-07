@@ -23,6 +23,7 @@ use xmpp_parsers::minidom::Element;
 struct State {
     /// Last-published item per (jid, node): raw XML string of the <item> element.
     pep_nodes: HashMap<(String, String), String>,
+    rosters: HashMap<String, Vec<String>>,
     /// All stanzas received from each client, for assertions.
     transcript: Vec<(String, Element)>,
 }
@@ -99,7 +100,7 @@ impl FakeServer {
             }
         });
 
-        TransportHandle { stanza_tx, event_rx }
+        TransportHandle::from_channels(stanza_tx, event_rx)
     }
 
     // ── Assertion helpers ─────────────────────────────────────────────────
@@ -126,6 +127,14 @@ impl FakeServer {
     pub fn pep_node(&self, jid: &str, node: &str) -> Option<String> {
         let key = (bare_jid(jid), node.to_string());
         self.state.lock().unwrap().pep_nodes.get(&key).cloned()
+    }
+
+    /// Set the contacts returned by an account's roster query.
+    pub fn set_roster(&self, jid: &str, contacts: &[&str]) {
+        self.state.lock().unwrap().rosters.insert(
+            bare_jid(jid),
+            contacts.iter().map(|contact| bare_jid(contact)).collect(),
+        );
     }
 }
 
@@ -230,6 +239,23 @@ fn handle_iq(
 
     if let Some(pubsub) = iq.get_child("pubsub", "http://jabber.org/protocol/pubsub") {
         handle_pubsub_iq(state, acc, from_jid, iq_type, &iq_id, pubsub);
+    } else if iq_type == "get" && iq.get_child("query", "jabber:iq:roster").is_some() {
+        let contacts = state
+            .lock()
+            .unwrap()
+            .rosters
+            .get(&bare_jid(from_jid))
+            .cloned()
+            .unwrap_or_default();
+        let mut query = Element::builder("query", "jabber:iq:roster").build();
+        for jid in contacts {
+            query.append_child(
+                Element::builder("item", "jabber:iq:roster")
+                    .attr("jid".try_into().unwrap(), jid)
+                    .build(),
+            );
+        }
+        let _ = acc.event_tx.send(iq_result_with_body(&from, &iq_id, query));
     } else if iq.get_child("enable", "urn:xmpp:carbons:2").is_some()
         || iq.get_child("disable", "urn:xmpp:carbons:2").is_some()
     {

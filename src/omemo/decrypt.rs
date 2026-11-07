@@ -12,6 +12,12 @@ use crate::omemo::protocol::{self, OmemoMessage};
 use crate::omemo::session::{self, OmemoSession, OmemoSessionState};
 use crate::omemo::{OmemoError, OmemoManager};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DecryptionFailurePolicy {
+    RecoverSession,
+    PreserveSession,
+}
+
 impl OmemoManager {
     /// Decrypt a message from a sender
     pub async fn decrypt_message(
@@ -19,6 +25,39 @@ impl OmemoManager {
         sender: &str,
         device_id: DeviceId,
         message: &OmemoMessage,
+    ) -> Result<String, OmemoError> {
+        self.decrypt_message_with_policy(
+            sender,
+            device_id,
+            message,
+            DecryptionFailurePolicy::RecoverSession,
+        )
+        .await
+    }
+
+    /// Decrypt an archived message without allowing replay failures to reset
+    /// the session used for live traffic.
+    pub(crate) async fn decrypt_archived_message(
+        &mut self,
+        sender: &str,
+        device_id: DeviceId,
+        message: &OmemoMessage,
+    ) -> Result<String, OmemoError> {
+        self.decrypt_message_with_policy(
+            sender,
+            device_id,
+            message,
+            DecryptionFailurePolicy::PreserveSession,
+        )
+        .await
+    }
+
+    async fn decrypt_message_with_policy(
+        &mut self,
+        sender: &str,
+        device_id: DeviceId,
+        message: &OmemoMessage,
+        failure_policy: DecryptionFailurePolicy,
     ) -> Result<String, OmemoError> {
         info!("Decrypting message from {}:{}", sender, device_id);
 
@@ -54,6 +93,32 @@ impl OmemoManager {
             .get(&(bare_jid.clone(), device_id))
             .map(|s| s.is_initialized())
             .unwrap_or(false);
+
+        // If both endpoints initiated a session before seeing the other's
+        // PreKey, deterministically keep the initiation from the lower address.
+        // Without this tie-break both sides replace their outbound session with
+        // the other's inbound session and end up on opposite ratchets.
+        let local_jid = Self::normalize_jid_to_bare(&self.local_jid);
+        let local_initiation_wins = incoming_prekey.is_some()
+            && local_jid == bare_jid
+            && matches!(
+                self.sessions.get(&(bare_jid.clone(), device_id)),
+                Some(OmemoSessionState::InitiatorAwaitingReply { session, .. })
+                    if session.ratchet_state.send_message_number == 1
+            )
+            && (local_jid.as_str(), self.device_id.get()) < (bare_jid.as_str(), device_id.get());
+
+        if local_initiation_wins {
+            info!(
+                "Ignoring crossed PreKey from {}:{}; retaining winning local initiation from {}:{}",
+                bare_jid, device_id, local_jid, self.device_id
+            );
+            return Err(OmemoError::SessionError(
+                session::SessionError::InvalidStateError(
+                    "Crossed PreKey lost deterministic session tie-break".to_string(),
+                ),
+            ));
+        }
 
         // Decide whether this PreKey header should actually trigger a fresh
         // X3DH exchange.
@@ -391,6 +456,9 @@ impl OmemoManager {
                     (data, Some(ratchet_state))
                 }
                 Err(session_error) => {
+                    if failure_policy == DecryptionFailurePolicy::PreserveSession {
+                        return Err(OmemoError::SessionError(session_error));
+                    }
                     return self
                         .handle_decryption_failure(sender_str, device_id.get(), session_error)
                         .await;
@@ -528,8 +596,11 @@ impl OmemoManager {
                             .max()
                             .unwrap_or(0)
                             .max(opk_id);
-                        let to_generate =
-                            self.prekey_rotation_config.min_one_time_prekeys - remaining;
+                        let target = self
+                            .prekey_rotation_config
+                            .target_one_time_prekeys
+                            .max(self.prekey_rotation_config.min_one_time_prekeys);
+                        let to_generate = target.saturating_sub(remaining);
                         for i in 1..=to_generate {
                             if let Ok(key_pair) = protocol::X3DHProtocol::generate_key_pair() {
                                 bundle.one_time_pre_key_pairs.insert(max_id + i, key_pair);

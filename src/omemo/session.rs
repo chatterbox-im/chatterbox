@@ -32,33 +32,6 @@ pub enum SessionError {
     InvalidStateError(String),
 }
 
-/// Configuration for PreKey rotation
-#[derive(Debug, Clone)]
-pub struct PreKeyRotationConfig {
-    /// Maximum age of a signed PreKey in seconds
-    pub max_signed_prekey_age: u64,
-
-    /// Number of one-time PreKeys to maintain
-    pub min_one_time_prekeys: u32,
-
-    /// How often to check for PreKey rotation (in seconds)
-    pub check_interval: u64,
-
-    /// Last rotation timestamp (in seconds since epoch)
-    pub last_rotation: u64,
-}
-
-impl Default for PreKeyRotationConfig {
-    fn default() -> Self {
-        Self {
-            max_signed_prekey_age: 7 * 24 * 60 * 60, // 7 days
-            min_one_time_prekeys: 20,
-            check_interval: 24 * 60 * 60, // 1 day
-            last_rotation: 0,
-        }
-    }
-}
-
 /// A session for an OMEMO Double Ratchet
 #[derive(Debug)]
 pub struct OmemoSession {

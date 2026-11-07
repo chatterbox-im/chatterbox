@@ -766,7 +766,7 @@ impl super::XMPPClient {
 
             // Try to decrypt the message
             match manager
-                .decrypt_message(
+                .decrypt_archived_message(
                     bare_sender_jid,
                     DeviceId::from(sender_device_id),
                     &crate::omemo::protocol::OmemoMessage {
@@ -793,13 +793,9 @@ impl super::XMPPClient {
                 Err(e) => {
                     // Ratchet replay errors ("counter too old", "MAC verification failed")
                     // are expected when MAM re-delivers already-processed messages.
-                    // Log at WARN — these are not bugs, just normal MAM catch-up noise.
-                    // Also reset the failure counter so replays never accumulate into a
-                    // session reset that would destroy a working live-message session.
+                    // Archived decryption uses a non-recovering path, so this cannot
+                    // reset the session used by live traffic.
                     warn!("Failed to decrypt OMEMO message (likely a MAM replay): {}", e);
-                    // Reuse the guard we already hold — acquiring the same lock again
-                    // from the same task would deadlock on Tokio's async Mutex.
-                    let _ = manager.reset_failure_count(sender_jid, sender_device_id).await;
                     return Err(anyhow!("Failed to decrypt OMEMO message: {}", e));
                 }
             }

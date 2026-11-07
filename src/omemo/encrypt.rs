@@ -2,6 +2,7 @@
 //! OMEMO message encryption
 
 use log::{debug, error, info, warn};
+use rand::{rngs::OsRng, Rng};
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 use tokio::time::{timeout, Duration};
@@ -13,6 +14,17 @@ use crate::omemo::keys::{AesGcmKey, GcmNonce};
 use crate::omemo::protocol::{self, DeviceIdentity, OmemoMessage};
 use crate::omemo::session::{self, OmemoSession, OmemoSessionState};
 use crate::omemo::{EncryptionVerificationError, OmemoError, OmemoManager};
+
+pub(crate) fn select_random_prekey<R: Rng + ?Sized>(
+    prekeys: &[protocol::PreKeyBundle],
+    rng: &mut R,
+) -> Option<protocol::PreKeyBundle> {
+    if prekeys.is_empty() {
+        None
+    } else {
+        Some(prekeys[rng.gen_range(0..prekeys.len())].clone())
+    }
+}
 
 impl OmemoManager {
     async fn cached_or_session_device_ids_for(&self, bare_jid: &BareJid) -> Vec<DeviceId> {
@@ -161,7 +173,7 @@ impl OmemoManager {
             .fetch_device_identity_from_server(&bare_jid, remote_device_id)
             .await
         {
-            Ok(identity) => identity,
+            Ok((identity, _)) => identity,
             Err(e) => {
                 warn!(
                     "Failed to fetch fresh bundle for {} of {}:{}: {} — falling back to cache",
@@ -187,7 +199,7 @@ impl OmemoManager {
                 // Cached bundle may be stale; re-fetch and verify the fresh one.
                 warn!("Signed prekey verification failed for {}:{} with cached bundle, re-fetching from server", bare_jid, remote_device_id);
                 match self.fetch_device_identity_from_server(&bare_jid, remote_device_id).await {
-                    Ok(fresh) => fresh.verify().map_err(|e| OmemoError::ProtocolError(
+                    Ok((fresh, _)) => fresh.verify().map_err(|e| OmemoError::ProtocolError(
                         format!("Signed prekey signature invalid for {}:{} even after re-fetch — possible MITM: {}", bare_jid, remote_device_id, e)
                     ))?,
                     Err(e) => return Err(OmemoError::ProtocolError(
@@ -213,11 +225,8 @@ impl OmemoManager {
 
         // Store the remote device's PreKey IDs so the PreKeySignalMessage can reference them
         let remote_spk_id = remote_identity.signed_pre_key.id;
-        let remote_opk_id = if remote_identity.pre_keys.is_empty() {
-            None
-        } else {
-            Some(remote_identity.pre_keys[0].id)
-        };
+        let selected_remote_opk = select_random_prekey(&remote_identity.pre_keys, &mut OsRng);
+        let remote_opk_id = selected_remote_opk.as_ref().map(|prekey| prekey.id);
         self.remote_prekey_ids
             .insert(device_key, (remote_spk_id, remote_opk_id, Instant::now()));
 
@@ -228,11 +237,7 @@ impl OmemoManager {
             crypto::ensure_montgomery_form(&remote_identity.identity_key)
                 .map_err(|e| OmemoError::CryptoError(e))?,
             remote_identity.signed_pre_key.public_key.clone(),
-            if remote_identity.pre_keys.is_empty() {
-                None
-            } else {
-                Some(remote_identity.pre_keys[0].public_key.clone())
-            },
+            selected_remote_opk.map(|prekey| prekey.public_key),
             crate::omemo::keys::EphemeralPrivateKey(ephemeral_key_pair.private_key),
             self.device_id,
         )?;
@@ -312,14 +317,15 @@ impl OmemoManager {
         // If not in storage, fetch from server
         self.fetch_device_identity_from_server(remote_jid, device_id)
             .await
+            .map(|(identity, _)| identity)
     }
 
-    /// Fetch a device identity directly from the server, bypassing and replacing the cache
-    async fn fetch_device_identity_from_server(
+    /// Fetch a fresh device identity and report whether its pinned identity key changed.
+    pub(crate) async fn fetch_device_identity_from_server(
         &self,
         remote_jid: &BareJid,
         device_id: DeviceId,
-    ) -> Result<DeviceIdentity, OmemoError> {
+    ) -> Result<(DeviceIdentity, bool), OmemoError> {
         info!(
             "Fetching device bundle from server for {}:{}",
             remote_jid, device_id
@@ -365,7 +371,7 @@ impl OmemoManager {
             );
         }
 
-        Ok(identity)
+        Ok((identity, key_changed))
     }
 
     /// Encrypt a message for a recipient
