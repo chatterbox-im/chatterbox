@@ -44,6 +44,7 @@ pub async fn run_app(
         }
     };
     chat_ui.set_os_notifications_enabled(app_settings.os_notifications_enabled);
+    chat_ui.set_theme(app_settings.theme);
     // The connection has already tried to enable carbons by this point.
     chat_ui.set_carbons_enabled(xmpp_client.is_carbons_enabled());
 
@@ -1011,10 +1012,6 @@ async fn handle_user_command(
             handle_show_device_fingerprints(chat_ui, terminal, xmpp_client).await;
         }
 
-        UiCommand::ToggleOmemoTrust { contact } => {
-            handle_toggle_omemo_trust(chat_ui, terminal, xmpp_client, &contact).await;
-        }
-
         UiCommand::SetDeviceTrust { jid, device_id, level } => {
             if let Err(e) = xmpp_client
                 .set_single_device_trust(&jid, DeviceId::from(device_id), level)
@@ -1130,6 +1127,15 @@ async fn handle_user_command(
                     "me",
                     &format!("Failed to save notification setting: {}", e),
                 ));
+            }
+        }
+
+        UiCommand::SetTheme { theme } => {
+            chat_ui.set_theme(theme);
+            app_settings.theme = theme;
+            if let Err(e) = save_app_settings(app_settings) {
+                error!("Failed to save theme setting: {}", e);
+                chat_ui.show_toast("Could not save theme. It will only apply for this session.");
             }
         }
     }
@@ -1265,40 +1271,6 @@ async fn handle_show_device_fingerprints(
             chat_ui.add_message(create_system_message(
                 "me",
                 "Timed out while retrieving device IDs",
-            ));
-        }
-    }
-}
-
-async fn handle_toggle_omemo_trust(
-    chat_ui: &mut ChatUI,
-    terminal: &mut crate::ui::Terminal<crate::ui::CrosstermBackend<io::Stdout>>,
-    xmpp_client: &mut XMPPClient,
-    recipient: &str,
-) {
-    info!("Toggling OMEMO trust for {}", recipient);
-    chat_ui.add_message(create_system_message(
-        recipient,
-        "Toggling trust status for all OMEMO devices...",
-    ));
-    let _ = terminal.draw(|f| chat_ui.draw(f));
-
-    match xmpp_client.toggle_omemo_trust(recipient).await {
-        Ok(is_now_trusted) => {
-            let status_msg = if is_now_trusted {
-                format!("All OMEMO devices for {} are now TRUSTED", recipient)
-            } else {
-                format!("All OMEMO devices for {} are now UNTRUSTED", recipient)
-            };
-            chat_ui.remove_last_message();
-            chat_ui.add_message(create_system_message(recipient, &status_msg));
-        }
-        Err(e) => {
-            error!("Failed to toggle OMEMO trust: {}", e);
-            chat_ui.remove_last_message();
-            chat_ui.add_message(create_system_message(
-                recipient,
-                &format!("Failed to toggle OMEMO trust: {}", e),
             ));
         }
     }

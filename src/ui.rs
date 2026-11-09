@@ -8,7 +8,10 @@ use log::debug; // Add the debug import
 use log::info; // Add the log import
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table, TableState, Wrap},
+    widgets::{
+        Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState,
+        Wrap,
+    },
     Frame,
 };
 use std::{
@@ -25,6 +28,8 @@ use std::{
 use textwrap::{wrap, Options, WordSplitter};
 use tui_input::{backend::crossterm::EventHandler, Input};
 use uuid::Uuid;
+
+use crate::credentials::Theme;
 
 // Use the new Message type from the models module and TypingStatus from xmpp
 use chatterbox::models::{ContactStatus, DeliveryStatus, Message};
@@ -107,6 +112,8 @@ pub struct ChatUI {
     carbons_enabled: bool,
     terminal_focused: bool,
     quit_confirmation: bool,
+    theme: Theme,
+    theme_picker: Option<ThemePicker>,
     key_confirmation: Option<KeyConfirmation>, // Add this field for key confirmation popup
     contact_add_dialog: Option<ContactAddDialog>, // Add this field for adding new contacts
     contact_remove_dialog: Option<ContactRemoveDialog>, // Add this field for remove confirmation
@@ -152,6 +159,11 @@ struct HelpDialog {
     // No additional state needed for the help dialog
 }
 
+struct ThemePicker {
+    original_theme: Theme,
+    selected: usize,
+}
+
 // Device fingerprints / trust table dialog (opened with Ctrl+F)
 struct DeviceFingerprintsDialog {
     /// Contact devices: (device_id, fingerprint, trust).
@@ -187,6 +199,54 @@ enum Tab {
     Contacts,
 }
 
+impl Theme {
+    const ALL: [Self; 3] = [Self::Dark, Self::Light, Self::Sepia];
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Dark => "Dark",
+            Self::Light => "Light",
+            Self::Sepia => "Sepia",
+        }
+    }
+
+    fn base_style(self) -> Style {
+        match self {
+            // Preserve the existing terminal defaults and accent colors.
+            Self::Dark => Style::default(),
+            Self::Light => Style::default().fg(Color::Black).bg(Color::White),
+            // Closest 256-color match to Solarized Light's cream (#fdf6e3).
+            // Indexed colors also work in terminals without true-color support.
+            Self::Sepia => Style::default().fg(Color::Black).bg(Color::Indexed(230)),
+        }
+    }
+
+    fn foreground(self, dark_color: Color) -> Style {
+        match self {
+            Self::Dark => Style::default().fg(dark_color),
+            Self::Light | Self::Sepia => self.base_style(),
+        }
+    }
+
+    fn focused_border_style(self) -> Style {
+        match self {
+            Self::Dark => self.foreground(Color::Yellow),
+            Self::Light | Self::Sepia => self.base_style().add_modifier(Modifier::BOLD),
+        }
+    }
+
+    fn selection_style(self, dark_background: Color) -> Style {
+        match self {
+            Self::Dark => Style::default()
+                .bg(dark_background)
+                .add_modifier(Modifier::BOLD),
+            Self::Light | Self::Sepia => self
+                .base_style()
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        }
+    }
+}
+
 impl ChatUI {
     pub fn new() -> Self {
         ChatUI {
@@ -203,6 +263,8 @@ impl ChatUI {
             carbons_enabled: false,
             terminal_focused: true,
             quit_confirmation: false,
+            theme: Theme::default(),
+            theme_picker: None,
             key_confirmation: None,                  // Initialize to None
             contact_add_dialog: None,                // Initialize to None
             contact_remove_dialog: None,             // Initialize to None
@@ -468,6 +530,31 @@ impl ChatUI {
                 }
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                     self.quit_confirmation = false;
+                }
+                _ => {}
+            }
+            return Ok(None);
+        }
+
+        if let Some(dialog) = &mut self.theme_picker {
+            match key.code {
+                KeyCode::Up => {
+                    dialog.selected = dialog.selected.saturating_sub(1);
+                    self.theme = Theme::ALL[dialog.selected];
+                }
+                KeyCode::Down => {
+                    dialog.selected = (dialog.selected + 1).min(Theme::ALL.len() - 1);
+                    self.theme = Theme::ALL[dialog.selected];
+                }
+                KeyCode::Enter => {
+                    self.theme_picker = None;
+                    return Ok(Some(crate::commands::UiCommand::SetTheme {
+                        theme: self.theme,
+                    }));
+                }
+                KeyCode::Esc => {
+                    self.theme = dialog.original_theme;
+                    self.theme_picker = None;
                 }
                 _ => {}
             }
@@ -748,15 +835,16 @@ impl ChatUI {
                 self.add_message(Message::system("me", status_msg));
                 return Ok(Some(crate::commands::UiCommand::ToggleOsNotifications));
             }
-            KeyCode::Char('t') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
-                // Toggle trust for the current contact's OMEMO keys
-                if self.has_active_contact() {
-                    let current_contact = self.contact.clone();
-
-                    // Request a trust toggle operation from the main app
-                    // We'll use a special message format that will be handled in main.rs
-                    return Ok(Some(crate::commands::UiCommand::ToggleOmemoTrust { contact: current_contact }));
-                }
+            KeyCode::Char('t') | KeyCode::Char('T')
+                if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
+            {
+                self.theme_picker = Some(ThemePicker {
+                    original_theme: self.theme,
+                    selected: Theme::ALL
+                        .iter()
+                        .position(|theme| *theme == self.theme)
+                        .unwrap_or(0),
+                });
             }
             KeyCode::Char('a') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
                 // Show add contact dialog
@@ -1036,6 +1124,8 @@ impl ChatUI {
 
     pub fn draw(&self, frame: &mut Frame) {
         let size = frame.area();
+        let theme = self.theme;
+        frame.render_widget(Block::default().style(theme.base_style()), size);
 
         // Create a layout with 3 horizontal sections
         let chunks = Layout::default()
@@ -1097,7 +1187,7 @@ impl ChatUI {
                 .title("Contacts (Tab to focus)")
                 .borders(Borders::ALL)
                 .border_style(match self.active_tab {
-                    Tab::Contacts => Style::default().fg(Color::Yellow),
+                    Tab::Contacts => theme.focused_border_style(),
                     _ => Style::default(),
                 }),
         );
@@ -1126,7 +1216,7 @@ impl ChatUI {
             .title(input_title)
             .borders(Borders::ALL)
             .border_style(match self.active_tab {
-                Tab::Messages => Style::default().fg(Color::Yellow),
+                Tab::Messages => theme.focused_border_style(),
                 _ => Style::default(),
             });
 
@@ -1144,9 +1234,9 @@ impl ChatUI {
             "disabled"
         };
         let omemo_status_style = if self.omemo_enabled {
-            Style::default().fg(Color::Green)
+            theme.foreground(Color::Green)
         } else {
-            Style::default().fg(Color::Red)
+            theme.foreground(Color::Red)
         };
         let notification_status_text = if self.os_notifications_enabled {
             "on"
@@ -1154,25 +1244,25 @@ impl ChatUI {
             "off"
         };
         let notification_status_style = if self.os_notifications_enabled {
-            Style::default().fg(Color::Green)
+            theme.foreground(Color::Green)
         } else {
-            Style::default().fg(Color::Red)
+            theme.foreground(Color::Red)
         };
 
         let help_spans = vec![
             Span::styled(
-                " ESC confirm quit | TAB switch | Ctrl+H help | Ctrl+A add | Ctrl+O OMEMO [",
-                Style::default().fg(Color::Gray),
+                " ESC confirm quit | TAB switch | Ctrl+H help | Ctrl+T themes | Ctrl+A add | Ctrl+O OMEMO [",
+                theme.foreground(Color::Gray),
             ),
             Span::styled(omemo_status_text, omemo_status_style),
             Span::styled(
                 "] | Ctrl+N notifications [",
-                Style::default().fg(Color::Gray),
+                theme.foreground(Color::Gray),
             ),
             Span::styled(notification_status_text, notification_status_style),
             Span::styled(
                 "] | ↑/↓ reply | Fn+↑/↓ scroll",
-                Style::default().fg(Color::Gray),
+                theme.foreground(Color::Gray),
             ),
         ];
 
@@ -1180,33 +1270,36 @@ impl ChatUI {
         frame.render_widget(help, chat_chunks[2]);
 
         // Set cursor position
-        if matches!(self.active_tab, Tab::Messages) && !self.quit_confirmation {
+        if matches!(self.active_tab, Tab::Messages)
+            && !self.quit_confirmation
+            && self.theme_picker.is_none()
+        {
             frame.set_cursor_position(input_cursor);
         }
 
         // Draw key confirmation popup if active
         if let Some(key_conf) = &self.key_confirmation {
-            draw_key_confirmation(frame, key_conf, size);
+            draw_key_confirmation(frame, key_conf, size, theme);
         }
 
         // Draw add contact dialog if active
         if let Some(dialog) = &self.contact_add_dialog {
-            draw_add_contact_dialog(frame, dialog, size);
+            draw_add_contact_dialog(frame, dialog, size, theme);
         }
 
         // Draw contact remove dialog if active
         if let Some(dialog) = &self.contact_remove_dialog {
-            draw_contact_remove_dialog(frame, dialog, size);
+            draw_contact_remove_dialog(frame, dialog, size, theme);
         }
 
         // Draw help dialog if active
         if let Some(_) = &self.help_dialog {
-            draw_help_dialog(frame, size);
+            draw_help_dialog(frame, size, theme);
         }
 
         // Draw device fingerprints dialog if active
         if let Some(dialog) = &self.device_fingerprints_dialog {
-            draw_device_fingerprints_dialog(frame, dialog, size);
+            draw_device_fingerprints_dialog(frame, dialog, size, theme);
         }
 
         // Draw friend request notification if active
@@ -1215,7 +1308,7 @@ impl ChatUI {
                 "UI: Friend request notification is active for contact: {}",
                 notification.contact
             );
-            draw_friend_request_notification(frame, notification, size);
+            draw_friend_request_notification(frame, notification, size, theme);
         } else {
             // This could spam the logs, so it's commented out, but useful for debugging
             // log::debug!("UI: No friend request notification active during this render");
@@ -1224,10 +1317,14 @@ impl ChatUI {
         // Toasts are deliberately rendered as passive overlays. They do not
         // change focus or participate in input handling, so the user can keep
         // typing while one is visible.
-        draw_toasts(frame, &self.toasts, chunks[1]);
+        draw_toasts(frame, &self.toasts, chunks[1], theme);
+
+        if let Some(dialog) = &self.theme_picker {
+            draw_theme_picker(frame, dialog, size, theme);
+        }
 
         if self.quit_confirmation {
-            draw_quit_confirmation(frame, size);
+            draw_quit_confirmation(frame, size, theme);
         }
     }
 
@@ -1366,6 +1463,11 @@ impl ChatUI {
         self.os_notifications_enabled = enabled;
     }
 
+    /// Applies a theme, including the saved choice before the first frame is drawn.
+    pub fn set_theme(&mut self, theme: Theme) {
+        self.theme = theme;
+    }
+
     /// Sets the message carbons state shown in the top-right corner.
     pub fn set_carbons_enabled(&mut self, enabled: bool) {
         self.carbons_enabled = enabled;
@@ -1444,11 +1546,11 @@ impl ChatUI {
 
 }
 
-/// Splits a text line into ratatui spans, styling any URLs with cyan + underline
+/// Splits a text line into ratatui spans, styling any URLs with an underline
 /// so Ghostty (and other terminals) can identify them as clickable links.
-fn spans_for_line(text: &str, base_style: Style) -> Line<'static> {
-    let link_style = Style::default()
-        .fg(Color::Cyan)
+fn spans_for_line(text: &str, base_style: Style, theme: Theme) -> Line<'static> {
+    let link_style = theme
+        .foreground(Color::Cyan)
         .add_modifier(Modifier::UNDERLINED);
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut rest = text;
@@ -1527,6 +1629,7 @@ fn input_scroll_and_cursor(input: &Input, area: Rect) -> (u16, Position) {
 }
 
 fn draw_messages(f: &mut Frame, messages: &[Message], area: Rect, ui: &ChatUI) {
+    let theme = ui.theme;
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -1598,32 +1701,30 @@ fn draw_messages(f: &mut Frame, messages: &[Message], area: Rect, ui: &ChatUI) {
             message.direction,
             chatterbox::models::Direction::System { .. }
         ) {
-            Style::default().fg(Color::Gray)
+            theme.foreground(Color::Gray)
         } else if matches!(
             message.direction,
             chatterbox::models::Direction::Outgoing { .. }
         ) {
             match message.delivery_status {
-                DeliveryStatus::Failed => Style::default().fg(Color::Red),
-                DeliveryStatus::Delivered | DeliveryStatus::Read => {
-                    Style::default().fg(Color::Green)
-                }
-                DeliveryStatus::Sent | DeliveryStatus::Sending => Style::default().fg(Color::Blue),
-                DeliveryStatus::Stored => Style::default().fg(Color::Yellow),
+                DeliveryStatus::Failed => theme.foreground(Color::Red),
+                DeliveryStatus::Delivered | DeliveryStatus::Read => theme.foreground(Color::Green),
+                DeliveryStatus::Sent | DeliveryStatus::Sending => theme.foreground(Color::Blue),
+                DeliveryStatus::Stored => theme.foreground(Color::Yellow),
                 _ => Style::default(),
             }
         } else {
             Style::default()
         };
         let line_style = if selected {
-            style.bg(Color::DarkGray).add_modifier(Modifier::BOLD)
+            style.patch(theme.selection_style(Color::DarkGray))
         } else {
             style
         };
 
         message_lines.extend(wrapped_lines.into_iter().map(|line| {
             if line.contains("http://") || line.contains("https://") {
-                spans_for_line(&line, line_style)
+                spans_for_line(&line, line_style, theme)
             } else {
                 Line::from(line).style(line_style)
             }
@@ -1693,14 +1794,14 @@ fn draw_messages(f: &mut Frame, messages: &[Message], area: Rect, ui: &ChatUI) {
     }
 
     let (carbons_status, carbons_style) = if ui.carbons_enabled {
-        ("enabled", Style::default().fg(Color::Green))
+        ("enabled", theme.foreground(Color::Green))
     } else {
-        ("disabled", Style::default().fg(Color::Red))
+        ("disabled", theme.foreground(Color::Red))
     };
     let carbons_indicator = Line::from(vec![
-        Span::styled("Ctrl+P carbons [", Style::default().fg(Color::Gray)),
+        Span::styled("Ctrl+P carbons [", theme.foreground(Color::Gray)),
         Span::styled(carbons_status, carbons_style),
-        Span::styled("]", Style::default().fg(Color::Gray)),
+        Span::styled("]", theme.foreground(Color::Gray)),
     ])
     .right_aligned();
     // ratatui draws left titles over right ones, so only show the indicator
@@ -1731,12 +1832,17 @@ fn draw_messages(f: &mut Frame, messages: &[Message], area: Rect, ui: &ChatUI) {
                     let dots = ".".repeat(dots_phase as usize);
                     Some((
                         format!(" ✍  {} is typing{}", display, dots),
-                        Style::default().fg(Color::DarkGray),
+                        theme.foreground(Color::DarkGray),
                     ))
                 }
                 TypingStatus::Paused => Some((
                     format!(" ✍  {} has paused", display),
-                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+                    match theme {
+                        Theme::Dark => theme
+                            .foreground(Color::DarkGray)
+                            .add_modifier(Modifier::DIM),
+                        Theme::Light | Theme::Sepia => theme.base_style(),
+                    },
                 )),
                 _ => None,
             }
@@ -1749,7 +1855,40 @@ fn draw_messages(f: &mut Frame, messages: &[Message], area: Rect, ui: &ChatUI) {
     }
 }
 
-fn draw_quit_confirmation(frame: &mut Frame, area: Rect) {
+fn draw_theme_picker(frame: &mut Frame, dialog: &ThemePicker, area: Rect, theme: Theme) {
+    let width = 46.min(area.width);
+    let height = (Theme::ALL.len() as u16 + 2).min(area.height);
+    let popup_area = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    );
+    let items = Theme::ALL
+        .into_iter()
+        .map(|theme| ListItem::new(theme.name()));
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .title("Themes")
+                .title_bottom(Line::from(" ↑/↓ preview · Enter select · Esc cancel ").centered())
+                .borders(Borders::ALL)
+                .border_style(theme.foreground(Color::Cyan))
+                .style(theme.base_style()),
+        )
+        .highlight_symbol("> ")
+        .highlight_style(
+            theme
+                .foreground(Color::White)
+                .patch(theme.selection_style(Color::Blue)),
+        );
+    let mut state = ListState::default().with_selected(Some(dialog.selected));
+
+    frame.render_widget(Clear, popup_area);
+    frame.render_stateful_widget(list, popup_area, &mut state);
+}
+
+fn draw_quit_confirmation(frame: &mut Frame, area: Rect, theme: Theme) {
     let width = 40.min(area.width);
     let height = 5.min(area.height);
     let popup_area = Rect::new(
@@ -1763,8 +1902,9 @@ fn draw_quit_confirmation(frame: &mut Frame, area: Rect) {
             Block::default()
                 .title("Confirm Quit")
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Red)),
+                .border_style(theme.foreground(Color::Red)),
         )
+        .style(theme.base_style())
         .alignment(Alignment::Center)
         .wrap(Wrap { trim: true });
 
@@ -1772,7 +1912,7 @@ fn draw_quit_confirmation(frame: &mut Frame, area: Rect) {
     frame.render_widget(prompt, popup_area);
 }
 
-fn draw_key_confirmation(f: &mut Frame, key_conf: &KeyConfirmation, area: Rect) {
+fn draw_key_confirmation(f: &mut Frame, key_conf: &KeyConfirmation, area: Rect, theme: Theme) {
     let device_info = key_conf
         .device_id
         .as_ref()
@@ -1817,7 +1957,8 @@ fn draw_key_confirmation(f: &mut Frame, key_conf: &KeyConfirmation, area: Rect) 
     let popup_block = Block::default()
         .title("Unrecognized OMEMO Key")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow));
+        .border_style(theme.foreground(Color::Yellow))
+        .style(theme.base_style());
 
     f.render_widget(Clear, popup_area);
     f.render_widget(popup_block, popup_area);
@@ -1838,7 +1979,7 @@ fn draw_key_confirmation(f: &mut Frame, key_conf: &KeyConfirmation, area: Rect) 
     f.render_widget(content_list, inner_area);
 }
 
-fn draw_add_contact_dialog(f: &mut Frame, dialog: &ContactAddDialog, area: Rect) {
+fn draw_add_contact_dialog(f: &mut Frame, dialog: &ContactAddDialog, area: Rect, theme: Theme) {
     // Calculate popup size and position (centered)
     let popup_width = 50.min(area.width - 4);
     let popup_height = 7.min(area.height - 4);
@@ -1852,7 +1993,8 @@ fn draw_add_contact_dialog(f: &mut Frame, dialog: &ContactAddDialog, area: Rect)
     let popup_block = Block::default()
         .title("Add New Contact")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow));
+        .border_style(theme.foreground(Color::Yellow))
+        .style(theme.base_style());
 
     f.render_widget(Clear, popup_area); // Clear the area first
     f.render_widget(popup_block, popup_area);
@@ -1893,7 +2035,7 @@ fn draw_add_contact_dialog(f: &mut Frame, dialog: &ContactAddDialog, area: Rect)
     // Display input field
     let input_block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Blue));
+        .border_style(theme.foreground(Color::Blue));
 
     let (input_scroll, input_cursor) = input_scroll_and_cursor(&dialog.input, chunks[1]);
     let input_widget = Paragraph::new(dialog.input.value())
@@ -1907,7 +2049,12 @@ fn draw_add_contact_dialog(f: &mut Frame, dialog: &ContactAddDialog, area: Rect)
     f.set_cursor_position(input_cursor);
 }
 
-fn draw_contact_remove_dialog(f: &mut Frame, dialog: &ContactRemoveDialog, area: Rect) {
+fn draw_contact_remove_dialog(
+    f: &mut Frame,
+    dialog: &ContactRemoveDialog,
+    area: Rect,
+    theme: Theme,
+) {
     // Calculate popup size and position (centered)
     let popup_width = 60.min(area.width - 4); // Increased from 50 to 60
     let popup_height = 8.min(area.height - 4); // Increased from 6 to 8
@@ -1921,7 +2068,8 @@ fn draw_contact_remove_dialog(f: &mut Frame, dialog: &ContactRemoveDialog, area:
     let popup_block = Block::default()
         .title("Confirm Contact Removal")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Red)); // Use red for warning
+        .border_style(theme.foreground(Color::Red))
+        .style(theme.base_style());
 
     f.render_widget(Clear, popup_area); // Clear the area first
     f.render_widget(popup_block, popup_area);
@@ -1957,7 +2105,7 @@ fn draw_contact_remove_dialog(f: &mut Frame, dialog: &ContactRemoveDialog, area:
     f.render_widget(content_list, inner_area);
 }
 
-fn draw_help_dialog(f: &mut Frame, area: Rect) {
+fn draw_help_dialog(f: &mut Frame, area: Rect, theme: Theme) {
     // Calculate popup size and position (centered)
     let popup_width = 80.min(area.width - 4);
     let popup_height = 30.min(area.height - 4);
@@ -1971,7 +2119,8 @@ fn draw_help_dialog(f: &mut Frame, area: Rect) {
     let popup_block = Block::default()
         .title("Keyboard Shortcuts")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(theme.foreground(Color::Cyan))
+        .style(theme.base_style());
 
     f.render_widget(Clear, popup_area); // Clear the area first
     f.render_widget(popup_block, popup_area);
@@ -1989,6 +2138,7 @@ fn draw_help_dialog(f: &mut Frame, area: Rect) {
         ("Tab", "Switch between Messages and Contacts"),
         ("Ctrl+S", "Toggle sidebar (contacts panel) visibility"),
         ("Ctrl+H", "Show this help dialog"),
+        ("Ctrl+T", "Choose a theme (live preview with ↑/↓)"),
         ("", ""),
         ("Contacts Navigation", ""),
         (
@@ -2007,7 +2157,6 @@ fn draw_help_dialog(f: &mut Frame, area: Rect) {
         ("", ""),
         ("Security", ""),
         ("Ctrl+O", "Toggle OMEMO encryption for current conversation"),
-        ("Ctrl+T", "Toggle trust for current contact's OMEMO keys"),
         (
             "Ctrl+P",
             "Toggle Message Carbons (sync messages between devices)",
@@ -2035,16 +2184,14 @@ fn draw_help_dialog(f: &mut Frame, area: Rect) {
                     // Category header
                     ListItem::new(Text::styled(
                         key.to_string(),
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD),
+                        theme.foreground(Color::Yellow).add_modifier(Modifier::BOLD),
                     ))
                 }
             } else {
                 // This is a shortcut entry
                 let formatted_key = format!("{:<10}", key);
                 let line = Line::from(vec![
-                    Span::styled(formatted_key, Style::default().fg(Color::Green)),
+                    Span::styled(formatted_key, theme.foreground(Color::Green)),
                     Span::raw(desc.to_string()),
                 ]);
                 ListItem::new(line)
@@ -2057,7 +2204,12 @@ fn draw_help_dialog(f: &mut Frame, area: Rect) {
     f.render_widget(shortcuts_list, inner_area);
 }
 
-fn draw_device_fingerprints_dialog(f: &mut Frame, dialog: &DeviceFingerprintsDialog, area: Rect) {
+fn draw_device_fingerprints_dialog(
+    f: &mut Frame,
+    dialog: &DeviceFingerprintsDialog,
+    area: Rect,
+    theme: Theme,
+) {
     // ── popup geometry ────────────────────────────────────────────────────────
     let popup_width = 84u16.min(area.width.saturating_sub(4));
     let contact_rows = dialog.contact_rows.len() as u16;
@@ -2074,7 +2226,8 @@ fn draw_device_fingerprints_dialog(f: &mut Frame, dialog: &DeviceFingerprintsDia
     let outer_block = Block::default()
         .title(" OMEMO Keys  ↑/↓ navigate · Space toggle trust · Esc close ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Blue));
+        .border_style(theme.foreground(Color::Blue))
+        .style(theme.base_style());
     f.render_widget(outer_block, popup_area);
 
     let inner = popup_area.inner(Margin {
@@ -2133,15 +2286,15 @@ fn draw_device_fingerprints_dialog(f: &mut Frame, dialog: &DeviceFingerprintsDia
     .split(inner);
 
     // ── contact-device table ──────────────────────────────────────────────────
-    let header_style = Style::default()
-        .fg(Color::Magenta)
+    let header_style = theme
+        .foreground(Color::Magenta)
         .add_modifier(Modifier::BOLD);
     let contact_title = dialog.contact_jid.as_deref().unwrap_or("Contact devices");
     let contact_rows_rendered: Vec<Row> = if dialog.contact_rows.is_empty() {
         vec![Row::new(vec![
             Cell::from(""),
             Cell::from("No OMEMO devices found for this contact")
-                .style(Style::default().fg(Color::DarkGray)),
+                .style(theme.foreground(Color::DarkGray)),
             Cell::from(""),
         ])]
     } else {
@@ -2153,7 +2306,7 @@ fn draw_device_fingerprints_dialog(f: &mut Frame, dialog: &DeviceFingerprintsDia
                 Row::new(vec![
                     Cell::from(dev.as_str()),
                     Cell::from(fmt_fp(fp, fp_width)),
-                    Cell::from(Span::styled(trust_text, Style::default().fg(trust_color))),
+                    Cell::from(Span::styled(trust_text, theme.foreground(trust_color))),
                 ])
             })
             .collect()
@@ -2171,28 +2324,25 @@ fn draw_device_fingerprints_dialog(f: &mut Frame, dialog: &DeviceFingerprintsDia
             Block::default()
                 .title(Span::styled(
                     contact_title,
-                    Style::default().fg(Color::Magenta),
+                    theme.foreground(Color::Magenta),
                 ))
                 .borders(Borders::NONE),
         )
         .row_highlight_style(
-            Style::default()
-                .bg(Color::Blue)
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
+            theme
+                .foreground(Color::White)
+                .patch(theme.selection_style(Color::Blue)),
         )
         .highlight_symbol(">> ");
 
     f.render_stateful_widget(contact_table, sections[0], &mut contact_state);
 
     // ── own-device table ──────────────────────────────────────────────────────
-    let own_header_style = Style::default()
-        .fg(Color::Cyan)
-        .add_modifier(Modifier::BOLD);
+    let own_header_style = theme.foreground(Color::Cyan).add_modifier(Modifier::BOLD);
     let own_rows_rendered: Vec<Row> = if dialog.own_rows.is_empty() {
         vec![Row::new(vec![
             Cell::from(""),
-            Cell::from("No own devices found").style(Style::default().fg(Color::DarkGray)),
+            Cell::from("No own devices found").style(theme.foreground(Color::DarkGray)),
             Cell::from(""),
         ])]
     } else {
@@ -2206,9 +2356,7 @@ fn draw_device_fingerprints_dialog(f: &mut Frame, dialog: &DeviceFingerprintsDia
                     dev.clone()
                 };
                 let dev_style = if *is_current {
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD)
+                    theme.foreground(Color::Yellow).add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
                 };
@@ -2220,7 +2368,7 @@ fn draw_device_fingerprints_dialog(f: &mut Frame, dialog: &DeviceFingerprintsDia
                 Row::new(vec![
                     Cell::from(Span::styled(dev_text, dev_style)),
                     Cell::from(fmt_fp(fp, fp_width)),
-                    Cell::from(Span::styled(trust_text, Style::default().fg(trust_color))),
+                    Cell::from(Span::styled(trust_text, theme.foreground(trust_color))),
                 ])
             })
             .collect()
@@ -2241,15 +2389,14 @@ fn draw_device_fingerprints_dialog(f: &mut Frame, dialog: &DeviceFingerprintsDia
             Block::default()
                 .title(Span::styled(
                     "Your devices  (* = this device, cannot change trust)",
-                    Style::default().fg(Color::Cyan),
+                    theme.foreground(Color::Cyan),
                 ))
                 .borders(Borders::NONE),
         )
         .row_highlight_style(
-            Style::default()
-                .bg(Color::Blue)
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
+            theme
+                .foreground(Color::White)
+                .patch(theme.selection_style(Color::Blue)),
         )
         .highlight_symbol(">> ");
 
@@ -2260,7 +2407,7 @@ fn draw_device_fingerprints_dialog(f: &mut Frame, dialog: &DeviceFingerprintsDia
         let hint = Paragraph::new(
             "Space/Enter to toggle trust for selected contact device  ·  Esc to close",
         )
-        .style(Style::default().fg(Color::DarkGray));
+        .style(theme.foreground(Color::DarkGray));
         f.render_widget(hint, sections[3]);
     }
 }
@@ -2269,6 +2416,7 @@ fn draw_friend_request_notification(
     f: &mut Frame,
     notification: &FriendRequestNotification,
     area: Rect,
+    theme: Theme,
 ) {
     // Calculate popup size and position (top-right corner)
     let popup_width = 40.min(area.width - 4);
@@ -2290,7 +2438,8 @@ fn draw_friend_request_notification(
     let popup_block = Block::default()
         .title("Friend Request Accepted")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Green));
+        .border_style(theme.foreground(Color::Green))
+        .style(theme.base_style());
 
     f.render_widget(Clear, popup_area); // Clear the area first
     f.render_widget(popup_block, popup_area);
@@ -2314,12 +2463,12 @@ fn draw_friend_request_notification(
             .map(|s| ListItem::new(s.as_str()))
             .collect::<Vec<_>>(),
     )
-    .style(Style::default().fg(Color::Green));
+    .style(theme.foreground(Color::Green));
 
     f.render_widget(content_list, inner_area);
 }
 
-fn draw_toasts(f: &mut Frame, toasts: &[Toast], area: Rect) {
+fn draw_toasts(f: &mut Frame, toasts: &[Toast], area: Rect, theme: Theme) {
     if toasts.is_empty() || area.width < 12 || area.height < 5 {
         return;
     }
@@ -2346,9 +2495,9 @@ fn draw_toasts(f: &mut Frame, toasts: &[Toast], area: Rect) {
                 Block::default()
                     .title("Status")
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Cyan)),
+                    .border_style(theme.foreground(Color::Cyan)),
             )
-            .style(Style::default().fg(Color::Gray));
+            .style(theme.foreground(Color::Gray));
 
         f.render_widget(Clear, toast_area);
         f.render_widget(widget, toast_area);
@@ -2446,6 +2595,397 @@ mod tests {
         ui.handle_terminal_event(key(KeyCode::Down, KeyModifiers::NONE))
             .unwrap();
         assert_eq!(ui.selected_message_id.as_deref(), Some("second"));
+    }
+
+    fn assert_monochrome_colors(buffer: &ratatui::buffer::Buffer, background: Color) {
+        for (y, row) in buffer
+            .content
+            .chunks(usize::from(buffer.area.width))
+            .enumerate()
+        {
+            let mut covered_columns = 0;
+            for (x, cell) in row.iter().enumerate() {
+                // Ratatui resets (and does not draw) cells covered by a wide emoji.
+                if covered_columns > 0 {
+                    covered_columns -= 1;
+                    continue;
+                }
+                assert_eq!(
+                    (cell.fg, cell.bg),
+                    (Color::Black, background),
+                    "cell ({x}, {y}) ({:?}) is not using the expected theme colors",
+                    cell.symbol(),
+                );
+                assert!(!cell.modifier.contains(Modifier::DIM));
+                covered_columns = Span::raw(cell.symbol()).width().saturating_sub(1);
+            }
+        }
+    }
+
+    #[test]
+    fn ctrl_t_opens_the_theme_picker_with_or_without_a_contact() {
+        for with_contact in [false, true] {
+            for shortcut in ['t', 'T'] {
+                let mut ui = ChatUI::new();
+                if with_contact {
+                    ui.set_active_contact("friend@example.com");
+                }
+
+                let command = ui
+                    .handle_terminal_event(key(KeyCode::Char(shortcut), KeyModifiers::CONTROL))
+                    .unwrap();
+
+                assert!(command.is_none());
+                assert_eq!(ui.theme, Theme::Dark);
+                let dialog = ui.theme_picker.as_ref().unwrap();
+                assert_eq!(dialog.original_theme, Theme::Dark);
+                assert_eq!(dialog.selected, 0);
+                assert!(ui.messages.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn theme_picker_previews_the_whole_screen_and_restores_dark_colors() {
+        let mut ui = chat_ui_with_messages();
+        ui.add_contact("friend@example.com");
+        ui.handle_terminal_event(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
+            .unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        terminal.draw(|frame| ui.draw(frame)).unwrap();
+        let dark_preview = terminal.backend().buffer().clone();
+
+        let command = ui
+            .handle_terminal_event(key(KeyCode::Down, KeyModifiers::NONE))
+            .unwrap();
+        assert!(command.is_none());
+        assert_eq!(ui.theme, Theme::Light);
+        assert!(ui.theme_picker.is_some());
+        terminal.draw(|frame| ui.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_monochrome_colors(buffer, Color::White);
+        let rendered = buffer
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Themes"));
+        assert!(rendered.contains("Dark"));
+        assert!(rendered.contains("> Light"));
+        assert!(rendered.contains("Sepia"));
+        assert!(buffer.content.iter().any(|cell| {
+            cell.symbol() == ">"
+                && cell
+                    .modifier
+                    .contains(Modifier::BOLD | Modifier::UNDERLINED)
+        }));
+        let light_preview = buffer.clone();
+
+        let command = ui
+            .handle_terminal_event(key(KeyCode::Down, KeyModifiers::NONE))
+            .unwrap();
+        assert!(command.is_none());
+        assert_eq!(ui.theme, Theme::Sepia);
+        terminal.draw(|frame| ui.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_monochrome_colors(buffer, Color::Indexed(230));
+        let rendered = buffer
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("> Sepia"));
+
+        let command = ui
+            .handle_terminal_event(key(KeyCode::Up, KeyModifiers::NONE))
+            .unwrap();
+        assert!(command.is_none());
+        assert_eq!(ui.theme, Theme::Light);
+        terminal.draw(|frame| ui.draw(frame)).unwrap();
+        assert_eq!(terminal.backend().buffer(), &light_preview);
+
+        let command = ui
+            .handle_terminal_event(key(KeyCode::Up, KeyModifiers::NONE))
+            .unwrap();
+        assert!(command.is_none());
+        assert_eq!(ui.theme, Theme::Dark);
+        terminal.draw(|frame| ui.draw(frame)).unwrap();
+        assert_eq!(terminal.backend().buffer(), &dark_preview);
+    }
+
+    #[test]
+    fn theme_picker_confirms_and_reopens_the_current_theme() {
+        for (selected, theme) in Theme::ALL.into_iter().enumerate() {
+            let mut ui = chat_ui_with_messages();
+            ui.input = Input::new("unsent draft".to_string());
+            ui.handle_terminal_event(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
+                .unwrap();
+            for _ in 0..selected {
+                ui.handle_terminal_event(key(KeyCode::Down, KeyModifiers::NONE))
+                    .unwrap();
+            }
+
+            let command = ui
+                .handle_terminal_event(key(KeyCode::Enter, KeyModifiers::NONE))
+                .unwrap();
+
+            assert!(matches!(
+                command,
+                Some(crate::commands::UiCommand::SetTheme { theme: selected_theme })
+                    if selected_theme == theme
+            ));
+            assert_eq!(ui.theme, theme);
+            assert!(ui.theme_picker.is_none());
+            assert_eq!(ui.input.value(), "unsent draft");
+            assert_eq!(ui.messages.len(), 2);
+
+            ui.handle_terminal_event(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
+                .unwrap();
+            let dialog = ui.theme_picker.as_ref().unwrap();
+            assert_eq!(dialog.original_theme, theme);
+            assert_eq!(dialog.selected, selected);
+        }
+    }
+
+    #[test]
+    fn escape_cancels_theme_preview_without_quitting() {
+        for original_theme in Theme::ALL {
+            let mut ui = chat_ui_with_messages();
+            ui.set_theme(original_theme);
+            ui.input = Input::new("unsent draft".to_string());
+            let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+            terminal.draw(|frame| ui.draw(frame)).unwrap();
+            let original_screen = terminal.backend().buffer().clone();
+            ui.handle_terminal_event(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
+                .unwrap();
+            let direction = match original_theme {
+                Theme::Dark => KeyCode::Down,
+                Theme::Light | Theme::Sepia => KeyCode::Up,
+            };
+            let command = ui
+                .handle_terminal_event(key(direction, KeyModifiers::NONE))
+                .unwrap();
+            assert!(command.is_none());
+            assert_ne!(ui.theme, original_theme);
+
+            let command = ui
+                .handle_terminal_event(key(KeyCode::Esc, KeyModifiers::NONE))
+                .unwrap();
+
+            assert!(command.is_none());
+            assert!(ui.theme_picker.is_none());
+            assert!(!ui.quit_confirmation);
+            assert_eq!(ui.theme, original_theme);
+            assert_eq!(ui.input.value(), "unsent draft");
+            terminal.draw(|frame| ui.draw(frame)).unwrap();
+            assert_eq!(terminal.backend().buffer(), &original_screen);
+        }
+    }
+
+    #[test]
+    fn restored_theme_is_used_on_the_first_frame() {
+        for (theme, background) in [
+            (Theme::Light, Color::White),
+            (Theme::Sepia, Color::Indexed(230)),
+        ] {
+            let mut ui = chat_ui_with_messages();
+            ui.set_theme(theme);
+            let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+
+            terminal.draw(|frame| ui.draw(frame)).unwrap();
+
+            assert_monochrome_colors(terminal.backend().buffer(), background);
+            ui.handle_terminal_event(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
+                .unwrap();
+            let dialog = ui.theme_picker.as_ref().unwrap();
+            assert_eq!(dialog.original_theme, theme);
+            assert_eq!(Theme::ALL[dialog.selected], theme);
+        }
+    }
+
+    #[test]
+    fn theme_picker_absorbs_unrelated_keys_and_clamps_navigation() {
+        let mut ui = chat_ui_with_messages();
+        ui.input = Input::new("unsent draft".to_string());
+        ui.active_tab = Tab::Contacts;
+        ui.selected_message_id = Some("first".to_string());
+        ui.handle_terminal_event(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
+            .unwrap();
+
+        for _ in 0..3 {
+            ui.handle_terminal_event(key(KeyCode::Up, KeyModifiers::NONE))
+                .unwrap();
+        }
+        assert_eq!(ui.theme_picker.as_ref().unwrap().selected, 0);
+        for _ in 0..3 {
+            ui.handle_terminal_event(key(KeyCode::Down, KeyModifiers::NONE))
+                .unwrap();
+        }
+        assert_eq!(ui.theme_picker.as_ref().unwrap().selected, 2);
+
+        for (code, modifiers) in [
+            (KeyCode::Char('x'), KeyModifiers::NONE),
+            (KeyCode::Tab, KeyModifiers::NONE),
+            (KeyCode::PageUp, KeyModifiers::NONE),
+            (KeyCode::Char('o'), KeyModifiers::CONTROL),
+            (KeyCode::Char('f'), KeyModifiers::CONTROL),
+            (KeyCode::Char('p'), KeyModifiers::CONTROL),
+            (KeyCode::Char('t'), KeyModifiers::CONTROL),
+        ] {
+            let command = ui.handle_terminal_event(key(code, modifiers)).unwrap();
+            assert!(command.is_none());
+        }
+        assert_eq!(ui.theme, Theme::Sepia);
+        assert_eq!(
+            ui.theme_picker.as_ref().unwrap().original_theme,
+            Theme::Dark
+        );
+        assert_eq!(ui.input.value(), "unsent draft");
+        assert_eq!(ui.messages.len(), 2);
+        assert!(ui.omemo_enabled);
+        assert!(matches!(ui.active_tab, Tab::Contacts));
+        assert_eq!(ui.selected_message_id.as_deref(), Some("first"));
+    }
+
+    #[test]
+    fn ctrl_c_quits_with_the_theme_picker_open() {
+        let mut ui = ChatUI::new();
+        ui.handle_terminal_event(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
+            .unwrap();
+
+        let command = ui
+            .handle_terminal_event(key(KeyCode::Char('c'), KeyModifiers::CONTROL))
+            .unwrap();
+
+        assert!(matches!(command, Some(crate::commands::UiCommand::Quit)));
+    }
+
+    fn assert_monochrome_theme_covers_ui(theme: Theme, background: Color) {
+        for popup in [
+            "none", "help", "add", "remove", "keys", "devices", "friend", "quit",
+        ] {
+            let mut ui = chat_ui_with_messages();
+            ui.theme = theme;
+            ui.add_contact("friend@example.com");
+            ui.add_message(Message::incoming_encrypted(
+                "link",
+                "friend@example.com",
+                "Visit https://example.com",
+            ));
+            ui.add_message(Message::system("me", "A system message"));
+            ui.selected_message_id = Some("link".to_string());
+            ui.show_toast("A background update");
+            ui.typing_states.insert(
+                "friend@example.com".to_string(),
+                (TypingStatus::Paused, chrono::Utc::now()),
+            );
+            match popup {
+                "help" => ui.show_help_dialog(),
+                "add" => ui.show_add_contact_dialog("example.com"),
+                "remove" => ui.show_contact_remove_dialog("friend@example.com"),
+                "keys" => ui.show_key_confirmation("friend@example.com", "ab:cd:ef", Some("123")),
+                "devices" => ui.show_device_fingerprints_dialog(
+                    "me@example.com".to_string(),
+                    vec![
+                        (
+                            "1".to_string(),
+                            "abcd".repeat(16),
+                            TrustLevel::Trusted,
+                            true,
+                        ),
+                        (
+                            "2".to_string(),
+                            "cdef".repeat(16),
+                            TrustLevel::Untrusted,
+                            false,
+                        ),
+                    ],
+                    Some("friend@example.com".to_string()),
+                    vec![("3".to_string(), "1234".repeat(16), TrustLevel::Undecided)],
+                ),
+                "friend" => ui.show_friend_request_notification("friend@example.com"),
+                "quit" => ui.quit_confirmation = true,
+                _ => {}
+            }
+            let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+            terminal.draw(|frame| ui.draw(frame)).unwrap();
+            assert_monochrome_colors(terminal.backend().buffer(), background);
+        }
+    }
+
+    #[test]
+    fn light_theme_covers_dialogs_toasts_links_and_message_selection() {
+        assert_monochrome_theme_covers_ui(Theme::Light, Color::White);
+    }
+
+    #[test]
+    fn sepia_theme_covers_dialogs_toasts_links_and_message_selection() {
+        assert_monochrome_theme_covers_ui(Theme::Sepia, Color::Indexed(230));
+    }
+
+    #[test]
+    fn sepia_uses_256_color_terminal_sequences() {
+        let mut ui = chat_ui_with_messages();
+        ui.theme = Theme::Sepia;
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        terminal.draw(|frame| ui.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let previous = ratatui::buffer::Buffer::empty(buffer.area);
+        let mut output = Vec::new();
+        let mut backend = CrosstermBackend::new(&mut output);
+
+        ratatui::backend::Backend::draw(&mut backend, previous.diff(buffer).into_iter()).unwrap();
+
+        let output = String::from_utf8(output).unwrap();
+        assert!(
+            !output.contains("48;2;"),
+            "Sepia must not require unsupported 24-bit RGB background colors",
+        );
+        if !crossterm::style::Colored::ansi_color_disabled_memoized() {
+            assert!(
+                output.contains("\x1b[38;5;0;48;5;230m"),
+                "Sepia must emit black text on a 256-color pale-yellow background",
+            );
+        }
+    }
+
+    #[test]
+    fn dark_theme_preserves_the_original_palette() {
+        assert_eq!(Theme::Dark.base_style(), Style::default());
+        for color in [
+            Color::Gray,
+            Color::DarkGray,
+            Color::Red,
+            Color::Green,
+            Color::Blue,
+            Color::Yellow,
+            Color::Cyan,
+            Color::Magenta,
+            Color::White,
+        ] {
+            assert_eq!(Theme::Dark.foreground(color), Style::default().fg(color));
+        }
+        assert_eq!(
+            Theme::Dark.focused_border_style(),
+            Style::default().fg(Color::Yellow),
+        );
+        assert_eq!(
+            Theme::Dark.selection_style(Color::DarkGray),
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        );
+    }
+
+    #[test]
+    fn theme_picker_fits_small_terminals() {
+        let mut ui = ChatUI::new();
+        ui.handle_terminal_event(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
+            .unwrap();
+        for (width, height) in [(1, 1), (20, 6), (46, 4), (46, 5)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|frame| ui.draw(frame)).unwrap();
+        }
     }
 
     #[test]

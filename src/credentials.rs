@@ -6,12 +6,23 @@ use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Theme {
+    #[default]
+    Dark,
+    Light,
+    Sepia,
+}
 
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct AppSettings {
     #[serde(default)]
     pub os_notifications_enabled: bool,
+    #[serde(default)]
+    pub theme: Theme,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -87,7 +98,10 @@ pub fn load_credentials() -> Result<Option<Credentials>> {
 }
 
 pub fn save_app_settings(settings: &AppSettings) -> Result<()> {
-    let config_path = get_settings_path()?;
+    save_app_settings_to_path(&get_settings_path()?, settings)
+}
+
+fn save_app_settings_to_path(config_path: &Path, settings: &AppSettings) -> Result<()> {
     let file = File::create(config_path)?;
     serde_json::to_writer_pretty(file, settings)?;
 
@@ -96,8 +110,10 @@ pub fn save_app_settings(settings: &AppSettings) -> Result<()> {
 }
 
 pub fn load_app_settings() -> Result<AppSettings> {
-    let config_path = get_settings_path()?;
+    load_app_settings_from_path(&get_settings_path()?)
+}
 
+fn load_app_settings_from_path(config_path: &Path) -> Result<AppSettings> {
     if !config_path.exists() {
         return Ok(AppSettings::default());
     }
@@ -123,4 +139,73 @@ fn get_config_path() -> Result<PathBuf> {
 
 fn get_settings_path() -> Result<PathBuf> {
     Ok(get_config_dir()?.join("settings.json"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_settings_use_the_default_theme() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = load_app_settings_from_path(&dir.path().join("settings.json")).unwrap();
+
+        assert_eq!(settings.theme, Theme::Dark);
+        assert!(!settings.os_notifications_enabled);
+    }
+
+    #[test]
+    fn legacy_settings_keep_notifications_and_default_to_dark() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        fs::write(&path, r#"{"os_notifications_enabled":true}"#).unwrap();
+
+        let settings = load_app_settings_from_path(&path).unwrap();
+
+        assert_eq!(settings.theme, Theme::Dark);
+        assert!(settings.os_notifications_enabled);
+    }
+
+    #[test]
+    fn settings_persist_every_theme_without_changing_notifications() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+
+        for (theme, name) in [
+            (Theme::Dark, "dark"),
+            (Theme::Light, "light"),
+            (Theme::Sepia, "sepia"),
+        ] {
+            let settings = AppSettings {
+                os_notifications_enabled: true,
+                theme,
+            };
+            save_app_settings_to_path(&path, &settings).unwrap();
+
+            let saved: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(saved["theme"], name);
+            let restored = load_app_settings_from_path(&path).unwrap();
+            assert_eq!(restored.theme, theme);
+            assert!(restored.os_notifications_enabled);
+        }
+    }
+
+    #[test]
+    fn saving_other_settings_preserves_the_theme() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let settings = AppSettings {
+            theme: Theme::Sepia,
+            ..AppSettings::default()
+        };
+        save_app_settings_to_path(&path, &settings).unwrap();
+        let mut settings = load_app_settings_from_path(&path).unwrap();
+        settings.os_notifications_enabled = true;
+        save_app_settings_to_path(&path, &settings).unwrap();
+
+        let restored = load_app_settings_from_path(&path).unwrap();
+        assert_eq!(restored.theme, Theme::Sepia);
+        assert!(restored.os_notifications_enabled);
+    }
 }
